@@ -27,7 +27,10 @@ end
 class RepoTest < Test::Case
   SERVER = Atom[PG::Testing::Server | String].new("not started")
 
+  # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
+  # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
+    DROP TABLE IF EXISTS members, notes;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
