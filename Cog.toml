@@ -1,0 +1,12 @@
+[cog]
+name = "rotor"
+version = "0.1.0"
+module = "Rotor"
+
+[dependencies]
+PG = { git = "https://github.com/quarz-lang/pg", branch = "main" }
+
+# While pg and rotor are developed together: a checkout of pg beside this
+# one (CI clones it there).
+[patch]
+PG = { path = "../quarz-pg" }
