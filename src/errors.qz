@@ -13,6 +13,19 @@ end
 class MissingAttributeError < Error
 end
 
+# A read of a column a query did not fetch: a model loaded for a
+# `select`, with the columns its block reads only.
+class NotLoadedError < Error
+end
+
+# `Rotor::Repo#one` found more than one row.
+class MultipleResultsError < Error
+end
+
+# `Rotor::Repo#one!` found no row.
+class NoResultsError < Error
+end
+
 # A block of a query that SQL cannot express: a call of a method the
 # translator does not know, or a construct it does not take. Raised when
 # the query is built (`where`, `order`, `select`, `update`), not when it

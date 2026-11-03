@@ -1,3 +1,6 @@
+# A model's values and assignments at a moment (`Rotor::Model#checkpoint`).
+data Checkpoint = (attrs: Hash[Symbol, Object?], changed: Array[Symbol], loaded: Array[Symbol]?)
+
 # The base class of a model: a row of a table, with typed accessors that
 # its `table` block generates when the program is compiled.
 #
@@ -36,6 +39,8 @@
 class Model
   var @attrs: Hash[Symbol, Object?] = {}
   var @changed: Array[Symbol] = []
+  # The columns loaded, when a query fetched only some (nil: all).
+  var @loaded: Array[Symbol]? = nil
 
   # A model with its columns' defaults.
   def initialize
@@ -67,7 +72,8 @@ class Model
     def_class_method(:primary_key) { key }
     doc "The associations, in order."
     def_class_method(:associations) { assocs }
-    info = TableInfo.new(table, cols, key)
+    stamps = schema.timestamp_columns
+    info = TableInfo.new(table, cols, key, stamps[0], stamps[1])
     doc "The table's name, columns and primary key."
     def_class_method(:table_info) { info }
     doc "The table's name, columns and primary key, as the class's `table_info`."
@@ -91,7 +97,10 @@ class Model
   def table_info -> TableInfo = raise SchemaError.new(Model.no_table_of(self.class.name))
 
   # Every row, as a query (`Rotor::Query`), to refine.
-  def self.query -> Query[Self] = Query[Self].new(table_info, self, [], [], nil, nil, nil, :rows)
+  def self.query -> Query[Self]
+    Query[Self].new(table_info, self, [], [], nil, false, nil, nil, Shape::Rows,
+                    ->(v: Hash[Symbol, Object?], all: Bool) { all ? load(v) : load_partial(v) })
+  end
 
   # `query.where`: the rows for which the block is true.
   def self.where(&cond: Quoted[shareable Self.() -> Bool]) -> Query[Self] = query.where(&cond)
@@ -142,6 +151,24 @@ class Model
     m
   end
 
+  # A model with only the given columns loaded (a `select` fetched
+  # them): reading another raises `Rotor::NotLoadedError`.
+  def self.load_partial(values: Hash[Symbol, Object?]) -> Self
+    m = new
+    m.load_values(values, partial: true)
+    m
+  end
+
+  # The value of column `name` (`nil` for one not set that admits it).
+  def read(name: Symbol) -> Object?
+    c = column_of(name)
+    c.null ? read_nullable(name) : read_attr(name)
+  end
+
+  # Sets column `name` to `value`, checked against its type, as its
+  # setter does.
+  def write(name: Symbol, value: Object?) -> Void = write_attr(name, value)
+
   # The model's values by column, those set only: a column without a
   # default that was never assigned is left out.
   def to_h -> Hash[Symbol, Object?] = @attrs
@@ -153,17 +180,37 @@ class Model
   # Whether a column was assigned since.
   def changed? -> Bool = !@changed.empty?
 
+  # Keeps only the assignments of `names` (after some were saved).
+  def keep_changes(names: Array[Symbol]) -> Void
+    @changed = @changed.select { |n| names.include?(n) }
+  end
+
   # Forgets the assignments: after the model was saved.
   def clear_changes -> Void
     @changed = []
   end
 
   # Sets the values as read from a row (`load`), all or none of them,
-  # and forgets the assignments.
-  def load_values(values: Hash[Symbol, Object?]) -> Void
+  # and forgets the assignments; `partial:` when they are only those a
+  # query fetched (`load_partial`).
+  def load_values(values: Hash[Symbol, Object?], *, partial: Bool = false) -> Void
     values.each_pair { |k, v| check_value(column_of(k), v) }
+    # (A partial row has no defaults: what it did not fetch is unknown.)
+    @attrs = {} if partial
     values.each_pair { |k, v| @attrs = @attrs.put(k, v) }
     @changed = []
+    @loaded = partial ? values.keys : nil
+  end
+
+  # The model's values and assignments as they are, for `restore`: what
+  # the repository puts back when a statement fails.
+  def checkpoint -> Checkpoint = Checkpoint.new(@attrs, @changed, @loaded)
+
+  # Puts back what `checkpoint` gave.
+  def restore(point: Checkpoint) -> Void
+    @attrs = point.attrs
+    @changed = point.changed
+    @loaded = point.loaded
   end
 
   def inspect -> String
@@ -174,13 +221,23 @@ class Model
 
 
   private def read_attr(name: Symbol) -> Object?
+    loaded!(name)
     unless @attrs.key?(name)
       raise MissingAttributeError.new("#{self.class.name}##{name} is not set")
     end
     @attrs[name]
   end
 
-  private def read_nullable(name: Symbol) -> Object? = @attrs[name]?
+  private def read_nullable(name: Symbol) -> Object?
+    loaded!(name)
+    @attrs[name]?
+  end
+
+  private def loaded!(name: Symbol) -> Void
+    if (l = @loaded) && !l.include?(name)
+      raise NotLoadedError.new("#{self.class.name}##{name} was not loaded: the query fetched #{l.map { |n| n.to_s }.join(", ")}")
+    end
+  end
 
   # (Checked again: a subclass with a `table` of its own still has its
   # superclass's setters, for columns it may not have, or not of the
@@ -188,6 +245,9 @@ class Model
   private def write_attr(name: Symbol, value: Object?) -> Void
     check_value(column_of(name), value)
     @attrs = @attrs.put(name, value)
+    if (l = @loaded) && !l.include?(name)
+      @loaded = l + [name]
+    end
     @changed = @changed + [name] unless @changed.include?(name)
   end
 

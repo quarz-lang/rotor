@@ -1,0 +1,136 @@
+# What a repository runs its statements through: a database and its
+# driver. `Rotor::Adapters::PG` is PostgreSQL's, over pg.
+abstract class Adapter
+  # Runs `sql` with `params` (`$1`...): its rows, or what it changed.
+  abstract def query(sql: String, params: Array[Object?]) -> Rows
+
+  # Runs the block in a transaction, given an adapter bound to it:
+  # committed when the block returns, rolled back when it raises.
+  abstract def transaction(&: (Adapter) -> Object?) -> Object?
+end
+
+# The rows a statement gave, and how many it changed.
+abstract class Rows
+  # The columns' names, in order.
+  abstract def columns -> Array[String]
+  # The rows.
+  abstract def rows -> Array[Row]
+  # The count the server reported with the statement: the rows an
+  # INSERT, UPDATE or DELETE changed, or a SELECT gave (nil for a
+  # statement without one).
+  abstract def affected -> Int?
+end
+
+# A row's values, read by column index with the column's type: nil for
+# NULL.
+abstract class Row
+  abstract def int?(i: Int) -> Int?
+  abstract def float?(i: Int) -> Float?
+  abstract def string?(i: Int) -> String?
+  abstract def bool?(i: Int) -> Bool?
+  abstract def time?(i: Int) -> Time?
+  abstract def bytes?(i: Int) -> Bytes?
+
+  # The `i`-th value, which may not be NULL.
+  def int(i: Int) -> Int = int?(i) || null(i)
+  # :ditto:
+  def float(i: Int) -> Float = float?(i) || null(i)
+  # :ditto:
+  def string(i: Int) -> String = string?(i) || null(i)
+  # :ditto:
+  def bool(i: Int) -> Bool
+    v = bool?(i)
+    v.nil? ? null(i) : v
+  end
+  # :ditto:
+  def time(i: Int) -> Time = time?(i) || null(i)
+  # :ditto:
+  def bytes(i: Int) -> Bytes = bytes?(i) || null(i)
+
+  # The value of `i` as `type` wants it (`Int`, `Float`, `String`,
+  # `Bool`, `Time` or `Bytes`).
+  def value(i: Int, type: Type[Object]) -> Object?
+    if type == Int
+      int?(i)
+    elsif type == Float
+      float?(i)
+    elsif type == String
+      string?(i)
+    elsif type == Bool
+      bool?(i)
+    elsif type == Time
+      # (In UTC, as the repository writes them.)
+      t = time?(i)
+      t ? t.utc : nil
+    elsif type == Bytes
+      bytes?(i)
+    else
+      raise ArgumentError.new("no column type #{type.name}")
+    end
+  end
+
+  private def null(i: Int) -> Nothing = raise ArgumentError.new("column #{i} is NULL")
+end
+
+module Adapters
+  # PostgreSQL, through pg: over a pool (each statement takes a
+  # connection; a transaction keeps one) or one connection.
+  class PG < Adapter
+    @pool: ::PG::Pool?
+    @conn: ::PG::Connection?
+
+    # Over a pool.
+    def initialize(*, pool: ::PG::Pool)
+      @pool = pool
+      @conn = nil
+    end
+
+    # Over one connection.
+    def initialize(*, connection: ::PG::Connection)
+      @pool = nil
+      @conn = connection
+    end
+
+    def query(sql: String, params: Array[Object?]) -> Rows
+      result = if c = @conn
+                 c.query(sql, params)
+               else
+                 @pool.as(::PG::Pool).query(sql, params)
+               end
+      PGRows.new(result)
+    end
+
+    def transaction(&: (Adapter) -> Object?) -> Object?
+      if c = @conn
+        c.transaction { |t| yield PG.new(connection: t) }
+      else
+        @pool.as(::PG::Pool).transaction { |t| yield PG.new(connection: t) }
+      end
+    end
+  end
+
+  # pg's result as `Rotor::Rows`.
+  class PGRows < Rows
+    @result: ::PG::Result
+
+    def initialize(@result: ::PG::Result); end
+
+    def columns -> Array[String] = @result.column_names
+    def rows -> Array[Row] = @result.rows.map { |r| PGRow.new(r).as(Row) }
+    def affected -> Int? = @result.affected
+  end
+
+  # pg's row as a `Rotor::Row`, through its typed readers.
+  class PGRow < Row
+    @row: ::PG::Row
+
+    def initialize(@row: ::PG::Row); end
+
+    def int?(i: Int) -> Int? = @row.int?(i)
+    def float?(i: Int) -> Float? = @row.float?(i)
+    def string?(i: Int) -> String? = @row.string?(i)
+    def bool?(i: Int) -> Bool? = @row.bool?(i)
+    def time?(i: Int) -> Time? = @row.time?(i)
+    def bytes?(i: Int) -> Bytes? = @row.bytes?(i)
+  end
+end

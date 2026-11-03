@@ -12,7 +12,7 @@ Quarz blocks that are translated to SQL. It runs on PostgreSQL through
 Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 ```
 
-Work in progress. What exists: the schema, and queries and statements as values (`to_sql`); running them comes next.
+Work in progress. What exists: the schema, queries and statements as values (`to_sql`), and a repository that runs them on PostgreSQL.
 
 ```ruby
 class User < Rotor::Model
@@ -95,7 +95,7 @@ q.to_sql
 
 User.where { |u| ids.include?(u.id) }        # "id" IN ($1, $2, ...)
 User.where { name.start_with?(prefix) }      # "name" LIKE $1, the prefix escaped
-User.select { Summary.new(id, name) }        # Query[Summary]: SELECT "id", "name"
+User.select { Summary.new(id, name) }        # Query[Summary]: fetches "id", "name"
 User.where { admin }.count                   # Query[Int]: SELECT count(*) ...
 User.where { admin }.exists                  # Query[Bool]: SELECT EXISTS (...)
 User.where { age < 13 }.delete               # Statement: DELETE FROM ...
@@ -142,3 +142,55 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `where` of three conditions with an order and a limit, compiled
   (59 µs interpreted). Queries are not `Shareable` yet (their captured
   values are `Object`s), so one cannot be a constant.
+- `select`'s block is evaluated in Quarz, not in SQL: the query fetches
+  the columns the block reads (every column when it calls another
+  method of the row or passes it on), and each row, loaded with those
+  only, gives the block's value. Reading a column it did not fetch
+  raises `Rotor::NotLoadedError`. Counting is `count`, a query's shape.
+
+## Running them: `Rotor::Repo`
+
+```ruby
+PG::Pool.open("postgres://app@localhost/shop") do |pool|
+  repo = Rotor::Repo.new(pool: pool)       # or connection: a PG::Connection
+  u = User.new
+  u.name = "Ann"
+  repo.insert(u)                           # key, defaults and timestamps loaded back
+  repo.all(User.where { age >= 18 })       # Array[User]
+  repo.one(User.where { email == e })      # User?; MultipleResultsError for more
+  repo.one!(q); repo.first(q); repo.get(User, 1)
+  repo.count(q); repo.exists?(q)
+  u.age = 31
+  repo.update(u)                           # the changed columns, and updated_at
+  repo.touch(u)                            # updated_at alone
+  repo.delete(u)                           # Bool
+  repo.delete_all(q); repo.update_all(q) { {age: age + 1} }   # Int
+  repo.transaction { |tx| tx.insert(other) }                  # a Repo on the transaction
+  repo.exec("VACUUM members")                                 # rows changed
+  repo.query(User, "SELECT * FROM users WHERE age > $1", [18])  # Array[User]
+  repo.query("SELECT id, name FROM users") { |r| Summary.new(r.int(0), r.string(1)) }
+end
+```
+
+- `run(statement)` gives the rows changed and `run(query)` the rows;
+  the others are conveniences over them.
+- Values are decoded by the columns' types through pg's readers, times
+  in UTC.
+- Timestamps are set by the repository, never by SQL: `insert` sets
+  `created_at` (unless the model has one) and `updated_at` to now in
+  UTC, to the microsecond (what PostgreSQL keeps, so a value read back
+  equals the one written); `update` sets `updated_at` only when a
+  column changed, and runs no UPDATE when none did; `touch` writes it
+  alone. `update_all` and raw SQL set none.
+- A statement that fails leaves the model as it was (its values and
+  assignments). An `update` of a row that no longer exists changes
+  nothing and is not reported, for now. Transactions do not nest.
+- `Rotor::Adapter` (`query`, `transaction`) is the boundary to the
+  database; `Rotor::Adapters::PG` is pg's, over a pool or a connection.
+
+## Tests
+
+`quarz test` (and `--release`, `--doc`). The repository's tests run on
+PostgreSQL through pg's `PG::Testing`: `PG_TEST_URL` when it is set,
+else a throwaway cluster where PostgreSQL's server programs are
+installed; with neither they are omitted.
