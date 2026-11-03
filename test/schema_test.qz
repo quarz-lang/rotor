@@ -38,23 +38,23 @@ class SchemaTest < Test::Case
 
   def test_associations
     s = Rotor::Schema.new("BlogPost")
-    s.belongs_to(:author, class_name: "User", foreign_key: :user_id, null: true)
-    s.belongs_to(:category)
-    s.has_many(:comments)
-    s.has_many(:tags, class_name: "Label", foreign_key: :post_id)
+    s.belongs_to(User, name: :author, foreign_key: :user_id, null: true)
+    s.belongs_to(Account)
+    s.has_many(Post)
+    s.has_many(Category, name: :tags, foreign_key: :post_id)
     assert_equal(
       [
         Rotor::Column.new(:user_id, "bigint", Int, true, false, nil),
-        Rotor::Column.new(:category_id, "bigint", Int, false, false, nil),
+        Rotor::Column.new(:account_id, "bigint", Int, false, false, nil),
       ],
       s.columns
     )
     assert_equal(
       [
-        Rotor::Association.new(:belongs_to, :author, "User", :user_id),
-        Rotor::Association.new(:belongs_to, :category, "Category", :category_id),
-        Rotor::Association.new(:has_many, :comments, "Comment", :blog_post_id),
-        Rotor::Association.new(:has_many, :tags, "Label", :post_id),
+        Rotor::Association.new(:belongs_to, :author, User, :user_id),
+        Rotor::Association.new(:belongs_to, :account, Account, :account_id),
+        Rotor::Association.new(:has_many, :posts, Post, :blog_post_id),
+        Rotor::Association.new(:has_many, :tags, Category, :post_id),
       ],
       s.associations
     )
@@ -69,11 +69,19 @@ class SchemaTest < Test::Case
     assert_equal("Item declares a second primary key, `key`", e.message)
     e = assert_raise(ArgumentError) { schema.column(:id, Int, primary: true, null: true) }
     assert_equal("Item's primary key `id` cannot be NULL", e.message)
-    s.has_many(:posts)
-    e = assert_raise(ArgumentError) { s.has_many(:posts) }
+    s.has_many(Post)
+    e = assert_raise(ArgumentError) { s.has_many(Post) }
     assert_equal("Item declares the association `posts` twice", e.message)
-    e = assert_raise(ArgumentError) { s.belongs_to(:posts) }
+    e = assert_raise(ArgumentError) { s.belongs_to(Post, name: :posts) }
     assert_equal("Item declares the association `posts` twice", e.message)
+    assert_equal([:id], s.columns.map { |c| c.name })
+    # A failed `belongs_to` declares nothing.
+    s.column(:user_id, Int)
+    e = assert_raise(ArgumentError) { s.belongs_to(User) }
+    assert_equal("Item declares the column `user_id` twice", e.message)
+    assert_equal([:posts], s.associations.map { |a| a.name })
+    e = assert_raise(ArgumentError) { s.has_many(Rotor::Model) }
+    assert_equal("Item's association `models` names Rotor::Model itself: name a model class", e.message)
     e = assert_raise(ArgumentError) { s.column(:to_h, String) }
     assert_equal("Item's column `to_h` would replace the model's own `to_h`", e.message)
   end

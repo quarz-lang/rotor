@@ -1,5 +1,6 @@
-# The English inflections the schema uses for its default names: a table
-# is its model's name in snake_case, plural (BlogPost's is `blog_posts`),
+# English inflections. The schema's default names come from
+# `underscore` and `pluralize`: a table is its model's name in
+# snake_case, plural (BlogPost's is `blog_posts`),
 # and a foreign key the owner's in snake_case with `_id`. The rules are
 # few on purpose; write the name when they guess wrong.
 module Inflector
@@ -51,8 +52,7 @@ module Inflector
   # The singular of a plural in snake_case, by its last letters:
   # `-ies` makes `-y`, `-uses`, `-sses`, `-xes`, `-zes`, `-ches` and
   # `-shes` drop `-es`, and another `-s` (not `-ss`) is dropped. Words
-  # these rules miss (`movies`, `aliases`) need their name written
-  # (`class_name:`).
+  # these rules miss (`movies`, `aliases`) come out wrong.
   #
   # ```
   # Rotor::Inflector.singularize("categories") # => "category"

@@ -66,29 +66,61 @@ class Schema
     end
   end
 
-  # The model belongs to another: the column `<name>_id` (an `Int`, or
-  # `foreign_key:`) holds the other's key. The other model is
-  # `class_name:`, by default the name in CamelCase.
-  def belongs_to(name: Symbol, *, class_name: String? = nil, foreign_key: Symbol? = nil, null: Bool = false) -> Void
-    if @associations.any? { |a| a.name == name }
-      raise ArgumentError.new("#{@model} declares the association `#{name}` twice")
-    end
-    key = foreign_key || "#{name}_id".to_sym
+  # The model belongs to `target`: the column `<name>_id` (an `Int`, or
+  # `foreign_key:`) holds the target's key. The association's name is
+  # the target's in snake_case (`belongs_to Account`: `account`, and
+  # the column `account_id`), or `name:`.
+  def belongs_to[T <: Model](target: Type[T], *, name: Symbol? = nil, foreign_key: Symbol? = nil, null: Bool = false) -> Void
+    n = name || Inflector.underscore(target.name).to_sym
+    key = foreign_key || "#{n}_id".to_sym
+    check_association(n, target)
     add(key, "bigint", Int, null, nil, false)
-    @associations = @associations + [Association.new(:belongs_to, name, class_name || Inflector.camelize(name.to_s), key)]
+    associate(:belongs_to, n, target, key)
   end
 
-  # The model has many of another, whose `foreign_key:` column (by
-  # default this model's name in snake_case with `_id`) holds this one's
-  # key. The other model is `class_name:`, by default the name in
-  # CamelCase, singular.
-  def has_many(name: Symbol, *, class_name: String? = nil, foreign_key: Symbol? = nil) -> Void
+  # The model has many of `target`, whose `foreign_key:` column (by
+  # default this model's name in snake_case with `_id`) holds this
+  # one's key. The association's name is the target's in snake_case,
+  # plural (`has_many Post` in a model User: `posts`, through
+  # `user_id`), or `name:`.
+  #
+  # ```
+  # class DocAuthor < Rotor::Model
+  #   table do
+  #     column :id, Int, primary: true
+  #     has_many DocBook
+  #   end
+  # end
+  #
+  # class DocBook < Rotor::Model
+  #   table do
+  #     column :id, Int, primary: true
+  #     belongs_to DocAuthor
+  #   end
+  # end
+  #
+  # DocAuthor.associations[0].name         # => :doc_books
+  # DocAuthor.associations[0].foreign_key  # => :doc_author_id
+  # DocBook.columns.map { |c| c.name }     # => [:id, :doc_author_id]
+  # ```
+  def has_many[T <: Model](target: Type[T], *, name: Symbol? = nil, foreign_key: Symbol? = nil) -> Void
+    n = name || Inflector.pluralize(Inflector.underscore(target.name)).to_sym
+    key = foreign_key || "#{Inflector.underscore(@model)}_id".to_sym
+    check_association(n, target)
+    associate(:has_many, n, target, key)
+  end
+
+  private def check_association(name: Symbol, target: Type[Model]) -> Void
+    if target == Model
+      raise ArgumentError.new("#{@model}'s association `#{name}` names Rotor::Model itself: name a model class")
+    end
     if @associations.any? { |a| a.name == name }
       raise ArgumentError.new("#{@model} declares the association `#{name}` twice")
     end
-    key = foreign_key || "#{Inflector.underscore(@model)}_id".to_sym
-    other = class_name || Inflector.camelize(Inflector.singularize(name.to_s))
-    @associations = @associations + [Association.new(:has_many, name, other, key)]
+  end
+
+  private def associate(kind: Symbol, name: Symbol, target: Type[Model], key: Symbol) -> Void
+    @associations = @associations + [Association.new(kind, name, target, key)]
   end
 
   # The methods of `Rotor::Model` that a column's getter would replace.

@@ -22,8 +22,8 @@ class User < Rotor::Model
     column :email, String, null: true   # its getter returns String?
     column :age, Int, default: 0
     timestamps                          # created_at, updated_at: Time
-    belongs_to :account                 # account_id: Int
-    has_many :posts                     # Post's user_id
+    belongs_to Account                  # account_id: Int
+    has_many Post                       # posts, through Post's user_id
   end
 end
 
@@ -50,9 +50,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   columns' defaults; reading a column that has none and was never set
   raises `Rotor::MissingAttributeError` (a `null: true` one reads nil).
   `load(values)` checks each value against its column's type.
-- `belongs_to` and `has_many` declare the association and, for
-  `belongs_to`, its key column; the queries that follow them come with
-  the queries.
+- `belongs_to Account` and `has_many Post` take the associated model's
+  class (compile-time code cannot turn a name into one), and declare
+  the association (`account`, `posts`; or `name:`) and, for
+  `belongs_to`, its key column (`account_id`; or `foreign_key:`, as for
+  `has_many`'s key in the other table, by default `user_id` from this
+  model's name). Two models may name each other, in one file or two.
+  A target without a `table` block compiles, and raises
+  `Rotor::SchemaError` when its metadata is read; a generic target's
+  type arguments are not kept.
+  The queries that follow them come with the queries.
 - A subclass of a model shares its table, unless it has a `table`
   block of its own: then its columns are its own, and a setter it
   inherits for a column it does not have, or with another type, raises

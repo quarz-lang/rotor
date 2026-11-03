@@ -1,0 +1,8 @@
+# Models for model_test.qz's associations across files: `Shelf` here has
+# many `Book`, declared there, which belongs to `Shelf`.
+class Shelf < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many Book
+  end
+end

@@ -1,4 +1,5 @@
 require "test"
+require_relative "models/library"
 
 class User < Rotor::Model
   table "users" do
@@ -11,8 +12,22 @@ class User < Rotor::Model
     column :avatar, Bytes, null: true
     column :born, Time, null: true
     timestamps
-    belongs_to :account
-    has_many :posts
+    belongs_to Account
+    has_many Post
+  end
+end
+
+class Account < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many User
+  end
+end
+
+class Post < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to User
   end
 end
 
@@ -21,7 +36,7 @@ class BlogPost < Rotor::Model
     column :id, Int, primary: true
     column :title, String, default: "untitled"
     timestamps updated_at: false, created_at: :posted_at
-    belongs_to :author, class_name: "User", foreign_key: :user_id, null: true
+    belongs_to User, name: :author, foreign_key: :user_id, null: true
   end
 end
 
@@ -32,6 +47,13 @@ class Category < Rotor::Model
 end
 
 class Bare < Rotor::Model
+end
+
+class Book < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Shelf
+  end
 end
 
 class Admin < User
@@ -98,8 +120,8 @@ class ModelTest < Test::Case
     assert_nil(User.find_column(:nope))
     assert_equal(
       [
-        Rotor::Association.new(:belongs_to, :account, "Account", :account_id),
-        Rotor::Association.new(:has_many, :posts, "Post", :user_id),
+        Rotor::Association.new(:belongs_to, :account, Account, :account_id),
+        Rotor::Association.new(:has_many, :posts, Post, :user_id),
       ],
       User.associations
     )
@@ -110,7 +132,7 @@ class ModelTest < Test::Case
     assert_equal("categories", Category.table_name)
     assert_nil(Category.primary_key)
     assert_equal([:id, :title, :posted_at, :user_id], BlogPost.columns.map { |c| c.name })
-    assert_equal(Rotor::Association.new(:belongs_to, :author, "User", :user_id), BlogPost.associations[0])
+    assert_equal(Rotor::Association.new(:belongs_to, :author, User, :user_id), BlogPost.associations[0])
     p = BlogPost.new
     assert_equal("untitled", p.title)
     assert_nil(p.user_id)
@@ -130,6 +152,21 @@ class ModelTest < Test::Case
     assert_equal("User#name takes String, not Int", e.message)
     e = assert_raise(ArgumentError) { User.load({name: nil}) }
     assert_equal("User#name cannot be nil", e.message)
+  end
+
+  def test_associations_both_ways
+    # In one file: `User has_many Post`, `Post belongs_to User`.
+    assert_equal([Rotor::Association.new(:belongs_to, :user, User, :user_id)], Post.associations)
+    assert_equal([Rotor::Association.new(:has_many, :users, User, :account_id)], Account.associations)
+    assert_equal([:id, :user_id], Post.columns.map { |c| c.name })
+    # Across two files (models/library.qz): `Shelf has_many Book` there,
+    # `Book belongs_to Shelf` here, each naming the other's class.
+    assert_equal([Rotor::Association.new(:has_many, :books, Book, :shelf_id)], Shelf.associations)
+    assert_equal([Rotor::Association.new(:belongs_to, :shelf, Shelf, :shelf_id)], Book.associations)
+    b = Book.new
+    b.shelf_id = 3
+    assert_equal(3, b.shelf_id)
+    assert(Book.associations[0].target == Shelf)
   end
 
   def test_a_subclass_with_a_table_of_its_own
