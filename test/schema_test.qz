@@ -1,0 +1,97 @@
+require "test"
+
+class SchemaTest < Test::Case
+  def schema -> Rotor::Schema = Rotor::Schema.new("Item")
+
+  def test_columns_in_order
+    s = schema
+    s.column(:id, Int, primary: true)
+    s.column(:price, Float, default: 1.5)
+    s.column(:note, String, null: true)
+    s.column(:ok, Bool)
+    s.column(:at, Time)
+    s.column(:blob, Bytes, null: true)
+    assert_equal(
+      [
+        Rotor::Column.new(:id, "bigint", Int, false, true, nil),
+        Rotor::Column.new(:price, "double precision", Float, false, false, 1.5),
+        Rotor::Column.new(:note, "text", String, true, false, nil),
+        Rotor::Column.new(:ok, "boolean", Bool, false, false, nil),
+        Rotor::Column.new(:at, "timestamptz", Time, false, false, nil),
+        Rotor::Column.new(:blob, "bytea", Bytes, true, false, nil),
+      ],
+      s.columns
+    )
+  end
+
+  def test_timestamps
+    s = schema
+    s.timestamps
+    assert_equal([:created_at, :updated_at], s.columns.map { |c| c.name })
+    assert(s.columns.all? { |c| c.type == Time && !c.null && c.sql == "timestamptz" })
+    s = schema
+    s.timestamps(created_at: :made_at, updated_at: false)
+    assert_equal([:made_at], s.columns.map { |c| c.name })
+    e = assert_raise(ArgumentError) { schema.timestamps(created_at: true) }
+    assert_equal("`timestamps` takes a column's name or false", e.message)
+  end
+
+  def test_associations
+    s = Rotor::Schema.new("BlogPost")
+    s.belongs_to(:author, class_name: "User", foreign_key: :user_id, null: true)
+    s.belongs_to(:category)
+    s.has_many(:comments)
+    s.has_many(:tags, class_name: "Label", foreign_key: :post_id)
+    assert_equal(
+      [
+        Rotor::Column.new(:user_id, "bigint", Int, true, false, nil),
+        Rotor::Column.new(:category_id, "bigint", Int, false, false, nil),
+      ],
+      s.columns
+    )
+    assert_equal(
+      [
+        Rotor::Association.new(:belongs_to, :author, "User", :user_id),
+        Rotor::Association.new(:belongs_to, :category, "Category", :category_id),
+        Rotor::Association.new(:has_many, :comments, "Comment", :blog_post_id),
+        Rotor::Association.new(:has_many, :tags, "Label", :post_id),
+      ],
+      s.associations
+    )
+  end
+
+  def test_refusals
+    s = schema
+    s.column(:id, Int, primary: true)
+    e = assert_raise(ArgumentError) { s.column(:id, String) }
+    assert_equal("Item declares the column `id` twice", e.message)
+    e = assert_raise(ArgumentError) { s.column(:key, String, primary: true) }
+    assert_equal("Item declares a second primary key, `key`", e.message)
+    e = assert_raise(ArgumentError) { schema.column(:id, Int, primary: true, null: true) }
+    assert_equal("Item's primary key `id` cannot be NULL", e.message)
+    s.has_many(:posts)
+    e = assert_raise(ArgumentError) { s.has_many(:posts) }
+    assert_equal("Item declares the association `posts` twice", e.message)
+    e = assert_raise(ArgumentError) { s.belongs_to(:posts) }
+    assert_equal("Item declares the association `posts` twice", e.message)
+    e = assert_raise(ArgumentError) { s.column(:to_h, String) }
+    assert_equal("Item's column `to_h` would replace the model's own `to_h`", e.message)
+  end
+end
+
+class InflectorTest < Test::Case
+  def test_names
+    assert_equal("user", Rotor::Inflector.underscore("User"))
+    assert_equal("blog_post", Rotor::Inflector.underscore("BlogPost"))
+    assert_equal("http_log", Rotor::Inflector.underscore("Admin::HTTPLog"))
+    assert_equal("users", Rotor::Inflector.pluralize("user"))
+    assert_equal("boxes", Rotor::Inflector.pluralize("box"))
+    assert_equal("days", Rotor::Inflector.pluralize("day"))
+    assert_equal("box", Rotor::Inflector.singularize("boxes"))
+    assert_equal("address", Rotor::Inflector.singularize("addresses"))
+    assert_equal("status", Rotor::Inflector.singularize("statuses"))
+    assert_equal("category", Rotor::Inflector.singularize("categories"))
+    assert_equal("class", Rotor::Inflector.singularize("class"))
+    assert_equal("Comment", Rotor::Inflector.camelize("comment"))
+  end
+end

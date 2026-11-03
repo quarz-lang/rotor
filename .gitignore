@@ -1,2 +1,4 @@
 /.quarz/
 /doc/
+# A library: its users resolve their own (docs/10 §3).
+/Cog.lock

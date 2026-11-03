@@ -1,0 +1,14 @@
+# The root of every error this cog raises: `rescue Rotor::Error` catches
+# them all. (An argument a method cannot take is an `ArgumentError`, as
+# anywhere.)
+class Error < StandardError
+end
+
+# A model used without a schema: its class body has no `table` block.
+class SchemaError < Error
+end
+
+# A read of a column that is not set: one without a default that admits
+# no `nil`, on a model made with `new`, or loaded without it.
+class MissingAttributeError < Error
+end
