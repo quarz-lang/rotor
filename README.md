@@ -12,7 +12,7 @@ Quarz blocks that are translated to SQL. It runs on PostgreSQL through
 Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 ```
 
-Work in progress. What exists: the schema.
+Work in progress. What exists: the schema, and queries and statements as values (`to_sql`); running them comes next.
 
 ```ruby
 class User < Rotor::Model
@@ -80,3 +80,65 @@ one `table` statement sees them all.
 
 Models are mutable, so they are not `Shareable`: a task that needs one
 loads its own.
+
+## Queries and statements
+
+A query is a value, built from blocks that are never run: each is
+received as its tree (Quarz's `Quoted`, docs/14 §6) and translated to
+SQL when the query is built, with the values it captured as parameters.
+
+```ruby
+min = 18
+q = User.where { age >= min && !email.nil? }.order { name }.desc.limit(10)
+q.to_sql
+# => ["SELECT \"id\", ... FROM \"users\" WHERE \"age\" >= $1 AND NOT \"email\" IS NULL ORDER BY \"name\" DESC LIMIT 10", [18]]
+
+User.where { |u| ids.include?(u.id) }        # "id" IN ($1, $2, ...)
+User.where { name.start_with?(prefix) }      # "name" LIKE $1, the prefix escaped
+User.select { Summary.new(id, name) }        # Query[Summary]: SELECT "id", "name"
+User.where { admin }.count                   # Query[Int]: SELECT count(*) ...
+User.where { admin }.exists                  # Query[Bool]: SELECT EXISTS (...)
+User.where { age < 13 }.delete               # Statement: DELETE FROM ...
+User.where { admin }.update { {age: age + 1, name: "x"} }   # UPDATE ... SET
+Rotor::Statement.insert(u).returning(:id)
+Rotor::Statement.update(u)                    # the changed columns, nil for none
+Rotor::Statement.delete(u)                    # by the primary key (refused once it was assigned)
+```
+
+- The row is the block's receiver (`where { age > 18 }`) or its
+  parameter (`where { |u| u.age > 18 }`, the form `for` comprehensions
+  use). A block that names nothing of the row (`where { true }`) fits
+  both and does not compile: write `where { |u| true }`.
+- What translates: the columns' getters; `== != < <= > >=`, `+ - * / %`
+  (`+` of strings is `||`) on numbers, strings, booleans and times;
+  `&&`, `||`, `!`; `nil?`; `if`/`?:` (`CASE WHEN`); `include?` on a
+  captured or literal array (an `IN` list, `FALSE` when empty; one
+  parameter per item, within PostgreSQL's 65535); `String#start_with?`,
+  `end_with?` and `include?` of a string value (`LIKE`, escaped);
+  `Rotor::SQL.like`, `ilike`, `lower` and `upper`; literals and
+  captured values. Anything else raises `Rotor::UntranslatableError`
+  when the query is built, naming the method and where it is.
+- `==` and `!=` keep Quarz's meaning of nil. Against a value they are
+  decided by the value: `IS NULL` for nil, `=` otherwise (which an
+  index serves), so a query's SQL can differ by what it captured (pg's
+  statement cache prepares each text once); `!=` of a nullable column
+  and a value is `IS DISTINCT FROM`, which counts nil as different.
+  Between two columns, one of which admits NULL, they are `IS [NOT]
+  DISTINCT FROM`; `include?` finds nil with `IS NULL`. What SQL does
+  not keep: `!` over a comparison of a nullable column (`!(email ==
+  "x")` leaves the nil rows out, where Quarz takes them), and a
+  comparison's value in `select`, NULL where Quarz has false.
+- `Int#/` floors and `Int#%` takes the divisor's sign, as in Quarz
+  (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`).
+- An `include?` list is one parameter per item, and PostgreSQL takes at
+  most 65535 in a statement (not checked when the query is built). When
+  pg encodes arrays, it becomes `= ANY($1)`.
+- A nullable column's getter returns `T?`, which `<` does not take (a
+  block cannot narrow a getter's result): such a column is compared
+  with `==`, `!=` and `nil?` only, for now.
+- Identifiers are always quoted. The SQL is PostgreSQL's
+  (`Rotor::Dialect`), the one dialect for now.
+- A query is translated each time it is built: about 26 µs for a
+  `where` of three conditions with an order and a limit, compiled
+  (59 µs interpreted). Queries are not `Shareable` yet (their captured
+  values are `Object`s), so one cannot be a constant.

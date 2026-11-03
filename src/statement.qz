@@ -1,0 +1,118 @@
+# A statement that changes rows, as a value: what a repository runs.
+# `to_sql` gives its SQL and parameters; `returning` asks for columns
+# of the rows it changed.
+#
+# ```
+# class SUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     column :name, String
+#   end
+# end
+#
+# u = SUser.load({id: 7, name: "Ann"})
+# u.name = "Bob"
+# Rotor::Statement.update(u)&.to_sql  # => ["UPDATE \"users\" SET \"name\" = $1 WHERE \"id\" = $2", ["Bob", 7]]
+# Rotor::Statement.delete(u).to_sql  # => ["DELETE FROM \"users\" WHERE \"id\" = $1", [7]]
+# ```
+class Statement
+  @table: TableInfo
+  @pieces: Array[Piece]
+  @returning: Array[Symbol]?
+
+  # (Made by the methods below and by `Rotor::Query`.)
+  def initialize(@table: TableInfo, @pieces: Array[Piece], @returning: Array[Symbol]?)
+  end
+
+  # The insertion of `model`'s row, with the columns it has values for
+  # (`DEFAULT VALUES` when none).
+  def self.insert(model: Model) -> Statement
+    t = model.table_info
+    values = model.to_h
+    cols = t.columns.select { |c| values.key?(c.name) }
+    if cols.empty?
+      return Statement.new(t, [Piece::Text.new("INSERT INTO #{Dialect.quote(t.name)} DEFAULT VALUES")], nil)
+    end
+    pieces: Array[Piece] = [Piece::Text.new("INSERT INTO #{Dialect.quote(t.name)} (#{cols.map { |c| Dialect.quote(c.name.to_s) }.join(", ")}) VALUES (")]
+    cols.each_with_index do |c, i|
+      pieces = pieces + [Piece::Text.new(", ")] if i > 0
+      pieces = pieces + [Piece::Param.new(values[c.name])]
+    end
+    Statement.new(t, pieces + [Piece::Text.new(")")], nil)
+  end
+
+  # The update of `model`'s row, by its primary key, with the columns
+  # assigned since it was loaded or saved (`Rotor::Model#changed`), or nil
+  # when there are none.
+  def self.update(model: Model) -> Statement?
+    t = model.table_info
+    changed = model.changed
+    return nil if changed.empty?
+    values = model.to_h
+    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(t.name)} SET ")]
+    changed.each_with_index do |name, i|
+      pieces = pieces + [Piece::Text.new(", ")] if i > 0
+      pieces = pieces + [Piece::Text.new("#{Dialect.quote(name.to_s)} = "), Piece::Param.new(values[name]?)]
+    end
+    Statement.new(t, pieces + by_key(model), nil)
+  end
+
+  # The deletion of `model`'s row, by its primary key.
+  def self.delete(model: Model) -> Statement
+    t = model.table_info
+    Statement.new(t, [Piece::Text.new("DELETE FROM #{Dialect.quote(t.name)}")] + by_key(model), nil)
+  end
+
+  # The statement, returning the given columns of the rows it changes
+  # (all of them when none are named).
+  def returning(*names: Symbol) -> Statement
+    names.each do |n|
+      unless @table.columns.any? { |c| c.name == n }
+        raise ArgumentError.new("`#{@table.name}` has no column `#{n}`")
+      end
+    end
+    Statement.new(@table, @pieces, names.empty? ? @table.columns.map { |c| c.name } : names)
+  end
+
+  # The columns `returning` asked for, or nil.
+  def returned -> Array[Symbol]? = @returning
+
+  # The SQL statement and its parameters.
+  def to_sql -> [String, Array[Object?]]
+    names = @returning
+    tail: Array[Piece] = []
+    tail = [Piece::Text.new(" RETURNING #{names.map { |n| Dialect.quote(n.to_s) }.join(", ")}")] if names
+    Statement.render(@pieces + tail)
+  end
+
+  def inspect -> String = "#<Rotor::Statement #{to_sql[0]}>"
+
+  def to_s -> String = inspect
+
+  # The text of `pieces`, its parameters numbered in order, and their
+  # values.
+  def self.render(pieces: Array[Piece]) -> [String, Array[Object?]]
+    params: Array[Object?] = []
+    text = String.build do |b|
+      pieces.each do |p|
+        case p
+        in Piece::Text(s) then b << s
+        in Piece::Param(v)
+          params = params + [v]
+          b << Dialect.param(params.size)
+        end
+      end
+    end
+    [text, params]
+  end
+
+  private def self.by_key(model: Model) -> Array[Piece]
+    t = model.table_info
+    key = t.primary_key || raise ArgumentError.new("`#{t.name}` has no primary key")
+    if model.changed.include?(key)
+      raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
+    end
+    v = model.to_h[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
+    [Piece::Text.new(" WHERE #{Dialect.quote(key.to_s)} = "), Piece::Param.new(v)]
+  end
+end

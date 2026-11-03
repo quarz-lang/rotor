@@ -1,0 +1,60 @@
+# SQL functions a query's block may call, which the translator knows by
+# name: `Rotor::SQL.like(name, "A%")` is `"name" LIKE $1`. Called
+# outside a query they compute the same (a `like` pattern's `%` and `_`,
+# case folding), so a block keeps its meaning wherever it runs.
+module SQL
+  # Whether `s` matches the LIKE `pattern`: `%` any run of characters,
+  # `_` one, `\` escaping the next.
+  #
+  # ```
+  # Rotor::SQL.like("Ann", "A%")  # => true
+  # Rotor::SQL.like("Ann", "a%")  # => false
+  # ```
+  def self.like(s: String, pattern: String) -> Bool = Regexp.new("\\A#{like_regexp(pattern)}\\z", "m").match?(s)
+
+  # `like` with case folded: SQL's ILIKE.
+  def self.ilike(s: String, pattern: String) -> Bool = like(s.downcase, pattern.downcase)
+
+  # `s` in lower case: SQL's `lower`.
+  def self.lower(s: String) -> String = s.downcase
+
+  # `s` in upper case: SQL's `upper`.
+  def self.upper(s: String) -> String = s.upcase
+
+  # The escaped LIKE pattern that matches `s` itself.
+  #
+  # ```
+  # Rotor::SQL.escape_like("50%_off")  # => "50\\%\\_off"
+  # ```
+  def self.escape_like(s: String) -> String = s.gsub("\\", "\\\\\\\\").gsub("%", "\\%").gsub("_", "\\_")
+
+  private def self.like_regexp(pattern: String) -> String
+    String.build do |b|
+      escaped = false
+      pattern.each_char do |c|
+        if escaped
+          b << Regexp.escape(c)
+          escaped = false
+        elsif c == "\\"
+          escaped = true
+        elsif c == "%"
+          b << ".*"
+        elsif c == "_"
+          b << "."
+        else
+          b << Regexp.escape(c)
+        end
+      end
+    end
+  end
+end
+
+# What is PostgreSQL's in the SQL rotor writes: quoting, parameters.
+# (The one dialect for now.)
+module Dialect
+  # An identifier, double-quoted: `"user"`, with `"` doubled.
+  def self.quote(name: String) -> String = "\"#{name.gsub("\"", "\"\"")}\""
+
+  # The `n`-th parameter (from 1): `$n`.
+  def self.param(n: Int) -> String = "$#{n}"
+end
