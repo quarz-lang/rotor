@@ -12,3 +12,10 @@ end
 # no `nil`, on a model made with `new`, or loaded without it.
 class MissingAttributeError < Error
 end
+
+# A block of a query that SQL cannot express: a call of a method the
+# translator does not know, or a construct it does not take. Raised when
+# the query is built (`where`, `order`, `select`, `update`), not when it
+# runs, naming what it met and where.
+class UntranslatableError < Error
+end

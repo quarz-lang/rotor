@@ -1,0 +1,308 @@
+# What a model's table is, for the statements made from its values.
+data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?)
+
+# A query over a model's table, as a value: what `Rotor::Model.where`
+# and the others build, and a repository runs. Each method gives a new
+# query; none changes the one it is called on. Its blocks are not run:
+# they are translated to SQL when the query is built, so that a block
+# SQL cannot express raises `Rotor::UntranslatableError` there, and
+# `to_sql` gives the statement and its parameters.
+#
+# ```
+# class QUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     column :name, String
+#     column :age, Int
+#   end
+# end
+#
+# min = 18
+# q = QUser.where { age >= min }.order { name }.limit(10)
+# q.to_sql  # => ["SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE \"age\" >= $1 ORDER BY \"name\" LIMIT 10", [18]]
+# ```
+#
+# `T` is what a row gives: the model, or what `select` projects.
+class Query[T]
+  @table: TableInfo
+  @model: Type[Object]
+  @wheres: Array[Sql]
+  @orders: Array[[Sql, Bool]]
+  # The projection of `select`, or nil for the model's columns.
+  @projection: Array[Sql]?
+  @limit: Int?
+  @offset: Int?
+  # `:rows`, `:count` or `:exists`.
+  @shape: Symbol
+
+  # (Made by `Rotor::Model.query` and the methods of this class.)
+  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projection: Array[Sql]?, @limit: Int?, @offset: Int?, @shape: Symbol)
+  end
+
+  # The rows for which the block is true. The row is the block's
+  # receiver (`where { age > 18 }`) or its parameter (`where { |u|
+  # u.age > 18 }`, which `for` comprehensions use); a block that names
+  # nothing of the row (`where { true }`) is ambiguous between the two:
+  # write `where { |u| true }`.
+  def where(&cond: Quoted[shareable T.() -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+
+  # :ditto:
+  def where(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+
+  # `where`, by the name `for` comprehensions call.
+  def filter(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+
+  # Ordered by the block's value, ascending, after the orders given before.
+  def order(&key: Quoted[shareable T.() -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file)
+
+  # :ditto:
+  def order(&key: Quoted[shareable (T) -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file)
+
+  # The last order descending.
+  def desc -> Query[T]
+    last = @orders.last? || raise ArgumentError.new("`desc` without an `order` before it")
+    copy(orders: @orders[0...(@orders.size - 1)] + [[last[0], true]])
+  end
+
+  # At most `n` rows.
+  def limit(n: Int) -> Query[T]
+    unshaped!("limit")
+    raise ArgumentError.new("a negative limit: #{n}") if n < 0
+    copy(limit: n)
+  end
+
+  # The rows after the first `n`.
+  def offset(n: Int) -> Query[T]
+    unshaped!("offset")
+    raise ArgumentError.new("a negative offset: #{n}") if n < 0
+    copy(offset: n)
+  end
+
+  # The first row: `limit(1)`.
+  def first -> Query[T] = limit(1)
+
+  # The block's value for each row: a column (`select { name }`), an
+  # expression, or a `data` value made of them (`select { Summary.new(id,
+  # name) }`), whose fields take the values in order.
+  def select[R](&f: Quoted[shareable T.() -> R]) -> Query[R] = project(f.expr, f.captures, f.file)
+
+  # :ditto:
+  def select[R](&f: Quoted[shareable (T) -> R]) -> Query[R] = project(f.expr, f.captures, f.file)
+
+  # `select`, by the name `for` comprehensions call.
+  def map[R](&f: Quoted[shareable (T) -> R]) -> Query[R] = project(f.expr, f.captures, f.file)
+
+  # The number of rows: `SELECT count(*)`.
+  def count -> Query[Int]
+    unshaped!("count")
+    Query[Int].new(@table, @model, @wheres, @orders, @projection, @limit, @offset, :count)
+  end
+
+  # Whether there is a row: `SELECT EXISTS (...)`.
+  def exists -> Query[Bool]
+    unshaped!("exists")
+    Query[Bool].new(@table, @model, @wheres, @orders, @projection, @limit, @offset, :exists)
+  end
+
+  # The rows' deletion: `DELETE ... WHERE` with the query's conditions
+  # (a query with an order, a limit, an offset or a projection cannot
+  # say which rows).
+  def delete -> Statement
+    plain!("delete")
+    Statement.new(@table, [Piece::Text.new("DELETE FROM #{Dialect.quote(@table.name)}")] + where_pieces, nil)
+  end
+
+  # The rows' update: the block gives a hash literal of columns and their
+  # new values, expressions of the row as in `where` (`update { {age:
+  # age + 1, name: "x"} }`).
+  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file)
+
+  # :ditto:
+  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file)
+
+  # The SQL statement and its parameters.
+  def to_sql -> [String, Array[Object?]] = Statement.render(pieces)
+
+  def inspect -> String = "#<Rotor::Query #{to_sql[0]}>"
+
+  def to_s -> String = inspect
+
+  # The statement's pieces.
+  def pieces -> Array[Piece]
+    table = [Piece::Text.new(" FROM #{Dialect.quote(@table.name)}")]
+    case @shape
+    in :count
+      if @limit || @offset
+        [Piece::Text.new("SELECT count(*) FROM (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(") AS \"q\"")]
+      else
+        [Piece::Text.new("SELECT count(*)")] + table + where_pieces
+      end
+    in :exists
+      [Piece::Text.new("SELECT EXISTS (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(")")]
+    else
+      [Piece::Text.new("SELECT ")] + select_list + table + where_pieces + order_pieces + window
+    end
+  end
+
+  private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
+    Query[T].new(@table, @model, wheres, orders, @projection, limit, offset, @shape)
+  end
+
+  private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
+    Translator.of(@model, @table.columns, expr, captures, file)
+  end
+
+  private def add_where(expr: Meta::Expr, captures: Array[Object], file: String) -> Query[T]
+    rows!("where")
+    t, e = translator(expr, captures, file)
+    copy(wheres: @wheres + [t.sql(e)])
+  end
+
+  private def add_order(expr: Meta::Expr, captures: Array[Object], file: String) -> Query[T]
+    rows!("order")
+    t, e = translator(expr, captures, file)
+    key = t.sql(e)
+    # (`ORDER BY 1` would be the first column.)
+    t.untranslatable("an order by a constant", line_of(e)) if key.known
+    copy(orders: @orders + [[key, false]])
+  end
+
+  private def project[R](expr: Meta::Expr, captures: Array[Object], file: String) -> Query[R]
+    rows!("select")
+    t, e = translator(expr, captures, file)
+    list = case e
+           in Meta::Expr::Call(Meta::Expr::Lit(_, _), m, args, nil, l) if m.singleton && m.name == :new
+             t.untranslatable("a projection of no column", l) if args.empty?
+             args.map { |a| t.sql(a) }
+           else
+             [t.sql(e)]
+           end
+    Query[R].new(@table, @model, @wheres, @orders, list, @limit, @offset, @shape)
+  end
+
+  private def update_set(expr: Meta::Expr, captures: Array[Object], file: String) -> Statement
+    plain!("update")
+    t, e = translator(expr, captures, file)
+    pairs = case e
+            in Meta::Expr::HashLit(ps, _) then ps
+            in _ then t.untranslatable("an `update` block that is not a hash literal", line_of(e))
+            end
+    t.untranslatable("an `update` of no column", line_of(e)) if pairs.empty?
+    sets: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(@table.name)} SET ")]
+    seen: Array[Symbol] = []
+    pairs.each_with_index do |pair, i|
+      key, value = pair
+      name = case key
+             in Meta::Expr::Lit(Symbol => s, _) then s
+             else t.untranslatable("an `update` key that is not a symbol", line_of(key))
+             end
+      c = @table.columns.find { |x| x.name == name } ||
+        raise ArgumentError.new("#{@model.name} has no column `#{name}` (#{file}:#{line_of(key)})")
+      if seen.include?(name)
+        raise ArgumentError.new("an `update` of `#{name}` twice (#{file}:#{line_of(key)})")
+      end
+      seen = seen + [name]
+      v = t.sql(value)
+      if v.known
+        x = v.value
+        if x.nil?
+          raise ArgumentError.new("#{@model.name}##{name} cannot be nil (#{file}:#{line_of(value)})") unless c.null
+        elsif c.type == Float && x.is_a?(Int)
+          v = Sql.new([Piece::Param.new(x.as(Int).to_f)], Translator::ATOM, nil, x.as(Int).to_f, true)
+        elsif !x.is_a?(c.type)
+          raise ArgumentError.new("#{@model.name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{line_of(value)})")
+        end
+      end
+      sets = sets + [Piece::Text.new(", ")] if i > 0
+      sets = sets + [Piece::Text.new("#{Dialect.quote(name.to_s)} = ")] + v.pieces
+    end
+    Statement.new(@table, sets + where_pieces, nil)
+  end
+
+  private def line_of(e: Meta::Expr) -> Int
+    case e
+    in Meta::Expr::Lit(_, l) then l
+    in Meta::Expr::Capture(_, _, l) then l
+    in Meta::Expr::Arg(_, _, l) then l
+    in Meta::Expr::SelfRef(_, l) then l
+    in Meta::Expr::Call(_, _, _, _, l) then l
+    in Meta::Expr::And(_, _, l) then l
+    in Meta::Expr::Or(_, _, l) then l
+    in Meta::Expr::Not(_, l) then l
+    in Meta::Expr::If(_, _, _, l) then l
+    in Meta::Expr::ArrayLit(_, l) then l
+    in Meta::Expr::HashLit(_, l) then l
+    in Meta::Expr::Interp(_, l) then l
+    in Meta::Expr::Block(_, _, l) then l
+    end
+  end
+
+  # (Conditions and orders are of the model's rows: before a projection,
+  # a count or an exists.)
+  private def rows!(what: String) -> Void
+    if @projection || @shape != :rows
+      raise ArgumentError.new("`#{what}` after `select`, `count` or `exists`: write it before")
+    end
+  end
+
+  # (A count or an exists is one row: nothing to window.)
+  private def unshaped!(what: String) -> Void
+    if @shape != :rows
+      raise ArgumentError.new("`#{what}` after `count` or `exists`: write it before")
+    end
+  end
+
+  private def plain!(what: String) -> Void
+    if !@orders.empty? || @limit || @offset || @projection || @shape != :rows
+      raise ArgumentError.new("`#{what}` of a query with an order, a limit, an offset or a projection: only its conditions say which rows")
+    end
+  end
+
+  private def select_list -> Array[Piece]
+    list = @projection
+    out: Array[Piece] = []
+    if list
+      list.each_with_index do |s, i|
+        out = out + [Piece::Text.new(", ")] if i > 0
+        out = out + s.pieces
+      end
+    else
+      out = [Piece::Text.new(@table.columns.map { |c| Dialect.quote(c.name.to_s) }.join(", "))]
+    end
+    out
+  end
+
+  private def where_pieces -> Array[Piece]
+    out: Array[Piece] = []
+    return out if @wheres.empty?
+    out = [Piece::Text.new(" WHERE ")]
+    @wheres.each_with_index do |w, i|
+      out = out + [Piece::Text.new(" AND ")] if i > 0
+      out = out + (@wheres.size > 1 && w.prec < Translator::AND + 1 ? [Piece::Text.new("(")] + w.pieces + [Piece::Text.new(")")] : w.pieces)
+    end
+    out
+  end
+
+  private def order_pieces -> Array[Piece]
+    out: Array[Piece] = []
+    return out if @orders.empty?
+    out = [Piece::Text.new(" ORDER BY ")]
+    @orders.each_with_index do |o, i|
+      out = out + [Piece::Text.new(", ")] if i > 0
+      out = out + o[0].pieces
+      out = out + [Piece::Text.new(" DESC")] if o[1]
+    end
+    out
+  end
+
+  private def window -> Array[Piece]
+    out: Array[Piece] = []
+    if n = @limit
+      out = out + [Piece::Text.new(" LIMIT #{n}")]
+    end
+    if n = @offset
+      out = out + [Piece::Text.new(" OFFSET #{n}")]
+    end
+    out
+  end
+end

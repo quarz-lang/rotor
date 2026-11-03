@@ -1,0 +1,168 @@
+require "test"
+
+data Summary = (id: Int, name: String)
+
+class Person < Rotor::Model
+  table "people" do
+    column :id, Int, primary: true
+    column :name, String
+    column :email, String, null: true
+    column :age, Int
+    column :score, Float
+    column :admin, Bool
+    column :born, Time, null: true
+    column :joined, Time
+  end
+end
+
+class QueryTest < Test::Case
+  COLS = "SELECT \"id\", \"name\", \"email\", \"age\", \"score\", \"admin\", \"born\", \"joined\" FROM \"people\""
+
+  def check[T](q: Rotor::Query[T], text: String, params: Array[Object?]) -> Void
+    assert_equal([text, params], q.to_sql)
+  end
+
+  def test_all
+    check(Person.query, COLS, [])
+  end
+
+  def test_comparisons
+    min = 18
+    check(Person.where { age > 18 }, "#{COLS} WHERE \"age\" > 18", [])
+    check(Person.where { age >= min }, "#{COLS} WHERE \"age\" >= $1", [18])
+    check(Person.where { |p| p.age < min && p.name == "Ann" }, "#{COLS} WHERE \"age\" < $1 AND \"name\" = $2", [18, "Ann"])
+    check(Person.where { name != "x" || admin }, "#{COLS} WHERE \"name\" <> $1 OR \"admin\"", ["x"])
+    check(Person.where { !admin }, "#{COLS} WHERE NOT \"admin\"", [])
+    check(Person.where { score <= 1.5 }, "#{COLS} WHERE \"score\" <= $1", [1.5])
+    check(Person.where { score > min }, "#{COLS} WHERE \"score\" > $1", [18.0])
+    check(Person.where { admin == true }, "#{COLS} WHERE \"admin\" = TRUE", [])
+  end
+
+  def test_precedence
+    check(
+      Person.where { (age > 1 || age < 0) && admin },
+      "#{COLS} WHERE (\"age\" > 1 OR \"age\" < 0) AND \"admin\"", []
+    )
+    check(Person.where { !(admin && age > 1) }, "#{COLS} WHERE NOT (\"admin\" AND \"age\" > 1)", [])
+    check(Person.where { age + 1 > age * 2 - 3 }, "#{COLS} WHERE \"age\" + 1 > \"age\" * 2 - 3", [])
+    check(Person.where { (age + 1) * 2 == 4 }, "#{COLS} WHERE (\"age\" + 1) * 2 = 4", [])
+    # Quarz's `Int#/` floors and its `%` takes the divisor's sign.
+    check(Person.where { age / 2 == 1 }, "#{COLS} WHERE floor(\"age\"::numeric / 2)::bigint = 1", [])
+    check(Person.where { age % 3 == 1 }, "#{COLS} WHERE (\"age\" % 3 + 3) % 3 = 1", [])
+    check(Person.where { score / 2.0 > 1.0 }, "#{COLS} WHERE \"score\" / $1 > $2", [2.0, 1.0])
+    check(Person.where { name + "!" == "a!" }, "#{COLS} WHERE \"name\" || $1 = $2", ["!", "a!"])
+    # Two `where`s are joined with AND; an OR is parenthesized there.
+    check(
+      Person.where { admin || age > 1 }.where { name == "x" },
+      "#{COLS} WHERE (\"admin\" OR \"age\" > 1) AND \"name\" = $1", ["x"]
+    )
+  end
+
+  def test_nil
+    e: String? = nil
+    f: String? = "a@b"
+    check(Person.where { email.nil? }, "#{COLS} WHERE \"email\" IS NULL", [])
+    check(Person.where { email == nil }, "#{COLS} WHERE \"email\" IS NULL", [])
+    check(Person.where { email != nil }, "#{COLS} WHERE \"email\" IS NOT NULL", [])
+    # By the value captured: the text differs.
+    check(Person.where { email == e }, "#{COLS} WHERE \"email\" IS NULL", [])
+    check(Person.where { email == f }, "#{COLS} WHERE \"email\" = $1", ["a@b"])
+    check(Person.where { email != e }, "#{COLS} WHERE \"email\" IS NOT NULL", [])
+    # `!=` of a nullable column and a value: nil differs from it.
+    check(Person.where { email != f }, "#{COLS} WHERE \"email\" IS DISTINCT FROM $1", ["a@b"])
+    check(Person.where { name != "x" }, "#{COLS} WHERE \"name\" <> $1", ["x"])
+    some = [nil, "a"]
+    check(Person.where { some.include?(email) }, "#{COLS} WHERE \"email\" IN ($1) OR \"email\" IS NULL", ["a"])
+    only_nil: Array[String?] = [nil]
+    check(Person.where { only_nil.include?(email) }, "#{COLS} WHERE \"email\" IS NULL", [])
+    # Two columns, one nullable: Quarz's `==` takes nil for equal to nil.
+    check(Person.where { email == name }, "#{COLS} WHERE \"email\" IS NOT DISTINCT FROM \"name\"", [])
+    check(Person.where { email != name }, "#{COLS} WHERE \"email\" IS DISTINCT FROM \"name\"", [])
+    check(Person.where { name == name }, "#{COLS} WHERE \"name\" = \"name\"", [])
+  end
+
+  def test_in_list_and_like
+    ids = [1, 2, 3]
+    none: Array[Int] = []
+    check(Person.where { ids.include?(id) }, "#{COLS} WHERE \"id\" IN ($1, $2, $3)", [1, 2, 3])
+    check(Person.where { [4, 5].include?(id) }, "#{COLS} WHERE \"id\" IN (4, 5)", [])
+    check(Person.where { none.include?(id) }, "#{COLS} WHERE FALSE", [])
+    check(Person.where { !none.include?(id) }, "#{COLS} WHERE NOT FALSE", [])
+    check(Person.where { name.start_with?("A_") }, "#{COLS} WHERE \"name\" LIKE $1", ["A\\_%"])
+    check(Person.where { name.end_with?("%") }, "#{COLS} WHERE \"name\" LIKE $1", ["%\\%"])
+    check(Person.where { name.start_with?("a\\") }, "#{COLS} WHERE \"name\" LIKE $1", ["a\\\\%"])
+    assert(Rotor::SQL.like("a\\b", Rotor::SQL.escape_like("a\\b")))
+    assert(!Rotor::SQL.like("a%b", Rotor::SQL.escape_like("a\\b")))
+    w = "nn"
+    check(Person.where { name.include?(w) }, "#{COLS} WHERE \"name\" LIKE $1", ["%nn%"])
+    check(Person.where { Rotor::SQL.like(name, "A%") }, "#{COLS} WHERE \"name\" LIKE $1", ["A%"])
+    check(Person.where { Rotor::SQL.ilike(name, "a%") }, "#{COLS} WHERE \"name\" ILIKE $1", ["a%"])
+    check(Person.where { Rotor::SQL.lower(name) == "ann" }, "#{COLS} WHERE lower(\"name\") = $1", ["ann"])
+    check(Person.where { Rotor::SQL.upper(name) == "ANN" }, "#{COLS} WHERE upper(\"name\") = $1", ["ANN"])
+  end
+
+  def test_if_and_time
+    t = Time.utc(2026, 1, 2, 3, 4, 5)
+    check(Person.where { born.nil? || joined < t }, "#{COLS} WHERE \"born\" IS NULL OR \"joined\" < $1", [t])
+    check(Person.where { (admin ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN \"admin\" THEN 1 ELSE 0 END = 1", [])
+  end
+
+  def test_order_limit_offset
+    check(Person.order { name }, "#{COLS} ORDER BY \"name\"", [])
+    check(Person.order { name }.desc.order { |p| p.id }, "#{COLS} ORDER BY \"name\" DESC, \"id\"", [])
+    check(Person.where { admin }.order { age }.limit(10).offset(20), "#{COLS} WHERE \"admin\" ORDER BY \"age\" LIMIT 10 OFFSET 20", [])
+    check(Person.first, "#{COLS} LIMIT 1", [])
+    check(Person.query.offset(5), "#{COLS} OFFSET 5", [])
+    e = assert_raise(ArgumentError) { Person.query.desc }
+    assert_equal("`desc` without an `order` before it", e.message)
+    e = assert_raise(ArgumentError) { Person.limit(-1) }
+    assert_equal("a negative limit: -1", e.message)
+  end
+
+  def test_select
+    check(Person.select { name }, "SELECT \"name\" FROM \"people\"", [])
+    check(Person.select { |p| p.age + 1 }.limit(2), "SELECT \"age\" + 1 FROM \"people\" LIMIT 2", [])
+    check(Person.where { admin }.select { Summary.new(id, name) }, "SELECT \"id\", \"name\" FROM \"people\" WHERE \"admin\"", [])
+    check(Person.query.map { |p| p.id }, "SELECT \"id\" FROM \"people\"", [])
+    e = assert_raise(ArgumentError) { Person.select { name }.where { |n| n == "x" } }
+    assert_equal("`where` after `select`, `count` or `exists`: write it before", e.message)
+  end
+
+  def test_count_and_exists
+    check(Person.count, "SELECT count(*) FROM \"people\"", [])
+    check(Person.where { age > 1 }.order { name }.count, "SELECT count(*) FROM \"people\" WHERE \"age\" > 1", [])
+    check(Person.query.limit(5).count, "SELECT count(*) FROM (SELECT 1 FROM \"people\" LIMIT 5) AS \"q\"", [])
+    check(Person.where { admin }.exists, "SELECT EXISTS (SELECT 1 FROM \"people\" WHERE \"admin\")", [])
+    e = assert_raise(ArgumentError) { Person.count.offset(1) }
+    assert_equal("`offset` after `count` or `exists`: write it before", e.message)
+  end
+
+  def test_immutable
+    q = Person.where { admin }
+    q2 = q.where { age > 1 }
+    check(q, "#{COLS} WHERE \"admin\"", [])
+    check(q2, "#{COLS} WHERE \"admin\" AND \"age\" > 1", [])
+  end
+
+  def test_untranslatable
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name.size > 3 } }
+    assert_match(/\A`String#size` cannot be translated to SQL \(.*query_test\.qz:\d+\)\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { "#{name}!" == "x" } }
+    assert_match(/\Aan interpolated string cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { [1].any? { |x| x == age } } }
+    assert_match(/\Athe block given to `Enumerable#any\?` cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| p == p } }
+    assert_match(/\Athe parameter `p` by itself cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name * 2 == "aa" } }
+    assert_match(/\A`String#\*` cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { score % 2.0 > 1.0 } }
+    assert_match(/\A`Float#%` cannot be translated to SQL/, e.message)
+    d = 3.seconds
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| d > d } }
+    assert_match(/\Aa value of class Duration cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.order { |p| 1 } }
+    assert_match(/\Aan order by a constant cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name.start_with?(name) } }
+    assert_match(/\A`String#start_with\?` of something other than a string value cannot be translated to SQL/, e.message)
+  end
+end

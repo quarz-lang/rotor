@@ -1,0 +1,91 @@
+require "test"
+
+class Item < Rotor::Model
+  table "items" do
+    column :id, Int, primary: true
+    column :name, String
+    column :price, Float, default: 1.0
+    column :note, String, null: true
+    column :qty, Int, default: 0
+  end
+end
+
+class Log < Rotor::Model
+  table "logs" do
+    column :text, String
+  end
+end
+
+class StatementTest < Test::Case
+  def check(s: Rotor::Statement, text: String, params: Array[Object?]) -> Void
+    assert_equal([text, params], s.to_sql)
+  end
+
+  def test_insert
+    i = Item.new
+    i.name = "pen"
+    check(Rotor::Statement.insert(i), "INSERT INTO \"items\" (\"name\", \"price\", \"qty\") VALUES ($1, $2, $3)", ["pen", 1.0, 0])
+    i.note = nil
+    check(
+      Rotor::Statement.insert(i).returning(:id),
+      "INSERT INTO \"items\" (\"name\", \"price\", \"note\", \"qty\") VALUES ($1, $2, $3, $4) RETURNING \"id\"", ["pen", 1.0, nil, 0]
+    )
+    check(
+      Rotor::Statement.insert(i).returning,
+      "INSERT INTO \"items\" (\"name\", \"price\", \"note\", \"qty\") VALUES ($1, $2, $3, $4) RETURNING \"id\", \"name\", \"price\", \"note\", \"qty\"", ["pen", 1.0, nil, 0]
+    )
+    check(Rotor::Statement.insert(Log.new), "INSERT INTO \"logs\" DEFAULT VALUES", [])
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).returning(:nope) }
+    assert_equal("`items` has no column `nope`", e.message)
+  end
+
+  def test_update_and_delete_of_a_model
+    i = Item.load({id: 3, name: "pen", price: 2.0, qty: 1})
+    assert_nil(Rotor::Statement.update(i))
+    i.qty = 2
+    i.note = "x"
+    s = Rotor::Statement.update(i)
+    assert(s)
+    check(s.as(Rotor::Statement), "UPDATE \"items\" SET \"qty\" = $1, \"note\" = $2 WHERE \"id\" = $3", [2, "x", 3])
+    check(Rotor::Statement.delete(i), "DELETE FROM \"items\" WHERE \"id\" = $1", [3])
+    l = Log.new
+    l.text = "t"
+    e = assert_raise(ArgumentError) { Rotor::Statement.delete(l) }
+    assert_equal("`logs` has no primary key", e.message)
+    n = Item.new
+    e2 = assert_raise(Rotor::MissingAttributeError) { Rotor::Statement.delete(n) }
+    assert_equal("Item#id is not set", e2.message)
+    i.id = 8
+    e = assert_raise(ArgumentError) { Rotor::Statement.update(i) }
+    assert_equal("Item#id, the primary key, was assigned: the row it named is not known", e.message)
+  end
+
+  def test_query_delete
+    check(Item.query.delete, "DELETE FROM \"items\"", [])
+    check(Item.where { qty == 0 && note.nil? }.delete, "DELETE FROM \"items\" WHERE \"qty\" = 0 AND \"note\" IS NULL", [])
+    check(Item.where { qty == 0 }.delete.returning(:id), "DELETE FROM \"items\" WHERE \"qty\" = 0 RETURNING \"id\"", [])
+    e = assert_raise(ArgumentError) { Item.order { name }.delete }
+    assert_equal("`delete` of a query with an order, a limit, an offset or a projection: only its conditions say which rows", e.message)
+    e = assert_raise(ArgumentError) { Item.query.limit(1).delete }
+    assert_match(/\A`delete` of a query with/, e.message)
+  end
+
+  def test_query_update
+    n = "new"
+    check(
+      Item.where { qty > 0 }.update { {qty: qty + 1, name: n} },
+      "UPDATE \"items\" SET \"qty\" = \"qty\" + 1, \"name\" = $1 WHERE \"qty\" > 0", ["new"]
+    )
+    check(Item.query.update { |i| {price: 3, note: nil} }, "UPDATE \"items\" SET \"price\" = $1, \"note\" = NULL", [3.0])
+    e = assert_raise(ArgumentError) { Item.query.update { |i| {nope: 1} } }
+    assert_match(/\AItem has no column `nope` \(.*statement_test\.qz:\d+\)\z/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { |i| {name: nil} } }
+    assert_match(/\AItem#name cannot be nil/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { |i| {name: 1} } }
+    assert_match(/\AItem#name takes String, not Int/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { |i| {qty: 1, qty: 2} } }
+    assert_match(/\Aan `update` of `qty` twice/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.limit(1).update { |i| {qty: 1} } }
+    assert_match(/\A`update` of a query with/, e.message)
+  end
+end

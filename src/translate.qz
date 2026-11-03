@@ -1,0 +1,310 @@
+# A piece of SQL: text, or the value of a parameter, numbered (`$n`)
+# when the statement is put together.
+enum Piece
+  variant Text(text: String)
+  variant Param(value: Object?)
+end
+
+# A translated expression: its pieces, its precedence (to parenthesize it
+# where it is an operand), and what the translator knows of it: the
+# column it is, or the value it has (`known`) when it is a literal or a
+# capture.
+data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Object?, known: Bool)
+
+# Translates the tree of a query's block (`Meta::Expr`, Quarz's docs/14
+# §6) to SQL, with the values its captures had when the query was built.
+# The block's row is its receiver (`where { age > 18 }`) or its
+# parameter (`where { |u| u.age > 18 }`); a call of a column's getter on
+# it is the column.
+class Translator
+  # Precedences, loosest first (PostgreSQL's order).
+  OR = 1
+  AND = 2
+  NOT = 3
+  IS = 4
+  CMP = 5
+  LIKE = 6
+  OTHER = 7
+  ADD = 8
+  MUL = 9
+  ATOM = 10
+
+  COMPARISONS = {"==": "=", "!=": "<>", "<": "<", "<=": "<=", ">": ">", ">=": ">="}
+  ARITHMETIC = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%"}
+
+  @model: Type[Object]
+  @columns: Array[Column]
+  @captures: Array[Object]
+  @file: String
+  # The block's parameter that is the row, or nil when the row is its
+  # receiver.
+  @row: Symbol?
+
+  def initialize(@model: Type[Object], @columns: Array[Column], @captures: Array[Object], @file: String, @row: Symbol?)
+  end
+
+  # The translator of a quoted block over `model`'s rows, and the block's
+  # one expression.
+  def self.of(model: Type[Object], columns: Array[Column], expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
+    case expr
+    in Meta::Expr::Block(params, body, line)
+      if body.size != 1
+        raise UntranslatableError.new("a block of #{body.size} statements cannot be translated to SQL (#{file}:#{line}): write one expression")
+      end
+      [Translator.new(model, columns, captures, file, params.first?), body[0]]
+    else
+      raise UntranslatableError.new("not a block (#{file})")
+    end
+  end
+
+  # `e` as SQL.
+  def sql(e: Meta::Expr) -> Sql
+    case e
+    in Meta::Expr::Lit(value, line) then literal(value, line)
+    in Meta::Expr::Capture(index, _, line) then param(@captures[index], line)
+    in Meta::Expr::And(l, r, _) then binary(sql(l), "AND", sql(r), AND, true)
+    in Meta::Expr::Or(l, r, _) then binary(sql(l), "OR", sql(r), OR, true)
+    in Meta::Expr::Not(x, _) then prefix("NOT", sql(x), NOT)
+    in Meta::Expr::If(c, t, f, _)
+      pieces = [Piece::Text.new("CASE WHEN ")] + sql(c).pieces + [Piece::Text.new(" THEN ")] + sql(t).pieces
+      pieces = pieces + [Piece::Text.new(" ELSE ")] + sql(f).pieces if f
+      node(pieces + [Piece::Text.new(" END")], ATOM)
+    in Meta::Expr::Call(recv, m, args, block, line) then call(recv, m, args, block, line)
+    in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
+    in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
+    in Meta::Expr::ArrayLit(_, line) then untranslatable("an array literal", line)
+    in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
+    in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
+    in Meta::Expr::Block(_, _, line) then untranslatable("a block", line)
+    end
+  end
+
+  # The column `e` is (a getter called on the row), or nil.
+  def column_of(e: Meta::Expr) -> Column?
+    case e
+    in Meta::Expr::Call(recv, m, args, block, _)
+      return nil unless recv && row?(recv) && args.empty? && block.nil? && !m.singleton
+      return nil unless @model <= m.owner
+      @columns.find { |c| c.name == m.name }
+    else
+      nil
+    end
+  end
+
+  # Raises the error for `what` at `line`.
+  def untranslatable(what: String, line: Int) -> Nothing
+    raise UntranslatableError.new("#{what} cannot be translated to SQL (#{@file}:#{line})")
+  end
+
+  # The classes whose operators and methods the translator knows.
+  private def primitive?(t: Type[Object]) -> Bool
+    t == Int || t == Float || t == String || t == Bool || t == Time || t == Bytes || t == Object || t == Nil || t == Array || t == Comparable
+  end
+
+  private def row?(e: Meta::Expr) -> Bool
+    case e
+    in Meta::Expr::SelfRef(depth, _) then @row.nil? && depth == 0
+    in Meta::Expr::Arg(name, depth, _) then depth == 0 && name == @row
+    else false
+    end
+  end
+
+  private def node(pieces: Array[Piece], prec: Int) -> Sql = Sql.new(pieces, prec, nil, nil, false)
+
+  private def text(s: String, prec: Int) -> Sql = node([Piece::Text.new(s)], prec)
+
+  private def literal(value: Object, line: Int) -> Sql
+    case value
+    in nil then Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, true)
+    in true then Sql.new([Piece::Text.new("TRUE")], ATOM, nil, true, true)
+    in false then Sql.new([Piece::Text.new("FALSE")], ATOM, nil, false, true)
+    in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true)
+    in Float | String | Time | Bytes | Symbol then param(value, line)
+    else untranslatable("the literal #{value.inspect}", line)
+    end
+  end
+
+  private def param(value: Object?, line: Int) -> Sql
+    case value
+    in nil | Int | Float | String | Bool | Time | Bytes | Symbol
+      Sql.new([Piece::Param.new(value)], ATOM, nil, value, true)
+    else
+      untranslatable("a value of class #{value.class.name}", line)
+    end
+  end
+
+  private def wrap(s: Sql, min: Int) -> Array[Piece]
+    if s.prec < min
+      [Piece::Text.new("(")] + s.pieces + [Piece::Text.new(")")]
+    else
+      s.pieces
+    end
+  end
+
+  # `l op r`: left-associative when `assoc`, else both sides tighter.
+  private def binary(l: Sql, op: String, r: Sql, prec: Int, assoc: Bool) -> Sql
+    left = wrap(l, assoc ? prec : prec + 1)
+    right = wrap(r, prec + 1)
+    node(left + [Piece::Text.new(" #{op} ")] + right, prec)
+  end
+
+  private def prefix(op: String, x: Sql, prec: Int) -> Sql = node([Piece::Text.new("#{op} ")] + wrap(x, prec), prec)
+
+  private def postfix(x: Sql, op: String, prec: Int) -> Sql = node(wrap(x, prec + 1) + [Piece::Text.new(" #{op}")], prec)
+
+  private def call(recv: Meta::Expr?, m: Meta::MethodRef, args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql
+    name = m.name.to_s
+    label = "`#{m.owner.name}#{m.singleton ? "." : "#"}#{name}`"
+    if recv.nil?
+      untranslatable("the function #{label}", line)
+    end
+    r = recv.as(Meta::Expr)
+    if c = column_of(Meta::Expr::Call.new(r, m, args, block, line))
+      return Sql.new([Piece::Text.new(Dialect.quote(c.name.to_s))], ATOM, c, nil, false)
+    end
+    untranslatable("the block given to #{label}", line) if block
+    if m.singleton && m.owner == SQL
+      return function(name, args, label, line)
+    end
+    untranslatable(label, line) unless !m.singleton && primitive?(m.owner)
+    if args.size == 0
+      case name
+      in "nil?" then return postfix(sql(r), "IS NULL", IS)
+      in "-@" then return prefix("-", sql(r), MUL + 1)
+      else untranslatable(label, line)
+      end
+    end
+    untranslatable(label, line) unless args.size == 1
+    a = args[0]
+    if name == "include?" && m.owner == Array
+      return in_list(r, a, line)
+    end
+    if m.owner == String && (name == "include?" || name == "start_with?" || name == "end_with?")
+      return like(sql(r), a, name, label, line)
+    end
+    if sym = COMPARISONS[m.name]?
+      untranslatable(label, line) if m.owner == Array
+      return compare(r, sym, a)
+    end
+    if op = ARITHMETIC[m.name]?
+      return binary(sql(r), "||", sql(a), OTHER, true) if name == "+" && m.owner == String
+      untranslatable(label, line) unless m.owner == Int || m.owner == Float
+      l = sql(r)
+      rr = sql(a)
+      if m.owner == Int && name == "/"
+        # Quarz's `Int#/` floors; PostgreSQL's truncates.
+        return node([Piece::Text.new("floor(")] + wrap(l, ATOM) + [Piece::Text.new("::numeric / ")] + wrap(rr, MUL + 1) + [Piece::Text.new(")::bigint")], ATOM)
+      end
+      if name == "%"
+        untranslatable(label, line) unless m.owner == Int
+        # Quarz's `Int#%` takes the divisor's sign; PostgreSQL's the
+        # dividend's.
+        inner = binary(binary(l, "%", rr, MUL, true), "+", rr, ADD, true)
+        return binary(inner, "%", rr, MUL, true)
+      end
+      prec = name == "+" || name == "-" ? ADD : MUL
+      return binary(l, op, rr, prec, true)
+    end
+    untranslatable(label, line)
+  end
+
+  # `a == b` and the others. Against a value, equality is decided by it:
+  # `IS NULL` for nil, `=` otherwise (which an index serves); between
+  # columns or expressions, one of which admits NULL, `IS NOT DISTINCT
+  # FROM`, as Quarz's `==` takes nil for equal to nil.
+  private def compare(le: Meta::Expr, op: String, re: Meta::Expr) -> Sql
+    l = sql(le)
+    r = sql(re)
+    l = coerce(l, r.column)
+    r = coerce(r, l.column)
+    if op == "=" || op == "<>"
+      eq = op == "="
+      if l.known && l.value.nil?
+        return postfix(r, eq ? "IS NULL" : "IS NOT NULL", IS)
+      end
+      if r.known && r.value.nil?
+        return postfix(l, eq ? "IS NULL" : "IS NOT NULL", IS)
+      end
+      # (`<>` uses no index either: Quarz's meaning, nil differing from
+      # a value.)
+      if !eq && (null_column?(l) || null_column?(r))
+        return binary(l, "IS DISTINCT FROM", r, IS, false)
+      end
+      if !l.known && !r.known && (nullable?(l) || nullable?(r))
+        return binary(l, eq ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM", r, IS, false)
+      end
+    end
+    binary(l, op, r, CMP, false)
+  end
+
+  # A value compared with a `Float` column, as a `Float`.
+  private def coerce(s: Sql, other: Column?) -> Sql
+    case [s.value, other]
+    in [Int => i, Column => c] if s.known && c.type == Float
+      Sql.new([Piece::Param.new(i.to_f)], ATOM, nil, i.to_f, true)
+    else
+      s
+    end
+  end
+
+  private def null_column?(s: Sql) -> Bool = s.column&.null == true
+
+  private def nullable?(s: Sql) -> Bool
+    c = s.column
+    c.nil? || c.null
+  end
+
+  # `xs.include?(x)`: `x IN (...)` with the array's items (a literal or a
+  # captured array), `FALSE` for none.
+  private def in_list(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
+    items = case arr
+            in Meta::Expr::ArrayLit(es, _) then es.map { |e| sql(e) }
+            in Meta::Expr::Capture(index, _, l)
+              case v = @captures[index]
+              in Array => xs then xs.map { |y| param(y, l) }
+              else untranslatable("`include?` on a #{v.class.name}", l)
+              end
+            else untranslatable("`Array#include?` on an array SQL does not have", line)
+            end
+    # (A nil among them is `IS NULL`: `IN` never finds a NULL.)
+    has_nil = items.any? { |s| s.known && s.value.nil? }
+    items = items.reject { |s| s.known && s.value.nil? }
+    target = sql(x)
+    return has_nil ? postfix(target, "IS NULL", IS) : text("FALSE", ATOM) if items.empty?
+    pieces = wrap(target, LIKE + 1) + [Piece::Text.new(" IN (")]
+    items.each_with_index do |s, i|
+      pieces = pieces + [Piece::Text.new(", ")] if i > 0
+      pieces = pieces + s.pieces
+    end
+    found = node(pieces + [Piece::Text.new(")")], LIKE)
+    return found unless has_nil
+    binary(found, "OR", postfix(target, "IS NULL", IS), OR, true)
+  end
+
+  # `s.include?(v)`, `start_with?`, `end_with?`: `LIKE` with `v` escaped.
+  private def like(s: Sql, arg: Meta::Expr, name: String, label: String, line: Int) -> Sql
+    a = sql(arg)
+    v = a.value
+    unless a.known && v.is_a?(String)
+      untranslatable("#{label} of something other than a string value", line)
+    end
+    e = SQL.escape_like(v.as(String))
+    pattern = case name
+              in "start_with?" then "#{e}%"
+              in "end_with?" then "%#{e}"
+              else "%#{e}%"
+              end
+    binary(s, "LIKE", Sql.new([Piece::Param.new(pattern)], ATOM, nil, pattern, true), LIKE, false)
+  end
+
+  # `Rotor::SQL.like(s, pattern)` and the others.
+  private def function(name: String, args: Array[Meta::Expr], label: String, line: Int) -> Sql
+    case [name, args.size]
+    in ["like", 2] then binary(sql(args[0]), "LIKE", sql(args[1]), LIKE, false)
+    in ["ilike", 2] then binary(sql(args[0]), "ILIKE", sql(args[1]), LIKE, false)
+    in ["lower", 1] then node([Piece::Text.new("lower(")] + sql(args[0]).pieces + [Piece::Text.new(")")], ATOM)
+    in ["upper", 1] then node([Piece::Text.new("upper(")] + sql(args[0]).pieces + [Piece::Text.new(")")], ATOM)
+    else untranslatable(label, line)
+    end
+  end
+end
