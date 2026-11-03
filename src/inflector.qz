@@ -1,0 +1,82 @@
+# The English inflections the schema uses for its default names: a table
+# is its model's name in snake_case, plural (BlogPost's is `blog_posts`),
+# and a foreign key the owner's in snake_case with `_id`. The rules are
+# few on purpose; write the name when they guess wrong.
+module Inflector
+  # The snake_case of a class name (BlogPost: `blog_post`); a namespace
+  # is dropped (Admin::User: `user`).
+  #
+  # ```
+  # Rotor::Inflector.underscore("BlogPost") # => "blog_post"
+  # Rotor::Inflector.underscore("Admin::HTTPLog") # => "http_log"
+  # ```
+  def self.underscore(name: String) -> String
+    base = name.split("::").last? || name
+    String.build do |b|
+      chars = base.chars
+      chars.each_with_index do |c, i|
+        upper = c != c.downcase
+        if upper && i > 0
+          prev = chars[i - 1]
+          after = chars[i + 1]?
+          prev_lower = prev == prev.downcase && prev != "_"
+          next_lower = after && after == after.downcase && after != "_"
+          b << "_" if prev_lower || (prev != prev.downcase && next_lower)
+        end
+        b << c.downcase
+      end
+    end
+  end
+
+  # The plural of a word in snake_case, by its last letters: `-y` after
+  # a consonant makes `-ies`, `-s`, `-x`, `-z`, `-ch` and `-sh` take
+  # `-es`, the rest `-s`.
+  #
+  # ```
+  # Rotor::Inflector.pluralize("post") # => "posts"
+  # Rotor::Inflector.pluralize("category") # => "categories"
+  # Rotor::Inflector.pluralize("address") # => "addresses"
+  # ```
+  def self.pluralize(word: String) -> String
+    if word.end_with?("y") && word.size > 1 && !"aeiou".include?(word[-2])
+      word[0, word.size - 1] + "ies"
+    elsif word.end_with?("s") || word.end_with?("x") || word.end_with?("z") ||
+          word.end_with?("ch") || word.end_with?("sh")
+      word + "es"
+    else
+      word + "s"
+    end
+  end
+
+  # The singular of a plural in snake_case, by its last letters:
+  # `-ies` makes `-y`, `-uses`, `-sses`, `-xes`, `-zes`, `-ches` and
+  # `-shes` drop `-es`, and another `-s` (not `-ss`) is dropped. Words
+  # these rules miss (`movies`, `aliases`) need their name written
+  # (`class_name:`).
+  #
+  # ```
+  # Rotor::Inflector.singularize("categories") # => "category"
+  # Rotor::Inflector.singularize("posts") # => "post"
+  # ```
+  def self.singularize(word: String) -> String
+    if word.end_with?("ies") && word.size > 3
+      word[0, word.size - 3] + "y"
+    elsif word.end_with?("uses") || word.end_with?("sses") || word.end_with?("xes") || word.end_with?("zes") ||
+          word.end_with?("ches") || word.end_with?("shes")
+      word[0, word.size - 2]
+    elsif word.end_with?("s") && !word.end_with?("ss")
+      word[0, word.size - 1]
+    else
+      word
+    end
+  end
+
+  # The CamelCase of a snake_case word (`blog_post`: BlogPost).
+  #
+  # ```
+  # Rotor::Inflector.camelize("blog_post") # => "BlogPost"
+  # ```
+  def self.camelize(word: String) -> String
+    word.split("_").map { |w| w.capitalize }.join
+  end
+end

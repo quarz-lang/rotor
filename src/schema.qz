@@ -1,0 +1,112 @@
+# What a model's `table` block runs on, at compile time: each of its
+# calls declares a column or an association. Its `column` takes the
+# column's type as a class: `Int`, `Float`, `String`, `Bool`, `Time` or
+# `Bytes`, one overload each, so that a default is of the column's type.
+#
+# - `null: true`: the column admits NULL, and its getter returns `T?`.
+# - `default:`: the value a model made with `new` starts with (not for
+#   `Time`).
+# - `primary: true`: the primary key (at most one; never NULL).
+class Schema
+  @model: String
+  var @columns: Array[Column] = []
+  var @associations: Array[Association] = []
+
+  # A schema for the model named `model` (its class name).
+  def initialize(@model: String)
+  end
+
+  # The columns declared so far, in order.
+  def columns -> Array[Column] = @columns
+
+  # The associations declared so far, in order.
+  def associations -> Array[Association] = @associations
+
+  # An `Int` column (`bigint`).
+  def column(name: Symbol, type: Type[Int], *, null: Bool = false, default: Int? = nil, primary: Bool = false) -> Void
+    add(name, "bigint", Int, null, default, primary)
+  end
+
+  # A `Float` column (`double precision`).
+  def column(name: Symbol, type: Type[Float], *, null: Bool = false, default: Float? = nil, primary: Bool = false) -> Void
+    add(name, "double precision", Float, null, default, primary)
+  end
+
+  # A `String` column (`text`).
+  def column(name: Symbol, type: Type[String], *, null: Bool = false, default: String? = nil, primary: Bool = false) -> Void
+    add(name, "text", String, null, default, primary)
+  end
+
+  # A `Bool` column (`boolean`).
+  def column(name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool? = nil, primary: Bool = false) -> Void
+    add(name, "boolean", Bool, null, default, primary)
+  end
+
+  # A `Time` column (`timestamptz`). It takes no default: a time is not
+  # a value the compiler can bake into the program.
+  def column(name: Symbol, type: Type[Time], *, null: Bool = false, primary: Bool = false) -> Void
+    add(name, "timestamptz", Time, null, nil, primary)
+  end
+
+  # A `Bytes` column (`bytea`).
+  def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false) -> Void
+    add(name, "bytea", Bytes, null, default, primary)
+  end
+
+  # `created_at` and `updated_at`, `Time` columns (`timestamptz`) that
+  # are not NULL, which a repository sets when it inserts and updates
+  # the model. Either is renamed by giving its name, or left out with
+  # `false`.
+  def timestamps(*, created_at: Symbol | Bool = :created_at, updated_at: Symbol | Bool = :updated_at) -> Void
+    [created_at, updated_at].each do |c|
+      case c
+      in Symbol then add(c, "timestamptz", Time, false, nil, false)
+      in Bool then raise ArgumentError.new("`timestamps` takes a column's name or false") if c
+      end
+    end
+  end
+
+  # The model belongs to another: the column `<name>_id` (an `Int`, or
+  # `foreign_key:`) holds the other's key. The other model is
+  # `class_name:`, by default the name in CamelCase.
+  def belongs_to(name: Symbol, *, class_name: String? = nil, foreign_key: Symbol? = nil, null: Bool = false) -> Void
+    if @associations.any? { |a| a.name == name }
+      raise ArgumentError.new("#{@model} declares the association `#{name}` twice")
+    end
+    key = foreign_key || "#{name}_id".to_sym
+    add(key, "bigint", Int, null, nil, false)
+    @associations = @associations + [Association.new(:belongs_to, name, class_name || Inflector.camelize(name.to_s), key)]
+  end
+
+  # The model has many of another, whose `foreign_key:` column (by
+  # default this model's name in snake_case with `_id`) holds this one's
+  # key. The other model is `class_name:`, by default the name in
+  # CamelCase, singular.
+  def has_many(name: Symbol, *, class_name: String? = nil, foreign_key: Symbol? = nil) -> Void
+    if @associations.any? { |a| a.name == name }
+      raise ArgumentError.new("#{@model} declares the association `#{name}` twice")
+    end
+    key = foreign_key || "#{Inflector.underscore(@model)}_id".to_sym
+    other = class_name || Inflector.camelize(Inflector.singularize(name.to_s))
+    @associations = @associations + [Association.new(:has_many, name, other, key)]
+  end
+
+  # The methods of `Rotor::Model` that a column's getter would replace.
+  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :load_values, :inspect, :to_s]
+
+  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool) -> Void
+    if RESERVED.include?(name)
+      raise ArgumentError.new("#{@model}'s column `#{name}` would replace the model's own `#{name}`")
+    end
+    if @columns.any? { |c| c.name == name }
+      raise ArgumentError.new("#{@model} declares the column `#{name}` twice")
+    end
+    if primary && null
+      raise ArgumentError.new("#{@model}'s primary key `#{name}` cannot be NULL")
+    end
+    if primary && @columns.any? { |c| c.primary }
+      raise ArgumentError.new("#{@model} declares a second primary key, `#{name}`")
+    end
+    @columns = @columns + [Column.new(name, sql, type, null, primary, default)]
+  end
+end

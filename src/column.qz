@@ -1,0 +1,34 @@
+# A value a column holds: what `Rotor::Column#default` may be.
+type Value = Int | Float | String | Bool | Time | Bytes
+
+# A column of a model's table, as its `table` block declares it.
+data Column = (
+  # The column's name, which is also its getter's.
+  name: Symbol,
+  # Its SQL type (`bigint`, `double precision`, `text`, `boolean`,
+  # `timestamptz`, `bytea`).
+  sql: String,
+  # Its Quarz type: `Int`, `Float`, `String`, `Bool`, `Time` or `Bytes`.
+  type: Type[Object],
+  # Whether it admits NULL: its getter then returns `T?`.
+  null: Bool,
+  # Whether it is the primary key.
+  primary: Bool,
+  # The value a model made with `new` starts with, or nil for none.
+  default: Value?
+)
+
+# An association of a model, as its `table` block declares it: what the
+# queries of a later version follow.
+data Association = (
+  # `:belongs_to` or `:has_many`.
+  kind: Symbol,
+  # Its name: `:account` for `belongs_to :account`, `:posts` for
+  # `has_many :posts`.
+  name: Symbol,
+  # The associated model's class name (`"Account"`, `"Post"`).
+  class_name: String,
+  # The column that holds the key: this model's for `belongs_to`
+  # (`account_id`), the other's for `has_many` (`user_id`).
+  foreign_key: Symbol
+)

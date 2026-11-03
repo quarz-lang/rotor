@@ -1,0 +1,157 @@
+require "test"
+
+class User < Rotor::Model
+  table "users" do
+    column :id, Int, primary: true
+    column :name, String
+    column :email, String, null: true
+    column :age, Int, default: 0
+    column :score, Float, null: true
+    column :admin, Bool, default: false
+    column :avatar, Bytes, null: true
+    column :born, Time, null: true
+    timestamps
+    belongs_to :account
+    has_many :posts
+  end
+end
+
+class BlogPost < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    column :title, String, default: "untitled"
+    timestamps updated_at: false, created_at: :posted_at
+    belongs_to :author, class_name: "User", foreign_key: :user_id, null: true
+  end
+end
+
+class Category < Rotor::Model
+  table do
+    column :name, String
+  end
+end
+
+class Bare < Rotor::Model
+end
+
+class Admin < User
+  table "admins" do
+    column :id, Int, primary: true
+    column :email, String
+    column :level, Int, default: 1
+  end
+end
+
+class ModelTest < Test::Case
+  def test_typed_accessors
+    u = User.new
+    u.name = "Ann"
+    assert_equal("Ann", u.name)
+    assert_nil(u.email)
+    u.email = "ann@example.com"
+    assert_equal("ann@example.com", u.email)
+    u.email = nil
+    assert_nil(u.email)
+    assert_equal(0, u.age)
+    u.age = 41
+    assert_equal(41, u.age)
+    assert_equal(false, u.admin)
+    u.score = 1.5
+    assert_equal(1.5, u.score)
+    u.avatar = b"\x01"
+    assert_equal(b"\x01", u.avatar)
+    t = Time.utc(2026, 11, 3, 12, 0, 0)
+    u.born = t
+    assert_equal(t, u.born)
+    u.account_id = 7
+    assert_equal(7, u.account_id)
+  end
+
+  def test_unset_column
+    e = assert_raise(Rotor::MissingAttributeError) { User.new.name }
+    assert_equal("User#name is not set", e.message)
+  end
+
+  def test_change_tracking
+    u = User.new
+    assert(!u.changed?)
+    u.name = "Ann"
+    u.age = 3
+    u.name = "Bob"
+    assert_equal([:name, :age], u.changed)
+    assert(u.changed?)
+    u.clear_changes
+    assert(u.changed.empty?)
+  end
+
+  def test_metadata
+    assert_equal("users", User.table_name)
+    assert_equal(:id, User.primary_key)
+    assert_equal(
+      [:id, :name, :email, :age, :score, :admin, :avatar, :born, :created_at, :updated_at, :account_id],
+      User.columns.map { |c| c.name }
+    )
+    email = User.find_column(:email)
+    assert_equal(Rotor::Column.new(:email, "text", String, true, false, nil), email)
+    assert_equal(Rotor::Column.new(:age, "bigint", Int, false, false, 0), User.find_column(:age))
+    assert_equal(Rotor::Column.new(:created_at, "timestamptz", Time, false, false, nil), User.find_column(:created_at))
+    assert_nil(User.find_column(:nope))
+    assert_equal(
+      [
+        Rotor::Association.new(:belongs_to, :account, "Account", :account_id),
+        Rotor::Association.new(:has_many, :posts, "Post", :user_id),
+      ],
+      User.associations
+    )
+  end
+
+  def test_default_names
+    assert_equal("blog_posts", BlogPost.table_name)
+    assert_equal("categories", Category.table_name)
+    assert_nil(Category.primary_key)
+    assert_equal([:id, :title, :posted_at, :user_id], BlogPost.columns.map { |c| c.name })
+    assert_equal(Rotor::Association.new(:belongs_to, :author, "User", :user_id), BlogPost.associations[0])
+    p = BlogPost.new
+    assert_equal("untitled", p.title)
+    assert_nil(p.user_id)
+  end
+
+  def test_load_and_to_h
+    u = User.load({id: 1, name: "Ann", email: nil})
+    assert_equal(1, u.id)
+    assert_equal("Ann", u.name)
+    assert_nil(u.email)
+    assert(!u.changed?)
+    h: Hash[Symbol, Object?] = {age: 0, admin: false, id: 1, name: "Ann", email: nil}
+    assert_equal(h, u.to_h)
+    e = assert_raise(ArgumentError) { User.load({nope: 1}) }
+    assert_equal("User has no column `nope`", e.message)
+    e = assert_raise(ArgumentError) { User.load({name: 1}) }
+    assert_equal("User#name takes String, not Int", e.message)
+    e = assert_raise(ArgumentError) { User.load({name: nil}) }
+    assert_equal("User#name cannot be nil", e.message)
+  end
+
+  def test_a_subclass_with_a_table_of_its_own
+    a = Admin.new
+    assert_equal(1, a.level)
+    e = assert_raise(ArgumentError) { a.name = "x" }
+    assert_equal("Admin has no column `name`", e.message)
+    # `User#email=` takes nil, `Admin`'s column does not.
+    u: User = a
+    e = assert_raise(ArgumentError) { u.email = nil }
+    assert_equal("Admin#email cannot be nil", e.message)
+    assert(!a.changed?)
+  end
+
+  def test_columns_cross_tasks
+    assert_equal(User.columns, Task.spawn { User.columns }.await)
+  end
+
+  def test_a_model_without_a_table
+    e = assert_raise(Rotor::SchemaError) { Bare.new }
+    assert_equal("Bare has no schema: declare its columns in a `table do ... end` block in its class body", e.message)
+    e = assert_raise(Rotor::SchemaError) { Bare.columns }
+    assert_equal("Bare has no schema: declare its columns in a `table do ... end` block in its class body", e.message)
+  end
+end
