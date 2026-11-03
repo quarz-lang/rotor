@@ -57,9 +57,9 @@ class Repo
     sql, params = query.to_sql
     rows = @adapter.query(sql, params)
     case query.shape
-    in Shape::Count
+    in :count
       rows.rows.map { |r| query.load({value: r.int(0)}) }
-    in Shape::Exists
+    in :exists
       rows.rows.map { |r| query.load({value: r.bool(0)}) }
     else
       cols = query.fetched

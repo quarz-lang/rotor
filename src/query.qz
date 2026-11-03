@@ -2,9 +2,6 @@
 # the repository that sets its timestamps.
 data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?)
 
-# What a query gives: its rows, their number, or whether there is one.
-enum Shape = Rows | Count | Exists
-
 # How a query's row becomes a `T`: from the values of the columns it
 # fetched, the second argument telling whether those are all of the
 # model's.
@@ -44,10 +41,11 @@ class Query[T]
   @loader: Loader[T]
   @limit: Int?
   @offset: Int?
-  @shape: Shape
+  # `:rows`, `:count` or `:exists`.
+  @shape: Symbol
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @fetch: Array[Column]?, @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T])
+  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @fetch: Array[Column]?, @projected: Bool, @limit: Int?, @offset: Int?, @shape: Symbol, @loader: Loader[T])
   end
 
   # The table.
@@ -56,8 +54,9 @@ class Query[T]
   # The columns its rows have, in order: what `to_sql` selects.
   def fetched -> Array[Column] = @fetch || @table.columns
 
-  # What it gives: rows, a count, or whether there is a row.
-  def shape -> Shape = @shape
+  # What it gives: `:rows`, `:count` (their number) or `:exists`
+  # (whether there is one).
+  def shape -> Symbol = @shape
 
   # Its limit, if any.
   def limit_value -> Int? = @limit
@@ -148,13 +147,13 @@ class Query[T]
   # The number of rows: `SELECT count(*)`.
   def count -> Query[Int]
     unshaped!("count")
-    Query[Int].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, Shape::Count, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Int) })
+    Query[Int].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, :count, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Int) })
   end
 
   # Whether there is a row: `SELECT EXISTS (...)`.
   def exists -> Query[Bool]
     unshaped!("exists")
-    Query[Bool].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, Shape::Exists, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Bool) })
+    Query[Bool].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, :exists, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Bool) })
   end
 
   # The rows' deletion: `DELETE ... WHERE` with the query's conditions
@@ -184,13 +183,13 @@ class Query[T]
   def pieces -> Array[Piece]
     table = [Piece::Text.new(" FROM #{Dialect.quote(@table.name)}")]
     case @shape
-    in Shape::Count
+    in :count
       if @limit || @offset
         [Piece::Text.new("SELECT count(*) FROM (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(") AS \"q\"")]
       else
         [Piece::Text.new("SELECT count(*)")] + table + where_pieces
       end
-    in Shape::Exists
+    in :exists
       [Piece::Text.new("SELECT EXISTS (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(")")]
     else
       [Piece::Text.new("SELECT ")] + select_list + table + where_pieces + order_pieces + window
@@ -290,20 +289,20 @@ class Query[T]
   # (Conditions and orders are of the model's rows: before a projection,
   # a count or an exists.)
   private def rows!(what: String) -> Void
-    if @projected || @shape != Shape::Rows
+    if @projected || @shape != :rows
       raise ArgumentError.new("`#{what}` after `select`, `count` or `exists`: write it before")
     end
   end
 
   # (A count or an exists is one row: nothing to window.)
   private def unshaped!(what: String) -> Void
-    if @shape != Shape::Rows
+    if @shape != :rows
       raise ArgumentError.new("`#{what}` after `count` or `exists`: write it before")
     end
   end
 
   private def plain!(what: String) -> Void
-    if !@orders.empty? || @limit || @offset || @projected || @shape != Shape::Rows
+    if !@orders.empty? || @limit || @offset || @projected || @shape != :rows
       raise ArgumentError.new("`#{what}` of a query with an order, a limit, an offset or a projection: only its conditions say which rows")
     end
   end

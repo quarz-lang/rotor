@@ -98,7 +98,7 @@ class Model
 
   # Every row, as a query (`Rotor::Query`), to refine.
   def self.query -> Query[Self]
-    Query[Self].new(table_info, self, [], [], nil, false, nil, nil, Shape::Rows,
+    Query[Self].new(table_info, self, [], [], nil, false, nil, nil, :rows,
                     ->(v: Hash[Symbol, Object?], all: Bool) { all ? load(v) : load_partial(v) })
   end
 

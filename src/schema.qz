@@ -131,12 +131,10 @@ class Schema
   end
 
   # The methods of `Rotor::Model` that a column's getter would replace.
-  # (Strings: a symbol in code a `static` statement reaches counts as a
-  # call of every method of its name, for the compile-time checks.)
-  RESERVED = ["to_h", "changed", "changed?", "clear_changes", "keep_changes", "load_values", "table_info", "read", "write", "checkpoint", "restore", "inspect", "to_s"]
+  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :load_values, :table_info, :read, :write, :checkpoint, :restore, :inspect, :to_s]
 
   private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool) -> Void
-    if RESERVED.include?(name.to_s)
+    if RESERVED.include?(name)
       raise ArgumentError.new("#{@model}'s column `#{name}` would replace the model's own `#{name}`")
     end
     if @columns.any? { |c| c.name == name }
