@@ -121,9 +121,35 @@ class QueryTest < Test::Case
 
   def test_select
     check(Person.select { name }, "SELECT \"name\" FROM \"people\"", [])
-    check(Person.select { |p| p.age + 1 }.limit(2), "SELECT \"age\" + 1 FROM \"people\" LIMIT 2", [])
-    check(Person.where { admin }.select { Summary.new(id, name) }, "SELECT \"id\", \"name\" FROM \"people\" WHERE \"admin\"", [])
+    # The columns the block reads; its value is computed in Quarz.
+    q = Person.select { |p| p.age + 1 }.limit(2)
+    check(q, "SELECT \"age\" FROM \"people\" LIMIT 2", [])
+    assert_equal(41, q.load({age: 40}))
+    s = Person.where { admin }.select { Summary.new(id, name) }
+    check(s, "SELECT \"id\", \"name\" FROM \"people\" WHERE \"admin\"", [])
+    assert_equal(Summary.new(1, "Ann"), s.load({id: 1, name: "Ann"}))
     check(Person.query.map { |p| p.id }, "SELECT \"id\" FROM \"people\"", [])
+    # Both branches of an `if`, and a method SQL has no word for.
+    check(Person.select { admin ? name : email }, "SELECT \"name\", \"email\", \"admin\" FROM \"people\"", [])
+    n = Person.select { name.size }
+    check(n, "SELECT \"name\" FROM \"people\"", [])
+    assert_equal(3, n.load({name: "Ann"}))
+    # Inside a nested block, the row is the outer block's parameter.
+    check(Person.select { |p| [1, 2].map { |i| p.age + i } }, "SELECT \"age\" FROM \"people\"", [])
+    # A `self` inside a nested block may be another block's receiver:
+    # every column.
+    check(Person.select { [1].map { |i| age + i } }, COLS, [])
+    # The row passed on, or another method of it: every column.
+    check(Person.select { |p| p.inspect }, COLS, [])
+    # A column the block did not read is not loaded.
+    part = Person.load_partial({id: 1})
+    e = assert_raise(Rotor::NotLoadedError) { part.name }
+    assert_equal("Person#name was not loaded: the query fetched id", e.message)
+    # No defaults for what was not fetched; an assigned column reads.
+    h: Hash[Symbol, Object?] = {id: 1}
+    assert_equal(h, part.to_h)
+    part.age = 5
+    assert_equal(5, part.age)
     e = assert_raise(ArgumentError) { Person.select { name }.where { |n| n == "x" } }
     assert_equal("`where` after `select`, `count` or `exists`: write it before", e.message)
   end

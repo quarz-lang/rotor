@@ -1,0 +1,277 @@
+require "test"
+
+data Brief = (id: Int, name: String)
+
+class Member < Rotor::Model
+  table "members" do
+    column :id, Int, primary: true
+    column :name, String
+    column :email, String, null: true
+    column :age, Int, default: 0
+    column :score, Float, default: 0.0
+    column :admin, Bool, default: false
+    column :avatar, Bytes, null: true
+    timestamps
+  end
+end
+
+class Note < Rotor::Model
+  table "notes" do
+    column :id, Int, primary: true
+    column :body, String
+    column :seen, Time, null: true
+  end
+end
+
+# Against a real server (PG::Testing): the repository's statements.
+class RepoTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
+  # tests twice, interpreted and compiled.)
+  SCHEMA = <<~SQL
+    DROP TABLE IF EXISTS members, notes;
+    CREATE TABLE members (
+      id bigserial PRIMARY KEY,
+      name text NOT NULL,
+      email text,
+      age bigint NOT NULL DEFAULT 0,
+      score double precision NOT NULL DEFAULT 0,
+      admin boolean NOT NULL DEFAULT false,
+      avatar bytea,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL
+    );
+    CREATE TABLE notes (id bigserial PRIMARY KEY, body text NOT NULL DEFAULT 'empty', seen timestamptz)
+  SQL
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        c.exec_all(SCHEMA)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  # A repository over one connection, on empty tables.
+  def with_repo(&: (Rotor::Repo) -> Void) -> Void
+    c = PG.connect(url)
+    begin
+      c.exec("TRUNCATE members, notes RESTART IDENTITY")
+      yield Rotor::Repo.new(connection: c)
+    ensure
+      c.close
+    end
+  end
+
+  def member(name: String, age: Int = 30) -> Member
+    m = Member.new
+    m.name = name
+    m.age = age
+    m
+  end
+
+  def test_insert_sets_the_key_and_timestamps
+    with_repo do |repo|
+      before = Time.now
+      m = repo.insert(member("Ann"))
+      assert_equal(1, m.id)
+      assert(!m.changed?)
+      assert(m.created_at.utc?)
+      assert_equal(0, m.created_at.nsec % 1000)
+      assert_equal(m.created_at, m.updated_at)
+      assert(m.created_at >= before - 1.second)
+      # Read back, the same values to the microsecond.
+      got = repo.get(Member, 1)
+      assert(got)
+      g = got.as(Member)
+      assert_equal(m.created_at, g.created_at)
+      assert_equal("Ann", g.name)
+      assert_nil(g.email)
+      # A creation time the model has is kept.
+      t = Time.utc(2020, 1, 2, 3, 4, 5)
+      n = member("Bob")
+      n.created_at = t
+      repo.insert(n)
+      assert_equal(t, n.created_at)
+      assert(n.updated_at > t)
+      # The database's defaults come back.
+      note = Note.new
+      repo.insert(note)
+      assert_equal("empty", note.body)
+      assert_nil(note.seen)
+    end
+  end
+
+  def test_types_round_trip
+    with_repo do |repo|
+      m = member("Typed")
+      m.email = "t@example.com"
+      m.score = 2.5
+      m.admin = true
+      m.avatar = b"\x00\xff"
+      repo.insert(m)
+      g = repo.one!(Member.where { admin })
+      assert_equal("t@example.com", g.email)
+      assert_equal(2.5, g.score)
+      assert(g.admin)
+      assert_equal(b"\x00\xff", g.avatar)
+      t = Time.utc(2026, 11, 3, 12, 0, 0) + 1.ms * 0.123
+      note = Note.new
+      note.body = "b"
+      note.seen = t
+      repo.insert(note)
+      assert_equal(t, repo.one!(Note.query).seen)
+    end
+  end
+
+  def test_queries
+    with_repo do |repo|
+      ["Ann", "Bob", "Cy"].each_with_index { |n, i| repo.insert(member(n, 20 + i * 10)) }
+      min = 25
+      assert_equal(["Bob", "Cy"], repo.all(Member.where { age >= min }.order { name }).map { |m| m.name })
+      assert_equal(["Cy", "Bob", "Ann"], repo.all(Member.order { age }.desc).map { |m| m.name })
+      assert_equal("Ann", repo.first(Member.order { name }).as(Member).name)
+      assert_equal(2, repo.count(Member.where { age > 20 }))
+      assert(repo.exists?(Member.where { name == "Cy" }))
+      assert(!repo.exists?(Member.where { name == "Dee" }))
+      assert_nil(repo.get(Member, 99))
+      assert_nil(repo.one(Member.where { name == "Dee" }))
+      assert_raise(Rotor::MultipleResultsError) { repo.one(Member.where { age > 0 }) }
+      assert_raise(Rotor::NoResultsError) { repo.one!(Member.where { age > 100 }) }
+      # A projection is the block's value on rows loaded with the
+      # columns it reads.
+      assert_equal([Brief.new(1, "Ann"), Brief.new(2, "Bob")], repo.all(Member.where { age < 40 }.order { id }.select { Brief.new(id, name) }))
+      assert_equal([21, 31, 41], repo.all(Member.order { id }.select { |m| m.age + 1 }))
+      assert_equal([3, 3, 2], repo.all(Member.order { id }.select { name.size }))
+      # nil, by value.
+      e: String? = nil
+      assert_equal(3, repo.count(Member.where { email == e }))
+      assert_equal(3, repo.count(Member.where { email != "x" }))
+    end
+  end
+
+  def test_update_and_touch
+    with_repo do |repo|
+      m = repo.insert(member("Ann"))
+      stamp = m.updated_at
+      # Nothing changed: no UPDATE, the time stays.
+      repo.update(m)
+      assert_equal(stamp, m.updated_at)
+      m.age = 31
+      repo.update(m)
+      assert(!m.changed?)
+      assert(m.updated_at >= stamp)
+      g = repo.get(Member, m.id).as(Member)
+      assert_equal(31, g.age)
+      assert_equal(m.updated_at, g.updated_at)
+      # `touch` writes the update time alone; other assignments stay.
+      m.name = "Pending"
+      repo.touch(m)
+      assert_equal([:name], m.changed)
+      g = repo.get(Member, m.id).as(Member)
+      assert_equal("Ann", g.name)
+      assert_equal(m.updated_at, g.updated_at)
+    end
+  end
+
+  def test_failed_saves_leave_the_model_as_it_was
+    with_repo do |repo|
+      m = repo.insert(member("Ann"))
+      a = repo.get(Member, m.id).as(Member)
+      a.id = 2
+      e = assert_raise(ArgumentError) { repo.touch(a) }
+      assert_match(/the primary key, was assigned/, e.message)
+      assert_equal([:id], a.changed)
+      # A statement the server refuses: the model's values come back.
+      n = member("Dup")
+      n.id = m.id
+      assert_raise(PG::ServerError) { repo.insert(n) }
+      assert_equal([:name, :age, :id], n.changed)
+      assert_nil(n.to_h[:created_at]?)
+      s = Note.new
+      s.body = "x"
+      repo.insert(s)
+      s.body = "y"
+      assert_raise(ArgumentError) { repo.touch(s, :seen, :id) }
+      assert_equal([:body], s.changed)
+      assert_nil(s.seen)
+    end
+  end
+
+  def test_deletes_and_bulk_updates
+    with_repo do |repo|
+      ["Ann", "Bob", "Cy"].each { |n| repo.insert(member(n)) }
+      assert_equal(2, repo.update_all(Member.where { name != "Cy" }) { {age: age + 1} })
+      assert_equal([31, 31, 30], repo.all(Member.order { id }.select { age }))
+      m = repo.get(Member, 1).as(Member)
+      assert(repo.delete(m))
+      assert(!repo.delete(m))
+      assert_equal(1, repo.delete_all(Member.where { name == "Bob" }))
+      assert_equal(["Cy"], repo.all(Member.query.select { name }))
+    end
+  end
+
+  def test_transactions
+    with_repo do |repo|
+      n = repo.transaction do |tx|
+        tx.insert(member("Kept"))
+        tx.count(Member.query)
+      end
+      assert_equal(1, n)
+      assert_raise(RuntimeError) do
+        repo.transaction do |tx|
+          tx.insert(member("Gone"))
+          raise "undo"
+        end
+      end
+      assert_equal(["Kept"], repo.all(Member.query.select { name }))
+    end
+  end
+
+  def test_raw_sql
+    with_repo do |repo|
+      repo.insert(member("Ann", 40))
+      assert_equal(1, repo.exec("UPDATE members SET age = age + $1", [2]))
+      ms = repo.query(Member, "SELECT * FROM members WHERE age > $1", [41])
+      assert_equal([42], ms.map { |m| m.age })
+      # Columns the result does not give are not loaded.
+      part = repo.query(Member, "SELECT id, name FROM members")
+      assert_equal("Ann", part[0].name)
+      assert_raise(Rotor::NotLoadedError) { part[0].age }
+      briefs = repo.query("SELECT id, name FROM members") { |r| Brief.new(r.int(0), r.string(1)) }
+      assert_equal([Brief.new(1, "Ann")], briefs)
+    end
+  end
+
+  def test_over_a_pool
+    omit_if(url.empty?, "no server")
+    PG::Pool.open(url, size: 2) do |pool|
+      repo = Rotor::Repo.new(pool: pool)
+      repo.exec("TRUNCATE members RESTART IDENTITY")
+      repo.insert(member("Pooled"))
+      assert_equal(["Pooled"], repo.all(Member.query.select { name }))
+      repo.transaction { |tx| tx.update_all(Member.query) { |m| {age: 1} } }
+      assert_equal([1], repo.all(Member.query.select { age }))
+    end
+  end
+end

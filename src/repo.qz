@@ -1,0 +1,252 @@
+# Runs queries and statements (`Rotor::Query`, `Rotor::Statement`)
+# against a database, through an adapter, and loads what they give.
+#
+# ```quarz no_run
+# class RUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     column :name, String
+#     column :age, Int, default: 0
+#     timestamps
+#   end
+# end
+#
+# PG::Pool.open("postgres://app@localhost/shop") do |pool|
+#   repo = Rotor::Repo.new(pool: pool)
+#   u = RUser.new
+#   u.name = "Ann"
+#   repo.insert(u)                          # its id and timestamps set
+#   repo.all(RUser.where { age >= 18 })     # Array[RUser]
+#   repo.transaction { |tx| tx.update(u) }
+# end
+# ```
+#
+# Timestamps (`timestamps` in a `table` block) are set here, never by
+# SQL: `insert` sets both to now (in UTC, to the microsecond, as the
+# database keeps them), keeping a creation time the model has; `update`
+# sets the update time when a column changed, and issues no UPDATE when
+# none did; `touch` sets it alone.
+class Repo
+  @adapter: Adapter
+
+  # Over a pg pool: each statement takes a connection.
+  def initialize(*, pool: ::PG::Pool)
+    @adapter = Adapters::PG.new(pool: pool)
+  end
+
+  # Over one pg connection.
+  def initialize(*, connection: ::PG::Connection)
+    @adapter = Adapters::PG.new(connection: connection)
+  end
+
+  # Over any adapter.
+  def initialize(@adapter: Adapter)
+  end
+
+  # The adapter.
+  def adapter -> Adapter = @adapter
+
+  # Runs a statement: how many rows it changed.
+  def run(statement: Statement) -> Int
+    sql, params = statement.to_sql
+    @adapter.query(sql, params).affected || 0
+  end
+
+  # Runs a query: its rows.
+  def run[T](query: Query[T]) -> Array[T]
+    sql, params = query.to_sql
+    rows = @adapter.query(sql, params)
+    case query.shape
+    in Shape::Count
+      rows.rows.map { |r| query.load({value: r.int(0)}) }
+    in Shape::Exists
+      rows.rows.map { |r| query.load({value: r.bool(0)}) }
+    else
+      cols = query.fetched
+      rows.rows.map { |r| query.load(Repo.values(r, cols)) }
+    end
+  end
+
+  # The query's rows: `run(query)`.
+  def all[T](query: Query[T]) -> Array[T] = run(query)
+
+  # The query's one row, or nil; raises `Rotor::MultipleResultsError`
+  # when there are more.
+  def one[T](query: Query[T]) -> T?
+    q = query.limit_value ? query : query.limit(2)
+    rows = run(q)
+    raise MultipleResultsError.new("#{rows.size} rows where one was expected: #{query.to_sql[0]}") if rows.size > 1
+    rows.first?
+  end
+
+  # The query's one row; raises `Rotor::NoResultsError` when there is
+  # none, `Rotor::MultipleResultsError` when there are more.
+  def one![T](query: Query[T]) -> T
+    found = one(query)
+    found.nil? ? raise NoResultsError.new("no row: #{query.to_sql[0]}") : found
+  end
+
+  # The query's first row, or nil.
+  def first[T](query: Query[T]) -> T? = run(query.first).first?
+
+  # The `model` whose primary key is `id`, or nil.
+  def get[M <: Model](model: Type[M], id: Object) -> M?
+    q = model.query
+    key = q.table.primary_key || raise ArgumentError.new("`#{q.table.name}` has no primary key")
+    one(q.where_key(key, id))
+  end
+
+  # The number of the query's rows.
+  def count[T](query: Query[T]) -> Int = run(query.count).first? || 0
+
+  # Whether the query has a row.
+  def exists?[T](query: Query[T]) -> Bool = run(query.exists).first? || false
+
+  # Inserts `model`'s row, setting its timestamps first, and loads the
+  # row back into it (its key, the database's defaults): the model,
+  # unchanged.
+  def insert[M <: Model](model: M) -> M
+    t = model.table_info
+    point = model.checkpoint
+    begin
+      now = Repo.now
+      if c = t.created_at
+        model.write(c, now) unless model.to_h[c]?
+      end
+      if u = t.updated_at
+        model.write(u, now)
+      end
+      sql, params = Statement.insert(model).returning.to_sql
+      rows = @adapter.query(sql, params)
+      if row = rows.rows.first?
+        model.load_values(Repo.values(row, t.columns))
+      end
+    rescue Exception => e
+      model.restore(point)
+      raise e
+    end
+    model
+  end
+
+  # Updates `model`'s row with the columns assigned since it was loaded
+  # (and its update time), or does nothing when none were: the model,
+  # unchanged.
+  def update[M <: Model](model: M) -> M
+    return model unless model.changed?
+    point = model.checkpoint
+    begin
+      if u = model.table_info.updated_at
+        model.write(u, Repo.now)
+      end
+      run(Statement.update(model).as(Statement))
+    rescue Exception => e
+      model.restore(point)
+      raise e
+    end
+    model.clear_changes
+    model
+  end
+
+  # Sets `model`'s update time, and the `Time` columns named, to now,
+  # and writes those alone (other assignments stay pending).
+  def touch[M <: Model](model: M, *columns: Symbol) -> M
+    t = model.table_info
+    names = columns.uniq
+    if u = t.updated_at
+      names = names + [u] unless names.include?(u)
+    end
+    raise ArgumentError.new("`#{t.name}` has no update time, and no column was named") if names.empty?
+    key = t.primary_key || raise ArgumentError.new("`#{t.name}` has no primary key")
+    if model.changed.include?(key)
+      raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
+    end
+    id = model.to_h[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
+    pending = model.changed - names
+    point = model.checkpoint
+    now = Repo.now
+    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(t.name)} SET ")]
+    names.each_with_index do |n, i|
+      pieces = pieces + [Piece::Text.new(", ")] if i > 0
+      pieces = pieces + [Piece::Text.new("#{Dialect.quote(n.to_s)} = "), Piece::Param.new(now)]
+    end
+    pieces = pieces + [Piece::Text.new(" WHERE #{Dialect.quote(key.to_s)} = "), Piece::Param.new(id)]
+    begin
+      names.each { |n| model.write(n, now) }
+      run(Statement.new(t, pieces, nil))
+    rescue Exception => e
+      model.restore(point)
+      raise e
+    end
+    model.keep_changes(pending)
+    model
+  end
+
+  # Deletes `model`'s row: whether there was one.
+  def delete(model: Model) -> Bool = run(Statement.delete(model)) > 0
+
+  # Deletes the query's rows: how many.
+  def delete_all[T](query: Query[T]) -> Int = run(query.delete)
+
+  # Updates the query's rows as the block says (`Rotor::Query#update`;
+  # no timestamps are set): how many.
+  def update_all[T](query: Query[T], &set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Int = run(query.update(&set))
+
+  # :ditto:
+  def update_all[T](query: Query[T], &set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Int = run(query.update(&set))
+
+  # Runs the block in a transaction, with a repository bound to it:
+  # committed when the block returns, rolled back when it raises.
+  # Transactions do not nest (pg raises `PG::TransactionError` for one
+  # inside another).
+  def transaction[R](&: (Repo) -> R) -> R
+    results: Array[R] = []
+    @adapter.transaction do |a|
+      results = results + [yield Repo.new(a)]
+      nil
+    end
+    results[0]
+  end
+
+  # Runs raw SQL: the count the server reported (the rows changed, or a
+  # SELECT's rows; 0 for none).
+  def exec(sql: String, params: Array[Object?] = []) -> Int = @adapter.query(sql, params).affected || 0
+
+  # Runs raw SQL and loads its rows as `model`s, by the result's column
+  # names (columns it does not give are left unloaded).
+  def query[M <: Model](model: Type[M], sql: String, params: Array[Object?] = []) -> Array[M]
+    rows = @adapter.query(sql, params)
+    q = model.query
+    names = rows.columns
+    cols = q.table.columns
+    found = names.map { |n| cols.find { |c| c.name.to_s == n } }
+    all = cols.all? { |c| names.include?(c.name.to_s) }
+    rows.rows.map do |r|
+      values: Hash[Symbol, Object?] = {}
+      found.each_with_index do |c, i|
+        values = values.put(c.name, r.value(i, c.type)) if c
+      end
+      all ? model.load(values) : model.load_partial(values)
+    end
+  end
+
+  # Runs raw SQL and gives the block's value for each row, read with
+  # `Rotor::Row`'s typed readers.
+  def query[R](sql: String, params: Array[Object?] = [], &: (Row) -> R) -> Array[R]
+    @adapter.query(sql, params).rows.map { |r| yield r }
+  end
+
+  # Now, in UTC, to the microsecond: what a timestamp column keeps.
+  def self.now -> Time
+    t = Time.now.utc
+    Time.at(t.to_i).utc + MICROSECOND * t.usec
+  end
+
+  MICROSECOND = 1.ms * 0.001
+
+  # A row's values by column, read with each column's type.
+  def self.values(row: Row, columns: Array[Column]) -> Hash[Symbol, Object?]
+    values: Hash[Symbol, Object?] = {}
+    columns.each_with_index { |c, i| values = values.put(c.name, row.value(i, c.type)) }
+    values
+  end
+end

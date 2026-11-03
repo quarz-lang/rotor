@@ -91,6 +91,15 @@ class Translator
     end
   end
 
+  # The columns `e` reads of the row, in the table's order, or nil when
+  # it may read more: it calls another method of the row or passes the
+  # row on (its value is computed in Quarz, `Rotor::Query#select`).
+  def reads(e: Meta::Expr) -> Array[Column]?
+    found = collect(e, 0)
+    return nil unless found
+    @columns.select { |c| found.include?(c.name) }
+  end
+
   # Raises the error for `what` at `line`.
   def untranslatable(what: String, line: Int) -> Nothing
     raise UntranslatableError.new("#{what} cannot be translated to SQL (#{@file}:#{line})")
@@ -99,6 +108,75 @@ class Translator
   # The classes whose operators and methods the translator knows.
   private def primitive?(t: Type[Object]) -> Bool
     t == Int || t == Float || t == String || t == Bool || t == Time || t == Bytes || t == Object || t == Nil || t == Array || t == Comparable
+  end
+
+  # The names of the columns `e` reads, or nil when it uses the row
+  # otherwise. `n` is how many blocks of the tree `e` is inside: the
+  # row is then `Arg(row, n)`; in a receiver block, a `self` inside
+  # another block may be that block's receiver or the row (the tree does
+  # not say which blocks have one), so it counts as the whole row.
+  private def collect(e: Meta::Expr, n: Int = 0) -> Array[Symbol]?
+    case e
+    in Meta::Expr::Call(recv, m, args, block, _) if recv && args.empty? && block.nil? && !m.singleton && row_at?(recv, n) && @model <= m.owner
+      if c = @columns.find { |x| x.name == m.name }
+        return [c.name]
+      end
+    else
+      nil
+    end
+    case e
+    in Meta::Expr::SelfRef(depth, _) then @row.nil? && (n > 0 || depth == 0) ? nil : none
+    in Meta::Expr::Arg(name, depth, _) then depth == n && name == @row ? nil : none
+    in Meta::Expr::Lit(_, _) then none
+    in Meta::Expr::Capture(_, _, _) then none
+    in Meta::Expr::Call(recv, _, args, block, _)
+      xs = args
+      xs = xs + [recv] if recv
+      found = all(xs, n)
+      return nil unless found
+      if block
+        inner = collect(block, n)
+        return nil unless inner
+        found = found + inner
+      end
+      found
+    in Meta::Expr::And(l, r, _) then all([l, r], n)
+    in Meta::Expr::Or(l, r, _) then all([l, r], n)
+    in Meta::Expr::Not(x, _) then all([x], n)
+    in Meta::Expr::If(c, t, f, _)
+      xs = [c, t]
+      xs = xs + [f] if f
+      all(xs, n)
+    in Meta::Expr::ArrayLit(xs, _) then all(xs, n)
+    in Meta::Expr::HashLit(ps, _) then all(ps.flat_map { |p| [p[0], p[1]] }, n)
+    in Meta::Expr::Interp(xs, _) then all(xs, n)
+    # (A block given to a call inside the quoted one: one level deeper.)
+    in Meta::Expr::Block(_, body, _) then all(body, n + 1)
+    end
+  end
+
+  # Whether `e` is the row, `n` blocks deep.
+  private def row_at?(e: Meta::Expr, n: Int) -> Bool
+    case e
+    in Meta::Expr::SelfRef(depth, _) then @row.nil? && n == 0 && depth == 0
+    in Meta::Expr::Arg(name, depth, _) then depth == n && name == @row
+    else false
+    end
+  end
+
+  private def none -> Array[Symbol]?
+    out: Array[Symbol] = []
+    out
+  end
+
+  private def all(es: Array[Meta::Expr], n: Int) -> Array[Symbol]?
+    out: Array[Symbol] = []
+    es.each do |x|
+      found = collect(x, n)
+      return nil unless found
+      out = out + found
+    end
+    out
   end
 
   private def row?(e: Meta::Expr) -> Bool
