@@ -23,11 +23,11 @@ data Column = (
 data Association = (
   # `:belongs_to` or `:has_many`.
   kind: Symbol,
-  # Its name: `:account` for `belongs_to :account`, `:posts` for
-  # `has_many :posts`.
+  # Its name: `:account` for `belongs_to Account`, `:posts` for
+  # `has_many Post`.
   name: Symbol,
-  # The associated model's class name (`"Account"`, `"Post"`).
-  class_name: String,
+  # The associated model's class.
+  target: Type[Model],
   # The column that holds the key: this model's for `belongs_to`
   # (`account_id`), the other's for `has_many` (`user_id`).
   foreign_key: Symbol
