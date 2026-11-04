@@ -188,6 +188,19 @@ end
 - `Rotor::Adapter` (`query`, `transaction`) is the boundary to the
   database; `Rotor::Adapters::PG` is pg's, over a pool or a connection.
 
+## Developing
+
+To work on rotor against a local checkout of pg, write `Cog.local.toml`
+beside `Cog.toml` (git ignores it):
+
+```toml
+[patch]
+PG = { path = "../quarz-pg" }
+```
+
+The lock ignores it: switching the local patch on or off changes no
+committed file, and CI and users get pg's git main.
+
 ## Tests
 
 `quarz test` (and `--release`, `--doc`). The repository's tests run on

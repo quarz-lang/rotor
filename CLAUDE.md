@@ -7,8 +7,10 @@ Code, comments, commit messages and the docs are in English.
 
 - `Cog.toml` (`module = "Rotor"`), `src/` (declarations only),
   `test/*_test.qz` (`require "test"`, Test::Case), README.md, LICENSE.
-- Depends on pg (`PG`), through `[patch]` on a checkout of it at
-  `../quarz-pg` while both are developed together.
+- Depends on pg (`PG`, its main branch). To develop against a local
+  checkout of pg, write `Cog.local.toml` (ignored by git):
+  `[patch]` / `PG = { path = "../quarz-pg" }`. CI uses pg's main, as
+  users do: a rotor change that needs a pg change waits for the pg PR.
 - The schema is generated at compile time by `static def`s (Quarz's
   docs/14); queries are `Quoted` blocks translated to SQL.
 
