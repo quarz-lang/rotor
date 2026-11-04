@@ -30,12 +30,12 @@ class Repo
   @adapter: Adapter
 
   # Over a pg pool: each statement takes a connection.
-  def initialize(*, pool: Driver::Pool)
+  def initialize(*, pool: ::PG::Pool)
     @adapter = Adapters::PG.new(pool: pool)
   end
 
   # Over one pg connection.
-  def initialize(*, connection: Driver::Connection)
+  def initialize(*, connection: ::PG::Connection)
     @adapter = Adapters::PG.new(connection: connection)
   end
 
