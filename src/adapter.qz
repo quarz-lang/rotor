@@ -1,8 +1,3 @@
-# :nodoc:
-# The pg cog (this cog's dependency `PG`), by a name `Adapters::PG` does
-# not hide (a dependency's key is reachable by its bare name only).
-Driver = PG
-
 # What a repository runs its statements through: a database and its
 # driver. `Rotor::Adapters::PG` is PostgreSQL's, over pg.
 abstract class Adapter
@@ -81,17 +76,17 @@ module Adapters
   # PostgreSQL, through pg: over a pool (each statement takes a
   # connection; a transaction keeps one) or one connection.
   class PG < Adapter
-    @pool: Driver::Pool?
-    @conn: Driver::Connection?
+    @pool: ::PG::Pool?
+    @conn: ::PG::Connection?
 
     # Over a pool.
-    def initialize(*, pool: Driver::Pool)
+    def initialize(*, pool: ::PG::Pool)
       @pool = pool
       @conn = nil
     end
 
     # Over one connection.
-    def initialize(*, connection: Driver::Connection)
+    def initialize(*, connection: ::PG::Connection)
       @pool = nil
       @conn = connection
     end
@@ -100,7 +95,7 @@ module Adapters
       result = if c = @conn
                  c.query(sql, params)
                else
-                 @pool.as(Driver::Pool).query(sql, params)
+                 @pool.as(::PG::Pool).query(sql, params)
                end
       PGRows.new(result)
     end
@@ -109,16 +104,16 @@ module Adapters
       if c = @conn
         c.transaction { |t| yield PG.new(connection: t) }
       else
-        @pool.as(Driver::Pool).transaction { |t| yield PG.new(connection: t) }
+        @pool.as(::PG::Pool).transaction { |t| yield PG.new(connection: t) }
       end
     end
   end
 
   # pg's result as `Rotor::Rows`.
   class PGRows < Rows
-    @result: Driver::Result
+    @result: ::PG::Result
 
-    def initialize(@result: Driver::Result); end
+    def initialize(@result: ::PG::Result); end
 
     def columns -> Array[String] = @result.column_names
     def rows -> Array[Row] = @result.rows.map { |r| PGRow.new(r).as(Row) }
@@ -127,9 +122,9 @@ module Adapters
 
   # pg's row as a `Rotor::Row`, through its typed readers.
   class PGRow < Row
-    @row: Driver::Row
+    @row: ::PG::Row
 
-    def initialize(@row: Driver::Row); end
+    def initialize(@row: ::PG::Row); end
 
     def int?(i: Int) -> Int? = @row.int?(i)
     def float?(i: Int) -> Float? = @row.float?(i)
