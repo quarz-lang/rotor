@@ -1,5 +1,6 @@
 # Tests the cog against Quarz's main branch, built from source, pg's main
-# branch and a PostgreSQL server (its integration tests read PG_TEST_URL).
+# branch (fetched as users get it) and a PostgreSQL server (its integration
+# tests read PG_TEST_URL).
 name: CI
 
 on:
@@ -32,8 +33,6 @@ jobs:
     steps:
       - name: Check out this cog
         uses: actions/checkout@v7
-      - name: Check out pg (main) beside it, for Cog.toml's [patch]
-        run: git clone --depth 1 https://github.com/quarz-lang/pg "$GITHUB_WORKSPACE/../quarz-pg"
       - name: Check out Quarz (main), to build it
         uses: actions/checkout@v7
         with:
