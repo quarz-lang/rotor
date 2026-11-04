@@ -131,7 +131,7 @@ class Schema
   end
 
   # The methods of `Rotor::Model` that a column's getter would replace.
-  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :load_values, :table_info, :read, :write, :checkpoint, :restore, :inspect, :to_s]
+  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s]
 
   private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool) -> Void
     if RESERVED.include?(name)

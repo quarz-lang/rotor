@@ -148,8 +148,7 @@ class QueryTest < Test::Case
     # No defaults for what was not fetched; an assigned column reads.
     h: Hash[Symbol, Object?] = {id: 1}
     assert_equal(h, part.to_h)
-    part.age = 5
-    assert_equal(5, part.age)
+    assert_equal(5, part.with(age: 5).age)
     e = assert_raise(ArgumentError) { Person.select { name }.where { |n| n == "x" } }
     assert_equal("`where` after `select`, `count` or `exists`: write it before", e.message)
   end

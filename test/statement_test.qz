@@ -22,10 +22,9 @@ class StatementTest < Test::Case
   end
 
   def test_insert
-    i = Item.new
-    i.name = "pen"
+    i = Item.new.with(name: "pen")
     check(Rotor::Statement.insert(i), "INSERT INTO \"items\" (\"name\", \"price\", \"qty\") VALUES ($1, $2, $3)", ["pen", 1.0, 0])
-    i.note = nil
+    i = i.with(note: nil)
     check(
       Rotor::Statement.insert(i).returning(:id),
       "INSERT INTO \"items\" (\"name\", \"price\", \"note\", \"qty\") VALUES ($1, $2, $3, $4) RETURNING \"id\"", ["pen", 1.0, nil, 0]
@@ -42,20 +41,19 @@ class StatementTest < Test::Case
   def test_update_and_delete_of_a_model
     i = Item.load({id: 3, name: "pen", price: 2.0, qty: 1})
     assert_nil(Rotor::Statement.update(i))
-    i.qty = 2
-    i.note = "x"
+    i = i.with(qty: 2, note: "x")
     s = Rotor::Statement.update(i)
     assert(s)
-    check(s.as(Rotor::Statement), "UPDATE \"items\" SET \"qty\" = $1, \"note\" = $2 WHERE \"id\" = $3", [2, "x", 3])
+    # (One `with`: in the columns' order.)
+    check(s.as(Rotor::Statement), "UPDATE \"items\" SET \"note\" = $1, \"qty\" = $2 WHERE \"id\" = $3", ["x", 2, 3])
     check(Rotor::Statement.delete(i), "DELETE FROM \"items\" WHERE \"id\" = $1", [3])
-    l = Log.new
-    l.text = "t"
+    l = Log.new.with(text: "t")
     e = assert_raise(ArgumentError) { Rotor::Statement.delete(l) }
     assert_equal("`logs` has no primary key", e.message)
     n = Item.new
     e2 = assert_raise(Rotor::MissingAttributeError) { Rotor::Statement.delete(n) }
     assert_equal("Item#id is not set", e2.message)
-    i.id = 8
+    i = i.with(id: 8)
     e = assert_raise(ArgumentError) { Rotor::Statement.update(i) }
     assert_equal("Item#id, the primary key, was assigned: the row it named is not known", e.message)
   end
