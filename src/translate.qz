@@ -1,18 +1,25 @@
+# What a parameter of a statement may be: the values PostgreSQL is
+# given (a symbol as its name).
+type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol
+
 # A piece of SQL: text, a column of one of a query's tables (by the
 # table's index among them: qualified by the table's alias in a join),
 # or the value of a parameter, numbered (`$n`) when the statement is put
-# together.
+# together. A translation the cache keeps (`Rotor::Cache`) holds
+# `Bound` pieces, parameters made from the block's captures, which each
+# build fills in with its own (`Rotor::Binds.fill`).
 enum Piece
   variant Text(text: String)
   variant Column(source: Int, name: Symbol)
-  variant Param(value: Object?)
+  variant Param(value: Bindable?)
+  variant Bound(bind: Bind)
 end
 
 # A translated expression: its pieces, its precedence (to parenthesize it
 # where it is an operand), and what the translator knows of it: the
 # column it is, or the value it has (`known`) when it is a literal or a
-# capture.
-data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Object?, known: Bool)
+# capture, and then (`bind`) the capture it is made from.
+data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil)
 
 # A block of a query's tree as the translator sees it: its parameters,
 # the table (an index among the query's) each one is a row of, or nil,
@@ -56,9 +63,17 @@ class Translator
   @file: String
   # The blocks the expressions translated are in, the innermost last.
   @scopes: Array[Scope]
+  # What the translation looked at of the captures (shared with the
+  # translators of the blocks inside).
+  @guards: Guards
 
-  def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope])
+  def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope], @guards: Guards = Guards.new)
   end
+
+  # The kinds of captured values the translation so far holds for: the
+  # same tree with captures of these kinds translates the same, up to
+  # the values of its `Rotor::Piece::Bound` pieces.
+  def guards -> Array[Guard] = @guards.list
 
   # The translator of a quoted block over the rows of `sources`, and the
   # block's one expression.
@@ -99,7 +114,7 @@ class Translator
   # This translator for a block inside the one it translates, whose
   # scope is `scope`, over `sources` (the tables a `for` has joined so
   # far).
-  def inner(sources: Array[Source], scope: Scope) -> Translator = Translator.new(sources, @captures, @file, @scopes + [scope])
+  def inner(sources: Array[Source], scope: Scope) -> Translator = Translator.new(sources, @captures, @file, @scopes + [scope], @guards)
 
   # The table whose row `e` is (an index among the query's), `NONE`
   # for none.
@@ -131,7 +146,7 @@ class Translator
   def sql(e: Meta::Expr) -> Sql
     case e
     in Meta::Expr::Lit(value, line) then literal(value, line)
-    in Meta::Expr::Capture(index, _, line) then param(@captures[index], line)
+    in Meta::Expr::Capture(index, _, line) then bound(Bind::Capture.new(index), line)
     in Meta::Expr::And(l, r, _) then binary(sql(l), "AND", sql(r), AND, true)
     in Meta::Expr::Or(l, r, _) then binary(sql(l), "OR", sql(r), OR, true)
     in Meta::Expr::Not(x, _) then prefix("NOT", sql(x), NOT)
@@ -346,11 +361,36 @@ class Translator
   end
 
   private def param(value: Object?, line: Int) -> Sql
+    v = bindable(value, line)
+    Sql.new([Piece::Param.new(v)], ATOM, nil, v, true)
+  end
+
+  # The parameter made from the captures by `bind`, its value this
+  # build's: a `Bound` piece, and a guard on the value's kind.
+  private def bound(bind: Bind, line: Int) -> Sql
+    v = bindable(look(bind), line)
+    Sql.new([Piece::Bound.new(bind)], ATOM, nil, v, true, bind)
+  end
+
+  # The captured value `bind` reads, noted as looked at.
+  private def look(bind: Bind) -> Object?
+    v = Binds.value(bind, @captures)
+    @guards.add(Guard.new(bind, Binds.kind(v)))
+    v
+  end
+
+  # `value` as a statement's parameter.
+  private def bindable(value: Object?, line: Int) -> Bindable?
     case value
-    in nil | Int | Float | String | Bool | Time | Bytes | Symbol
-      Sql.new([Piece::Param.new(value)], ATOM, nil, value, true)
-    else
-      untranslatable("a value of class #{value.class.name}", line)
+    in nil then nil
+    in Int => x then x
+    in Float => x then x
+    in String => x then x
+    in Bool => x then x
+    in Time => x then x
+    in Bytes => x then x
+    in Symbol => x then x
+    else untranslatable("a value of class #{value.class.name}", line)
     end
   end
 
@@ -440,11 +480,11 @@ class Translator
     return nil unless args.empty? && block.nil? && !m.singleton
     case recv
     in Meta::Expr::Capture(index, _, _)
-      case v = @captures[index]
+      case v = look(Bind::Capture.new(index))
       in Model => model
         return nil unless model.class <= m.owner
         return nil unless model.table_info.columns.any? { |c| c.name == m.name }
-        param(model.read(m.name), line)
+        bound(Bind::Read.new(index, m.name), line)
       else
         nil
       end
@@ -486,7 +526,7 @@ class Translator
   private def coerce(s: Sql, other: Column?) -> Sql
     case [s.value, other]
     in [Int => i, Column => c] if s.known && c.type == Float
-      Sql.new([Piece::Param.new(i.to_f)], ATOM, nil, i.to_f, true)
+      Binds.to_float(s, i)
     else
       s
     end
@@ -505,8 +545,11 @@ class Translator
     items = case arr
             in Meta::Expr::ArrayLit(es, _) then es.map { |e| sql(e) }
             in Meta::Expr::Capture(index, _, l)
-              case v = @captures[index]
-              in Array => xs then xs.map { |y| param(y, l) }
+              case v = look(Bind::Capture.new(index))
+              in Array => xs
+                out: Array[Sql] = []
+                xs.each_with_index { |_, j| out = out + [bound(Bind::Item.new(index, j), l)] }
+                out
               else untranslatable("`include?` on a #{v.class.name}", l)
               end
             else untranslatable("`Array#include?` on an array SQL does not have", line)
@@ -533,13 +576,13 @@ class Translator
     unless a.known && v.is_a?(String)
       untranslatable("#{label} of something other than a string value", line)
     end
-    e = SQL.escape_like(v.as(String))
-    pattern = case name
-              in "start_with?" then "#{e}%"
-              in "end_with?" then "%#{e}"
-              else "%#{e}%"
-              end
-    binary(s, "LIKE", Sql.new([Piece::Param.new(pattern)], ATOM, nil, pattern, true), LIKE, false)
+    pattern = Binds.pattern(v.as(String), name)
+    piece = if b = a.bind
+              Piece::Bound.new(Bind::Like.new(b, name))
+            else
+              Piece::Param.new(pattern)
+            end
+    binary(s, "LIKE", Sql.new([piece], ATOM, nil, pattern, true), LIKE, false)
   end
 
   # `Rotor::SQL.like(s, pattern)` and the others.

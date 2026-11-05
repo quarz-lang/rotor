@@ -15,6 +15,9 @@
 # Rotor::Statement.delete(u).to_sql  # => ["DELETE FROM \"users\" WHERE \"id\" = $1", [7]]
 # ```
 class Statement
+  # (Its parameters' values are `Shareable`: a statement can be a
+  # constant or go to another task.)
+  include Shareable
   @table: TableInfo
   @pieces: Array[Piece]
   @returning: Array[Symbol]?
@@ -101,6 +104,8 @@ class Statement
         in Piece::Param(v)
           params = params + [v]
           b << Dialect.param(params.size)
+        # (Filled in before: `Rotor::Binds.fill`.)
+        in Piece::Bound(_) then raise ArgumentError.new("a parameter not filled in")
         end
       end
     end

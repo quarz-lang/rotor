@@ -123,8 +123,7 @@ v = repo.update(v)                    # saved: v.changed => []
   the model given, not a state the object accumulated.
 - A model class is `Shareable`, so it cannot declare a `var` field (the
   checker refuses it); a value derived from the columns is a method.
-- Queries are not `Shareable` yet (Quarz's open item #72): a model
-  crosses tasks, a query does not.
+- Queries and statements are `Shareable` too (below).
 
 ## Queries and statements
 
@@ -183,10 +182,19 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   with `==`, `!=` and `nil?` only, for now.
 - Identifiers are always quoted. The SQL is PostgreSQL's
   (`Rotor::Dialect`), the one dialect for now.
-- A query is translated each time it is built: about 26 µs for a
-  `where` of three conditions with an order and a limit, compiled
-  (59 µs interpreted). Queries are not `Shareable` yet (their captured
-  values are `Object`s), so one cannot be a constant.
+- A block's translation is kept for the process, by its call site
+  (Quarz's `Quoted#site`) and the models of the query's tables: building
+  a query again where it was built before translates nothing, and fills
+  in the parameters with the values captured this time. The SQL may
+  depend on what kind of values the block captured (nil is `IS NULL`, an
+  array's size the `IN (...)` list's), so each kind seen at a site is an
+  entry of its own. The cache never evicts: an entry per call site and
+  kinds of its captures, a fixed set for a program. A `where` of three
+  conditions with an order and a limit builds in about 10 µs compiled
+  (22 µs translating each time; 19 µs interpreted, 52 µs before).
+- Queries are `Shareable` (Quarz's docs/03): a query can be a constant
+  (`ACTIVE = User.where { active }`), be captured by `Task.spawn` or sent
+  on a `Channel`, and run in another task; so can a `Rotor::Statement`.
 - `select`'s block is evaluated in Quarz, not in SQL: the query fetches
   the columns the block reads (every column when it calls another
   method of the row or passes it on), and each row, loaded with those
@@ -309,7 +317,8 @@ User.query.join(Post) { |u, p| p.editor_id == u.id }
   Orders come after the outer query's.
 - A `for`'s rows are made by its body as Quarz code, with the columns it
   reads: the body runs for each distinct outer row, building the inner
-  query again (some microseconds a row). For large results, prefer
+  query again (its translation kept, about 29 µs a row compiled, 35 µs
+  translating each time). For large results, prefer
   `join`, whose pairs are built directly; `where`, `order`, `select`
   (`select { |u, p| ... }`), `count` and `limit` follow it, with a block
   parameter per table.

@@ -1,0 +1,103 @@
+require "test"
+
+class Rack < Rotor::Model
+  table "racks" do
+    column :id, Int, primary: true
+    column :label, String
+    column :owner_id, Int, null: true
+    column :width, Float
+    column :open, Bool, default: true
+    has_many Disc
+  end
+end
+
+class Disc < Rotor::Model
+  table "discs" do
+    column :id, Int, primary: true
+    column :rack_id, Int
+    column :title, String
+  end
+end
+
+# A query and a statement as constants: both are Shareable.
+OPEN_RACKS = Rack.where { open }.order { label }
+CLEAR_RACKS = Rack.where { !open }.delete
+
+class CacheTest < Test::Case
+  S = "SELECT \"id\", \"label\", \"owner_id\", \"width\", \"open\" FROM \"racks\""
+
+  def check[T](q: Rotor::Query[T], text: String, params: Array[Object?]) -> Void
+    assert_equal([text, params], q.to_sql)
+  end
+
+  def by_owner(owner: Int?) -> Rotor::Query[Rack] = Rack.where { owner_id == owner }
+
+  def labelled(prefix: String) -> Rotor::Query[Rack] = Rack.where { label.start_with?(prefix) }
+
+  def among(ids: Array[Int]) -> Rotor::Query[Rack] = Rack.where { ids.include?(id) }
+
+  def wider(w: Int) -> Rotor::Query[Rack] = Rack.where { width > w }
+
+  def owned_by(s: Rack) -> Rotor::Query[Rack] = Rack.where { owner_id == s.owner_id }
+
+  def titled(x: String) -> Rotor::Query[Int] = for s in Rack.query, t in s.discs.query when t.title == x do t.id end
+
+  def widen(w: Int) -> Rotor::Statement = Rack.where { id == w }.update { |s| {width: w} }
+
+  def test_queries_and_statements_are_shareable
+    check(OPEN_RACKS, "#{S} WHERE \"open\" ORDER BY \"label\"", [])
+    assert_equal(["DELETE FROM \"racks\" WHERE NOT \"open\"", []], CLEAR_RACKS.to_sql)
+    # Built in one task, run (here, put to SQL) in another.
+    n = 3
+    q = Task.spawn { Rack.where { id > n }.limit(2) }.await
+    assert_equal("#{S} WHERE \"id\" > $1 LIMIT 2", Task.spawn { q.to_sql[0] }.await)
+    check(q, "#{S} WHERE \"id\" > $1 LIMIT 2", [3])
+    ch = Channel[Rotor::Query[Rack]].new(1)
+    ch.send(OPEN_RACKS)
+    assert_equal(OPEN_RACKS.to_sql, ch.receive.to_sql)
+  end
+
+  def test_a_site_is_translated_once
+    by_owner(1)
+    made = Rotor::Cache.translations
+    check(by_owner(2), "#{S} WHERE \"owner_id\" = $1", [2])
+    check(by_owner(7), "#{S} WHERE \"owner_id\" = $1", [7])
+    assert_equal(made, Rotor::Cache.translations)
+    # The same tree over a join is another key.
+    titled("x")
+    made = Rotor::Cache.translations
+    check(titled("y"), "SELECT \"r0\".\"id\", \"d1\".\"id\" FROM \"racks\" AS \"r0\" INNER JOIN \"discs\" AS \"d1\" ON \"d1\".\"rack_id\" = \"r0\".\"id\" AND \"d1\".\"title\" = $1", ["y"])
+    assert_equal(made, Rotor::Cache.translations)
+  end
+
+  def test_captures_of_another_kind_are_translated_again
+    # nil is `IS NULL`, a value `= $1`: one entry for each kind.
+    check(by_owner(nil), "#{S} WHERE \"owner_id\" IS NULL", [])
+    check(by_owner(4), "#{S} WHERE \"owner_id\" = $1", [4])
+    made = Rotor::Cache.translations
+    check(by_owner(nil), "#{S} WHERE \"owner_id\" IS NULL", [])
+    check(by_owner(5), "#{S} WHERE \"owner_id\" = $1", [5])
+    assert_equal(made, Rotor::Cache.translations)
+    # An array's size gives the list's.
+    check(among([1, 2]), "#{S} WHERE \"id\" IN ($1, $2)", [1, 2])
+    check(among([3]), "#{S} WHERE \"id\" IN ($1)", [3])
+    check(among([4, 5]), "#{S} WHERE \"id\" IN ($1, $2)", [4, 5])
+    check(among([]), "#{S} WHERE FALSE", [])
+    # What is made of a value is made of each build's.
+    check(labelled("a_"), "#{S} WHERE \"label\" LIKE $1", ["a\\_%"])
+    check(labelled("b%"), "#{S} WHERE \"label\" LIKE $1", ["b\\%%"])
+    check(wider(2), "#{S} WHERE \"width\" > $1", [2.0])
+    check(wider(3), "#{S} WHERE \"width\" > $1", [3.0])
+    # A captured model's column, nil or not.
+    check(owned_by(Rack.load({id: 1, label: "a", owner_id: 9, width: 1.0})), "#{S} WHERE \"owner_id\" = $1", [9])
+    check(owned_by(Rack.load({id: 1, label: "a", owner_id: nil, width: 1.0})), "#{S} WHERE \"owner_id\" IS NULL", [])
+    check(owned_by(Rack.load({id: 1, label: "a", owner_id: 8, width: 1.0})), "#{S} WHERE \"owner_id\" = $1", [8])
+    # A column it did not load still raises, from the cache too.
+    assert_raise(Rotor::NotLoadedError) { owned_by(Rack.load_partial({label: "a"})) }
+    # `update`'s values.
+    u: Array[Object?] = [1.0, 1]
+    assert_equal(["UPDATE \"racks\" SET \"width\" = $1 WHERE \"id\" = $2", u], widen(1).to_sql)
+    u = [2.0, 2]
+    assert_equal(["UPDATE \"racks\" SET \"width\" = $1 WHERE \"id\" = $2", u], widen(2).to_sql)
+  end
+end

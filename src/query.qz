@@ -15,12 +15,12 @@ data Fetched = (values: Hash[Symbol, Object?], all: Bool)
 
 # How a query's rows become `T`s: from the values each of its tables
 # gave, row by row.
-type Loader[T] = (Array[Array[Fetched]]) -> Array[T]
+type Loader[T] = shareable (Array[Array[Fetched]]) -> Array[T]
 
 # What a query of models does with them for a preload
 # (`Rotor::Query#preload`): a row as a model, and a row with the
 # associations preloaded for it.
-data ModelOps[T] = (as_model: (T) -> Model, attach: (T, Hash[Symbol, Array[Model]]) -> T)
+data ModelOps[T] = (as_model: shareable (T) -> Model, attach: shareable (T, Hash[Symbol, Array[Model]]) -> T)
 
 # A query over a model's table, as a value: what `Rotor::Model.where`
 # and the others build, and a repository runs. Each method gives a new
@@ -44,7 +44,13 @@ data ModelOps[T] = (as_model: (T) -> Model, attach: (T, Hash[Symbol, Array[Model
 # ```
 #
 # `T` is what a row gives: the model, or what `select` projects.
+#
+# A query is `Shareable`: a constant (`ACTIVE = User.where { active }`),
+# a value a task's block captures or a channel carries. Its blocks'
+# translations are kept for the process (`Rotor::Cache`), so building a
+# query again where it was built before costs no translation.
 class Query[T]
+  include Shareable
   # What a query gives: its rows, their number, or whether there is one.
   enum Shape = Rows | Count | Exists
 
@@ -62,10 +68,15 @@ class Query[T]
   # The associations to preload for its rows, and how (a query of
   # models: nil after `select`).
   @preloads: Array[Preload]
-  @ops: ModelOps[T]?
+  # (Its `ModelOps`, as procedures: a `ModelOps[T]` is Shareable only
+  # by its argument.)
+  @as_model: (shareable (T) -> Model)?
+  @attach: (shareable (T, Hash[Symbol, Array[Model]]) -> T)?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
+  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], ops: ModelOps[T]? = nil)
+    @as_model = ops&.as_model
+    @attach = ops&.attach
   end
 
   # The table (the first, in a join).
@@ -93,7 +104,7 @@ class Query[T]
     s = if value.nil?
           Sql.new([col, Piece::Text.new(" IS NULL")], Translator::IS, nil, nil, false)
         else
-          Sql.new([col, Piece::Text.new(" = "), Piece::Param.new(value)], Translator::CMP, nil, nil, false)
+          Sql.new([col, Piece::Text.new(" = "), Piece::Param.new(Binds.parameter(value))], Translator::CMP, nil, nil, false)
         end
     copy(wheres: @wheres + [s])
   end
@@ -160,19 +171,19 @@ class Query[T]
   # u.age > 18 }`, which `for` comprehensions use); a block that names
   # nothing of the row (`where { true }`) is ambiguous between the two:
   # write `where { |u| true }`.
-  def where(&cond: Quoted[shareable T.() -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+  def where(&cond: Quoted[shareable T.() -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # :ditto:
-  def where(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+  def where(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # `where`, by the name `for` comprehensions call.
-  def filter(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file)
+  def filter(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # Ordered by the block's value, ascending, after the orders given before.
-  def order(&key: Quoted[shareable T.() -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file)
+  def order(&key: Quoted[shareable T.() -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
 
   # :ditto:
-  def order(&key: Quoted[shareable (T) -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file)
+  def order(&key: Quoted[shareable (T) -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
 
   # The last order descending.
   def desc -> Query[T]
@@ -199,14 +210,16 @@ class Query[T]
   # { posts })`): Ecto's `preload:`.
   def preload(&spec: Quoted[shareable T.() -> Object]) -> Query[T]
     rows!("preload")
-    @ops || raise ArgumentError.new("`preload` of a query that does not give models")
-    added = Preloads.parse(table, @sources[0].model.name, spec.expr, spec.file)
-    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), @ops)
+    ops || raise ArgumentError.new("`preload` of a query that does not give models")
+    added = Cache.fetch(Cache::PRELOADS, Cache.key(spec.site, @sources), Array[Object].new) do
+      [Preloads.parse(table, @sources[0].model.name, spec.expr, spec.file), Array[Guard].new]
+    end
+    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), ops)
   end
 
   # The rows `repo` loaded with the preloads done (`preload`).
   def preloaded(rows: Array[T], repo: Repo) -> Array[T]
-    ops = @ops
+    ops = self.ops
     return rows if @preloads.empty? || ops.nil?
     found = Preloads.run(repo, rows.map { |r| ops.as_model.call(r) }, table, @preloads)
     rows.each_with_index.map { |r, i| ops.attach.call(r, found[i]) }
@@ -225,19 +238,19 @@ class Query[T]
   # a projection.
   def select[R](&f: Quoted[shareable T.() -> R]) -> Query[R]
     proc = f.proc
-    project(f.expr, f.file, ->(row: T) { row.instance_exec(&proc) })
+    project(f.expr, f.file, f.site, ->(row: T) { row.instance_exec(&proc) })
   end
 
   # :ditto:
   def select[R](&f: Quoted[shareable (T) -> R]) -> Query[R]
     proc = f.proc
-    project(f.expr, f.file, ->(row: T) { proc.call(row) })
+    project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
   end
 
   # `select`, by the name `for` comprehensions call.
   def map[R](&f: Quoted[shareable (T) -> R]) -> Query[R]
     proc = f.proc
-    project(f.expr, f.file, ->(row: T) { proc.call(row) })
+    project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
   end
 
   # The rows of the queries the block gives for each row, in one query
@@ -278,7 +291,7 @@ class Query[T]
   def flat_map[R](&f: Quoted[shareable (T) -> Query[R]]) -> Query[R]
     rows!("flat_map")
     joinable!("flat_map")
-    plan = Joins.plan(@sources, f.expr, f.captures, f.file)
+    plan = Joins.plan(@sources, f.expr, f.captures, f.file, f.site)
     k = @sources.size
     base = @loader
     proc = f.proc
@@ -328,13 +341,13 @@ class Query[T]
   # ```
   def join[R <: Model](&assoc: Quoted[shareable T.() -> HasMany[R]]) -> Query[[T, R]]
     proc = assoc.proc
-    join_association(assoc.expr, assoc.file, ->(t: T) { t.instance_exec(&proc) })
+    join_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { t.instance_exec(&proc) })
   end
 
   # :ditto:
   def join[R <: Model](&assoc: Quoted[shareable (T) -> HasMany[R]]) -> Query[[T, R]]
     proc = assoc.proc
-    join_association(assoc.expr, assoc.file, ->(t: T) { proc.call(t) })
+    join_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { proc.call(t) })
   end
 
   # Its rows paired with the rows of `other` for which the block is true
@@ -343,8 +356,11 @@ class Query[T]
   def join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool]) -> Query[[T, R]]
     joining!
     joined = @sources + [Source.new(other.table_info, other, [], nil)]
-    t, e = Translator.of(joined, cond.expr, cond.captures, cond.file)
-    on = t.sql(e)
+    captures = cond.captures
+    on = Binds.fill_sql(Cache.fetch(Cache::CONDITIONS, Cache.key(cond.site, joined), captures) do
+      t, e = Translator.of(joined, cond.expr, captures, cond.file)
+      [t.sql(e), t.guards]
+    end, captures)
     base = @loader
     Query[[T, R]].new(@sources + [Source.new(other.table_info, other, [on], nil)], @wheres, @orders, false, nil, nil, Shape::Rows,
                       ->(rows: Array[Array[Fetched]]) {
@@ -378,10 +394,10 @@ class Query[T]
   # The rows' update: the block gives a hash literal of columns and their
   # new values, expressions of the row as in `where` (`update { {age:
   # age + 1, name: "x"} }`).
-  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file)
+  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
 
   # :ditto:
-  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file)
+  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
 
   # The SQL statement and its parameters.
   def to_sql -> [String, Array[Object?]] = Statement.render(pieces)
@@ -408,11 +424,13 @@ class Query[T]
     qualified(out)
   end
 
-  private def join_association[R <: Model](expr: Meta::Expr, file: String, get: (T) -> HasMany[R]) -> Query[[T, R]]
+  private def join_association[R <: Model](expr: Meta::Expr, file: String, site: Int, get: shareable (T) -> HasMany[R]) -> Query[[T, R]]
     joining!
-    t, e = translator(expr, Array[Object].new, file)
     first = @sources[0]
-    a, key = Joins.association(t, e, 0, first)
+    a, key = Cache.fetch(Cache::ASSOCIATIONS, Cache.key(site, @sources), Array[Object].new) do
+      t, e = translator(expr, Array[Object].new, file)
+      [Joins.association(t, e, 0, first), Array[Guard].new]
+    end
     target = Source.new(a.target.table_info, a.target, [Joins.key_condition(1, a.foreign_key, 0, key)], nil)
     base = @loader
     # (The association's class, from the getter of a row: kept with its
@@ -429,6 +447,14 @@ class Query[T]
                       })
   end
 
+  # What the query does with its models for a preload, if it gives
+  # models.
+  private def ops -> ModelOps[T]?
+    a = @as_model
+    b = @attach
+    a && b ? ModelOps[T].new(a, b) : nil
+  end
+
   # (A join of a query of one table's models.)
   private def joining! -> Void
     rows!("join")
@@ -437,42 +463,60 @@ class Query[T]
   end
 
   private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
-    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, @ops)
+    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, ops)
   end
 
   private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
     Translator.of(@sources, expr, captures, file)
   end
 
-  private def add_where(expr: Meta::Expr, captures: Array[Object], file: String) -> Query[T]
+  # The translation of a condition's block, kept by its site
+  # (`Rotor::Cache`), with this build's parameters.
+  private def condition(expr: Meta::Expr, captures: Array[Object], file: String, site: Int, what: String) -> Sql
+    kept = Cache.fetch(Cache::CONDITIONS, Cache.key(site, @sources), captures) do
+      t, e = translator(expr, captures, file)
+      s = t.sql(e)
+      # (`ORDER BY 1` would be the first column.)
+      t.untranslatable("an order by a constant", Translator.line_of(e)) if what == "order" && s.known
+      [s, t.guards]
+    end
+    Binds.fill_sql(kept, captures)
+  end
+
+  private def add_where(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Query[T]
     rows!("where")
-    t, e = translator(expr, captures, file)
-    copy(wheres: @wheres + [t.sql(e)])
+    copy(wheres: @wheres + [condition(expr, captures, file, site, "where")])
   end
 
-  private def add_order(expr: Meta::Expr, captures: Array[Object], file: String) -> Query[T]
+  private def add_order(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Query[T]
     rows!("order")
-    t, e = translator(expr, captures, file)
-    key = t.sql(e)
-    # (`ORDER BY 1` would be the first column.)
-    t.untranslatable("an order by a constant", Translator.line_of(e)) if key.known
-    copy(orders: @orders + [[key, false]])
+    copy(orders: @orders + [[condition(expr, captures, file, site, "order"), false]])
   end
 
-  private def project[R](expr: Meta::Expr, file: String, f: (T) -> R) -> Query[R]
+  private def project[R](expr: Meta::Expr, file: String, site: Int, f: shareable (T) -> R) -> Query[R]
     rows!("select")
     raise ArgumentError.new("`select` after `preload`: a projection has no models to preload for") unless @preloads.empty?
-    t, e = translator(expr, Array[Object].new, file)
-    reads = t.reads(e)
+    reads = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
+      t, e = translator(expr, Array[Object].new, file)
+      [t.reads(e), Array[Guard].new]
+    end
     base = @loader
     # (The row loaded with the columns fetched, then the block on it.)
     Query[R].new(@sources.each_with_index.map { |s, i| Joins.fetching(s, reads[i]) }, @wheres, @orders, true, @limit, @offset, @shape,
                  ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } })
   end
 
-  private def update_set(expr: Meta::Expr, captures: Array[Object], file: String) -> Statement
+  private def update_set(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Statement
     plain!("update")
-    t, e = translator(expr, captures, file)
+    sets = Cache.fetch(Cache::SETS, Cache.key(site, @sources), captures) do
+      t, e = translator(expr, captures, file)
+      [set_pieces(t, e, file), t.guards]
+    end
+    Statement.new(table, Binds.fill(sets, captures) + where_pieces, nil)
+  end
+
+  # The `UPDATE ... SET` of `update`'s block `e`.
+  private def set_pieces(t: Translator, e: Meta::Expr, file: String) -> Array[Piece]
     pairs = case e
             in Meta::Expr::HashLit(ps, _) then ps
             in _ then t.untranslatable("an `update` block that is not a hash literal", Translator.line_of(e))
@@ -498,7 +542,7 @@ class Query[T]
         if x.nil?
           raise ArgumentError.new("#{model_name}##{name} cannot be nil (#{file}:#{Translator.line_of(value)})") unless c.null
         elsif c.type == Float && x.is_a?(Int)
-          v = Sql.new([Piece::Param.new(x.as(Int).to_f)], Translator::ATOM, nil, x.as(Int).to_f, true)
+          v = Binds.to_float(v, x.as(Int))
         elsif !x.is_a?(c.type)
           raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{Translator.line_of(value)})")
         end
@@ -506,7 +550,7 @@ class Query[T]
       sets = sets + [Piece::Text.new(", ")] if i > 0
       sets = sets + [Piece::Text.new("#{Dialect.quote(name.to_s)} = ")] + v.pieces
     end
-    Statement.new(table, sets + where_pieces, nil)
+    sets
   end
 
   private def model_name -> String = @sources[0].model.name
