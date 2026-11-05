@@ -73,6 +73,18 @@ end
 class Guest < User
 end
 
+# The same in another module (its name differs too).
+module Shop
+  class User < ::User
+  end
+end
+
+# A subclass whose class method `name` says `User`: still another class,
+# refused (the check compares the classes, not their names).
+class Impostor < User
+  def self.name -> String = "User"
+end
+
 class ModelTest < Test::Case
   def test_typed_accessors
     u = User.new(name: "Ann")
@@ -258,12 +270,30 @@ class ModelTest < Test::Case
     assert_equal(message, e.message)
     e = assert_raise(Rotor::SchemaError) { Guest.where { name == "x" } }
     assert_equal(message, e.message)
+    shop = "Shop::User has no table; a model declares its own; single-table inheritance is not provided"
+    e = assert_raise(Rotor::SchemaError) { Shop::User.new(name: "x") }
+    assert_equal(shop, e.message)
+    e = assert_raise(Rotor::SchemaError) { Shop::User.table_name }
+    assert_equal(shop, e.message)
+    e = assert_raise(Rotor::SchemaError) { Shop::User.load({id: 1, name: "x"}) }
+    assert_equal(shop, e.message)
+    # (Its message names the class by its `name`.)
+    impostor = "User has no table; a model declares its own; single-table inheritance is not provided"
+    e = assert_raise(Rotor::SchemaError) { Impostor.table_name }
+    assert_equal(impostor, e.message)
+    e = assert_raise(Rotor::SchemaError) { Impostor.new(name: "x") }
+    assert_equal(impostor, e.message)
+    e = assert_raise(Rotor::SchemaError) { Impostor.load({id: 1, name: "x"}) }
+    assert_equal(impostor, e.message)
+    # `User` itself is unaffected.
+    assert_equal("users", User.table_name)
   end
 
   def test_a_model_of_a_model_does_not_compile
     out = Process.sh("cd test/fixtures/model_of_model && exec \"${QUARZ:-quarz}\" check")
     assert(!out.success?)
     assert_match(/Pencil subclasses a model with a table: a model's superclass is Rotor::Model or a class without a `table`/, out.stderr)
+    assert_match(/Shop::User subclasses a model with a table/, out.stderr)
   end
 
   def test_columns_cross_tasks

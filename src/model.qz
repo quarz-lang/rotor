@@ -107,7 +107,9 @@ class Model
     # (First: a second `table` block in the class is refused at it,
     # "already has a class method `table_name`".)
     doc "The table's name: `#{table}`."
-    owner = self.name
+    # (The class itself, a value the generated members capture: compared
+    # by identity, not by name.)
+    owner = type
     def_class_method(:table_name) { Model.own_table!(self, owner); table }
     doc "The columns of `#{table}`, in order."
     def_class_method(:columns) { Model.own_table!(self, owner); cols }
@@ -330,12 +332,13 @@ class Model
 
   private def self.no_table -> String = no_table_of(name)
 
-  # Raises unless `klass` is `owner` (by name), the class whose `table`
-  # generated the member called: a subclass that inherits a table is
+  # Raises unless `klass` is `owner`, the class whose `table` generated
+  # the member called (the class itself, by `equal?`, which no class can
+  # redefine, as `==` can be): a subclass that inherits a table is
   # refused at its first use (the members `with` among them are its
   # parent's).
-  def self.own_table!(klass: Class, owner: String) -> Void
-    return if klass.name == owner
+  def self.own_table!(klass: Class, owner: Class) -> Void
+    return if klass.equal?(owner)
     raise SchemaError.new("#{klass.name} has no table; a model declares its own; single-table inheritance is not provided")
   end
 

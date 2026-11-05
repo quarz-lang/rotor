@@ -12,3 +12,21 @@ class Pencil < Pen
 end
 
 p Pencil.new
+
+# The same across modules: `Shop::User` would inherit `Base::User`'s
+# table.
+module Base
+  class User < Rotor::Model
+    table "users" do
+      column :id, Int, primary: true
+    end
+  end
+end
+
+module Shop
+  class User < Base::User
+    table "shop_users" do
+      column :id, Int, primary: true
+    end
+  end
+end
