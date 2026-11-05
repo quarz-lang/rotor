@@ -257,7 +257,7 @@ class ModelTest < Test::Case
   end
 
   def test_a_subclass_that_inherits_a_table
-    message = "Guest has no table; a model declares its own; single-table inheritance is not provided"
+    message = "Guest has no table: it inherits User's; a model declares its own; single-table inheritance is not provided"
     e = assert_raise(Rotor::SchemaError) { Guest.new }
     assert_equal(message, e.message)
     e = assert_raise(Rotor::SchemaError) { Guest.new(name: "x") }
@@ -270,15 +270,15 @@ class ModelTest < Test::Case
     assert_equal(message, e.message)
     e = assert_raise(Rotor::SchemaError) { Guest.where { name == "x" } }
     assert_equal(message, e.message)
-    shop = "Shop::User has no table; a model declares its own; single-table inheritance is not provided"
+    shop = "Shop::User has no table: it inherits User's; a model declares its own; single-table inheritance is not provided"
     e = assert_raise(Rotor::SchemaError) { Shop::User.new(name: "x") }
     assert_equal(shop, e.message)
     e = assert_raise(Rotor::SchemaError) { Shop::User.table_name }
     assert_equal(shop, e.message)
     e = assert_raise(Rotor::SchemaError) { Shop::User.load({id: 1, name: "x"}) }
     assert_equal(shop, e.message)
-    # (Its message names the class by its `name`.)
-    impostor = "User has no table; a model declares its own; single-table inheritance is not provided"
+    # (Its message names the class by its `name`: the same name twice.)
+    impostor = "User has no table: it inherits User's; a model declares its own; single-table inheritance is not provided"
     e = assert_raise(Rotor::SchemaError) { Impostor.table_name }
     assert_equal(impostor, e.message)
     e = assert_raise(Rotor::SchemaError) { Impostor.new(name: "x") }

@@ -75,8 +75,9 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   a model whose superclass has a table does not compile (at its
   `table`, when the superclass's ran first: in a cog it depends on, or
   earlier in its own cog's order), and a subclass that inherits a table without one of its own
-  raises `Rotor::SchemaError` at its first use ("Guest has no table; a
-  model declares its own; single-table inheritance is not provided").
+  raises `Rotor::SchemaError` at its first use ("Guest has no table: it
+  inherits User's; a model declares its own; single-table inheritance
+  is not provided").
   The members `table` generates belong to the class it ran on (its
   `with` is typed so), and single-table inheritance (one table for a
   hierarchy, with a type column) is not provided.

@@ -108,21 +108,23 @@ class Model
     # "already has a class method `table_name`".)
     doc "The table's name: `#{table}`."
     # (The class itself, a value the generated members capture: compared
-    # by identity, not by name.)
+    # by identity, not by name. Its name, for the message, is its `name`
+    # when the program is compiled, as for the default table name.)
     owner = type
-    def_class_method(:table_name) { Model.own_table!(self, owner); table }
+    owner_name = self.name
+    def_class_method(:table_name) { Model.own_table!(self, owner, owner_name); table }
     doc "The columns of `#{table}`, in order."
-    def_class_method(:columns) { Model.own_table!(self, owner); cols }
+    def_class_method(:columns) { Model.own_table!(self, owner, owner_name); cols }
     doc "The primary key's column, or nil for none."
-    def_class_method(:primary_key) { Model.own_table!(self, owner); key }
+    def_class_method(:primary_key) { Model.own_table!(self, owner, owner_name); key }
     doc "The associations, in order."
-    def_class_method(:associations) { Model.own_table!(self, owner); assocs }
+    def_class_method(:associations) { Model.own_table!(self, owner, owner_name); assocs }
     stamps = schema.timestamp_columns
     info = TableInfo.new(table, cols, key, stamps[0], stamps[1])
     doc "The table's name, columns and primary key."
-    def_class_method(:table_info) { Model.own_table!(self, owner); info }
+    def_class_method(:table_info) { Model.own_table!(self, owner, owner_name); info }
     doc "The table's name, columns and primary key, as the class's `table_info`."
-    def_method(:table_info) { Model.own_table!(self.class, owner); info }
+    def_method(:table_info) { Model.own_table!(self.class, owner, owner_name); info }
     keywords = cols.map { |c| Meta::Keyword.new(c.name, c.type, false, nullable: c.null) }
     doc "A copy with the columns given changed (each an optional keyword), which remembers them as changed."
     def_method(:with, keywords: keywords) do |given| -> Self
@@ -135,7 +137,7 @@ class Model
       @attrs = point.attrs
       @changed = point.changed
       @loaded = point.loaded
-      Model.own_table!(self.class, owner)
+      Model.own_table!(self.class, owner, owner_name)
     end
     doc "A model with the columns given (each an optional keyword) and the other columns' defaults, which remembers those given as changed."
     def_initialize(keywords: keywords) do |given|
@@ -144,7 +146,7 @@ class Model
       @attrs = attrs
       @changed = given.keys
       @loaded = nil
-      Model.own_table!(self.class, owner)
+      Model.own_table!(self.class, owner, owner_name)
     end
     cols.each { |c| accessors(c) }
   end
@@ -332,14 +334,14 @@ class Model
 
   private def self.no_table -> String = no_table_of(name)
 
-  # Raises unless `klass` is `owner`, the class whose `table` generated
-  # the member called (the class itself, by `equal?`, which no class can
-  # redefine, as `==` can be): a subclass that inherits a table is
-  # refused at its first use (the members `with` among them are its
-  # parent's).
-  def self.own_table!(klass: Class, owner: Class) -> Void
+  # Raises unless `klass` is `owner` (named `owner_name`), the class
+  # whose `table` generated the member called (the class itself, by
+  # `equal?`, which no class can redefine, as `==` can be): a subclass
+  # that inherits a table is refused at its first use (the members
+  # `with` among them are its parent's).
+  def self.own_table!(klass: Class, owner: Class, owner_name: String) -> Void
     return if klass.equal?(owner)
-    raise SchemaError.new("#{klass.name} has no table; a model declares its own; single-table inheritance is not provided")
+    raise SchemaError.new("#{klass.name} has no table: it inherits #{owner_name}'s; a model declares its own; single-table inheritance is not provided")
   end
 
   # The message for a model without a `table` block.
