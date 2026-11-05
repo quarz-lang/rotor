@@ -84,10 +84,7 @@ class RepoTest < Test::Case
   end
 
   def member(name: String, age: Int = 30) -> Member
-    m = Member.new
-    m.name = name
-    m.age = age
-    m
+    Member.new.with(name: name, age: age)
   end
 
   def test_insert_sets_the_key_and_timestamps
@@ -109,14 +106,11 @@ class RepoTest < Test::Case
       assert_nil(g.email)
       # A creation time the model has is kept.
       t = Time.utc(2020, 1, 2, 3, 4, 5)
-      n = member("Bob")
-      n.created_at = t
-      repo.insert(n)
+      n = repo.insert(member("Bob").with(created_at: t))
       assert_equal(t, n.created_at)
       assert(n.updated_at > t)
       # The database's defaults come back.
-      note = Note.new
-      repo.insert(note)
+      note = repo.insert(Note.new)
       assert_equal("empty", note.body)
       assert_nil(note.seen)
     end
@@ -124,22 +118,14 @@ class RepoTest < Test::Case
 
   def test_types_round_trip
     with_repo do |repo|
-      m = member("Typed")
-      m.email = "t@example.com"
-      m.score = 2.5
-      m.admin = true
-      m.avatar = b"\x00\xff"
-      repo.insert(m)
+      repo.insert(member("Typed").with(email: "t@example.com", score: 2.5, admin: true, avatar: b"\x00\xff"))
       g = repo.one!(Member.where { admin })
       assert_equal("t@example.com", g.email)
       assert_equal(2.5, g.score)
       assert(g.admin)
       assert_equal(b"\x00\xff", g.avatar)
       t = Time.utc(2026, 11, 3, 12, 0, 0) + 1.ms * 0.123
-      note = Note.new
-      note.body = "b"
-      note.seen = t
-      repo.insert(note)
+      repo.insert(Note.new.with(body: "b", seen: t))
       assert_equal(t, repo.one!(Note.query).seen)
     end
   end
@@ -175,18 +161,19 @@ class RepoTest < Test::Case
       m = repo.insert(member("Ann"))
       stamp = m.updated_at
       # Nothing changed: no UPDATE, the time stays.
-      repo.update(m)
-      assert_equal(stamp, m.updated_at)
-      m.age = 31
-      repo.update(m)
+      assert_equal(stamp, repo.update(m).updated_at)
+      changed = m.with(age: 31)
+      m = repo.update(changed)
       assert(!m.changed?)
       assert(m.updated_at >= stamp)
+      # The model given is left as it was.
+      assert_equal([:age], changed.changed)
+      assert_equal(stamp, changed.updated_at)
       g = repo.get(Member, m.id).as(Member)
       assert_equal(31, g.age)
       assert_equal(m.updated_at, g.updated_at)
       # `touch` writes the update time alone; other assignments stay.
-      m.name = "Pending"
-      repo.touch(m)
+      m = repo.touch(m.with(name: "Pending"))
       assert_equal([:name], m.changed)
       g = repo.get(Member, m.id).as(Member)
       assert_equal("Ann", g.name)
@@ -197,21 +184,16 @@ class RepoTest < Test::Case
   def test_failed_saves_leave_the_model_as_it_was
     with_repo do |repo|
       m = repo.insert(member("Ann"))
-      a = repo.get(Member, m.id).as(Member)
-      a.id = 2
+      a = repo.get(Member, m.id).as(Member).with(id: 2)
       e = assert_raise(ArgumentError) { repo.touch(a) }
       assert_match(/the primary key, was assigned/, e.message)
       assert_equal([:id], a.changed)
-      # A statement the server refuses: the model's values come back.
-      n = member("Dup")
-      n.id = m.id
+      # A statement the server refuses: the model given is as it was.
+      n = member("Dup").with(id: m.id)
       assert_raise(PG::ServerError) { repo.insert(n) }
       assert_equal([:name, :age, :id], n.changed)
       assert_nil(n.to_h[:created_at]?)
-      s = Note.new
-      s.body = "x"
-      repo.insert(s)
-      s.body = "y"
+      s = repo.insert(Note.new.with(body: "x")).with(body: "y")
       assert_raise(ArgumentError) { repo.touch(s, :seen, :id) }
       assert_equal([:body], s.changed)
       assert_nil(s.seen)

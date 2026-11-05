@@ -10,8 +10,7 @@
 #   end
 # end
 #
-# u = SUser.load({id: 7, name: "Ann"})
-# u.name = "Bob"
+# u = SUser.load({id: 7, name: "Ann"}).with(name: "Bob")
 # Rotor::Statement.update(u)&.to_sql  # => ["UPDATE \"users\" SET \"name\" = $1 WHERE \"id\" = $2", ["Bob", 7]]
 # Rotor::Statement.delete(u).to_sql  # => ["DELETE FROM \"users\" WHERE \"id\" = $1", [7]]
 # ```

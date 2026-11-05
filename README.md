@@ -27,8 +27,7 @@ class User < Rotor::Model
   end
 end
 
-u = User.new
-u.name = "Ann"         # u.name = 1 does not compile
+u = User.new.with(name: "Ann")   # with(name: 1) does not compile
 u.email                # => nil
 u.age                  # => 0
 u.changed              # => [:name]
@@ -40,13 +39,12 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
 
 - `table` runs its block at compile time on a `Rotor::Schema`, then
   generates, for each column, a getter typed by the column (`T`, or `T?`
-  for `null: true`) and a setter that records the change, and the
-  class methods `table_name`, `columns` (`Array[Rotor::Column]`),
+  for `null: true`), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
   `primary_key` (`Symbol?`) and `associations`
   (`Array[Rotor::Association]`).
 - A model holds its values in one hash (`to_h`) and remembers the
-  columns assigned since it was made, loaded or `clear_changes`
-  (`changed`, `changed?`). `new` takes no arguments and starts from the
+  columns assigned since it was made or loaded (`changed`, `changed?`;
+  `clear_changes` gives it without them). `new` takes no arguments and starts from the
   columns' defaults; reading a column that has none and was never set
   raises `Rotor::MissingAttributeError` (a `null: true` one reads nil).
   `load(values)` checks each value against its column's type.
@@ -60,11 +58,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `Rotor::SchemaError` when its metadata is read; a generic target's
   type arguments are not kept.
   The queries that follow them come with the queries.
-- A subclass of a model shares its table, unless it has a `table`
-  block of its own: then its columns are its own, and a setter it
-  inherits for a column it does not have, or with another type, raises
-  `ArgumentError`. Single-table inheritance (one table for a hierarchy,
-  with a type column) is not provided.
+- Every model runs its own `table`. Its superclass is `Rotor::Model` or
+  a class between them without a `table` (for methods models share):
+  a model whose superclass has a table does not compile (at its
+  `table`, when the superclass's ran first: in a cog it depends on, or
+  earlier in its own cog's order), and a subclass that inherits a table without one of its own
+  raises `Rotor::SchemaError` at its first use ("Guest has no table; a
+  model declares its own; single-table inheritance is not provided").
+  The members `table` generates belong to the class it ran on (its
+  `with` is typed so), and single-table inheritance (one table for a
+  hierarchy, with a type column) is not provided.
 - A `Time` column takes no `default:` (the compiler cannot bake a time
   into the program).
 - A model without a `table` block raises `Rotor::SchemaError` at its
@@ -78,8 +81,37 @@ did. A `column` statement of its own could make its accessors, but none
 could know the other columns to make `columns` and `primary_key`; the
 one `table` statement sees them all.
 
-Models are mutable, so they are not `Shareable`: a task that needs one
-loads its own.
+### Models are immutable and Shareable
+
+A model never changes: `with` gives a new one, the one it was called on
+left as it was, and the repository's `insert`, `update` and `touch`
+give the model as saved.
+
+```ruby
+u = repo.get(User, 1).as(User)
+v = u.with(name: "Bob", email: nil)   # email: NULL; age left as it was
+v.changed                             # => [:name, :email]
+u.name                                # => "Ann"
+v = repo.update(v)                    # saved: v.changed => []
+```
+
+- `with` takes each column as an optional keyword of the column's type
+  (`T?` for `null: true`, so `email: nil` sets NULL, while a column left
+  out keeps its value): `with(age: "x")`, `with(name: nil)` for a column
+  that is not `null: true`, and an unknown column do not compile. The
+  primary key may be given (`User.new.with(id: 1)`), but a model whose
+  key was assigned is not updated or deleted by it (the row it named is
+  not known).
+- So models are `Shareable` (Quarz's docs/03): one can be captured by
+  `Task.spawn`, sent on a `Channel` or held by an `Atom`, and read in
+  another task with no copy and no lock.
+- As in Ecto (structs and changesets) and Slick (case classes and
+  `copy`), and unlike Active Record, a model is a value: what to save is
+  the model given, not a state the object accumulated.
+- A model class is `Shareable`, so it cannot declare a `var` field (the
+  checker refuses it); a value derived from the columns is a method.
+- Queries are not `Shareable` yet (Quarz's open item #72): a model
+  crosses tasks, a query does not.
 
 ## Queries and statements
 
@@ -153,16 +185,13 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
 ```ruby
 PG::Pool.open("postgres://app@localhost/shop") do |pool|
   repo = Rotor::Repo.new(pool: pool)       # or connection: a PG::Connection
-  u = User.new
-  u.name = "Ann"
-  repo.insert(u)                           # key, defaults and timestamps loaded back
+  u = repo.insert(User.new.with(name: "Ann"))   # key, defaults and timestamps loaded back
   repo.all(User.where { age >= 18 })       # Array[User]
   repo.one(User.where { email == e })      # User?; MultipleResultsError for more
   repo.one!(q); repo.first(q); repo.get(User, 1)
   repo.count(q); repo.exists?(q)
-  u.age = 31
-  repo.update(u)                           # the changed columns, and updated_at
-  repo.touch(u)                            # updated_at alone
+  u = repo.update(u.with(age: 31))         # the changed columns, and updated_at
+  u = repo.touch(u)                        # updated_at alone
   repo.delete(u)                           # Bool
   repo.delete_all(q); repo.update_all(q) { {age: age + 1} }   # Int
   repo.transaction { |tx| tx.insert(other) }                  # a Repo on the transaction
@@ -182,8 +211,8 @@ end
   equals the one written); `update` sets `updated_at` only when a
   column changed, and runs no UPDATE when none did; `touch` writes it
   alone. `update_all` and raw SQL set none.
-- A statement that fails leaves the model as it was (its values and
-  assignments). An `update` of a row that no longer exists changes
+- `insert`, `update` and `touch` give the model as saved, the one given
+  unchanged (so a statement that fails leaves nothing to put back). An `update` of a row that no longer exists changes
   nothing and is not reported, for now. Transactions do not nest.
 - `Rotor::Adapter` (`query`, `transaction`) is the boundary to the
   database; `Rotor::Adapters::PG` is pg's, over a pool or a connection.

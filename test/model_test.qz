@@ -56,7 +56,12 @@ class Book < Rotor::Model
   end
 end
 
-class Admin < User
+# A class between a model and Rotor::Model, without a table.
+class Record < Rotor::Model
+  def label -> String = "record #{table_info.name}"
+end
+
+class Admin < Record
   table "admins" do
     column :id, Int, primary: true
     column :email, String
@@ -64,29 +69,31 @@ class Admin < User
   end
 end
 
+# Inherits `User`'s table: refused at its first use.
+class Guest < User
+end
+
 class ModelTest < Test::Case
   def test_typed_accessors
-    u = User.new
-    u.name = "Ann"
+    u = User.new.with(name: "Ann")
     assert_equal("Ann", u.name)
     assert_nil(u.email)
-    u.email = "ann@example.com"
-    assert_equal("ann@example.com", u.email)
-    u.email = nil
+    v = u.with(email: "ann@example.com")
+    assert_equal("ann@example.com", v.email)
     assert_nil(u.email)
+    # A nullable column given nil is set to NULL; one left out keeps.
+    w = v.with(email: nil, age: 41)
+    assert_nil(w.email)
+    assert_equal(41, w.age)
     assert_equal(0, u.age)
-    u.age = 41
-    assert_equal(41, u.age)
     assert_equal(false, u.admin)
-    u.score = 1.5
-    assert_equal(1.5, u.score)
-    u.avatar = b"\x01"
-    assert_equal(b"\x01", u.avatar)
     t = Time.utc(2026, 11, 3, 12, 0, 0)
-    u.born = t
-    assert_equal(t, u.born)
-    u.account_id = 7
-    assert_equal(7, u.account_id)
+    x = u.with(score: 1.5, avatar: b"\x01", born: t, account_id: 7)
+    assert_equal(1.5, x.score)
+    assert_equal(b"\x01", x.avatar)
+    assert_equal(t, x.born)
+    assert_equal(7, x.account_id)
+    assert_equal("Ann", x.name)
   end
 
   def test_unset_column
@@ -97,13 +104,36 @@ class ModelTest < Test::Case
   def test_change_tracking
     u = User.new
     assert(!u.changed?)
-    u.name = "Ann"
-    u.age = 3
-    u.name = "Bob"
-    assert_equal([:name, :age], u.changed)
-    assert(u.changed?)
-    u.clear_changes
-    assert(u.changed.empty?)
+    v = u.with(name: "Ann", age: 3).with(name: "Bob")
+    assert_equal([:name, :age], v.changed)
+    assert(v.changed?)
+    assert(!u.changed?)
+    assert(v.clear_changes.changed.empty?)
+    assert_equal("Bob", v.clear_changes.name)
+  end
+
+  def test_models_are_shareable
+    u = User.load({id: 1, name: "Ann"})
+    # Read in another task, through a channel, held by an atom.
+    assert_equal("Ann", Task.spawn { u.name }.await)
+    ch = Channel[User].new(1)
+    Task.spawn { ch.send(User.load({id: 2, name: "Bob"})) }.await
+    assert_equal("Bob", ch.receive.name)
+    a = Atom[User].new(u)
+    a.update { |m| m.with(age: 5) }
+    assert_equal(5, a.get.age)
+    assert_equal(0, u.age)
+  end
+
+  def test_with_refuses_a_wrong_type_at_compile_time
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/with_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/argument `name` of with\(.*\) -> Pen expects String but found Int/, out.stderr)
+    assert_match(/argument `name` of with\(.*\) -> Pen expects String but found Nil/, out.stderr)
+    assert_match(/has no parameter `colour`/, out.stderr)
+    # `note: nil` (line 12), a nullable column's NULL, is not refused.
+    refute_match(/main\.qz:12:/, out.stderr)
   end
 
   def test_metadata
@@ -163,22 +193,41 @@ class ModelTest < Test::Case
     # `Book belongs_to Shelf` here, each naming the other's class.
     assert_equal([Rotor::Association.new(:has_many, :books, Book, :shelf_id)], Shelf.associations)
     assert_equal([Rotor::Association.new(:belongs_to, :shelf, Shelf, :shelf_id)], Book.associations)
-    b = Book.new
-    b.shelf_id = 3
+    b = Book.new.with(shelf_id: 3)
     assert_equal(3, b.shelf_id)
     assert(Book.associations[0].target == Shelf)
   end
 
-  def test_a_subclass_with_a_table_of_its_own
+  def test_a_model_under_a_class_without_a_table
     a = Admin.new
     assert_equal(1, a.level)
-    e = assert_raise(ArgumentError) { a.name = "x" }
+    assert_equal("record admins", a.label)
+    b: Admin = a.with(id: 1, email: "a@example.com", level: 2)
+    assert_equal(2, b.level)
+    assert_equal("Admin", b.class.name)
+    e = assert_raise(ArgumentError) { a.with_values({name: "x"}) }
     assert_equal("Admin has no column `name`", e.message)
-    # `User#email=` takes nil, `Admin`'s column does not.
-    u: User = a
-    e = assert_raise(ArgumentError) { u.email = nil }
+    e = assert_raise(ArgumentError) { a.with_values({email: nil}) }
     assert_equal("Admin#email cannot be nil", e.message)
     assert(!a.changed?)
+  end
+
+  def test_a_subclass_that_inherits_a_table
+    message = "Guest has no table; a model declares its own; single-table inheritance is not provided"
+    e = assert_raise(Rotor::SchemaError) { Guest.new }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.load({id: 1, name: "x"}) }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.table_name }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.where { name == "x" } }
+    assert_equal(message, e.message)
+  end
+
+  def test_a_model_of_a_model_does_not_compile
+    out = Process.sh("cd test/fixtures/model_of_model && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/Pencil subclasses a model with a table: a model's superclass is Rotor::Model or a class without a `table`/, out.stderr)
   end
 
   def test_columns_cross_tasks
