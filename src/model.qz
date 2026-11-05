@@ -279,7 +279,22 @@ class Model
         loaded = l + [k] unless l.include?(k)
       end
     end
-    restore(Checkpoint.new(attrs, changed, loaded, @assocs))
+    # (What was preloaded for a key that changes goes: a `belongs_to`'s
+    # own key names another row, and the primary key's `has_many` were
+    # loaded for the old one.)
+    assocs = @assocs
+    unless assocs.empty?
+      info = table_info
+      changes = ->(c: Symbol) { values.key?(c) && @attrs[c]? != Model.value(values[c]?) }
+      pk = info.primary_key
+      pk_changes = pk ? changes.call(pk.as(Symbol)) : false
+      info.associations.each do |a|
+        next unless assocs.key?(a.name)
+        drop = a.kind == :belongs_to ? changes.call(a.foreign_key) : pk_changes
+        assocs = assocs.reject { |k, _| k == a.name } if drop
+      end
+    end
+    restore(Checkpoint.new(attrs, changed, loaded, assocs))
   end
 
   # The model with the values read from a row (`load`), checked, and no
