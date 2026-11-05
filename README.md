@@ -286,6 +286,37 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 - An association's name may not be a column's or one of the model's
   own methods'.
 
+### Joins
+
+A query joins other tables in one SELECT, each table with its alias
+(`"u0"`, `"p1"`):
+
+```ruby
+# A `for` comprehension over several queries: an INNER JOIN on its
+# conditions (the inner query's and the `when`), a CROSS JOIN for none.
+for u in User.query, p in Post.where { published } when p.user_id == u.id do [u.name, p.title] end
+# Through an association, joined by its key, with more conditions.
+for u in User.query, p in u.posts.query when p.views > 10 do p end
+# Explicit forms, giving pairs: by an association, or by a condition.
+User.query.join { posts }.where { |u, p| p.published }   # Query[[User, Post]]
+User.query.join(Post) { |u, p| p.editor_id == u.id }
+```
+
+- In a `for`, the inner query is a model's (`Post.where { ... }`, its
+  `query`) or an association's (`u.posts.query`), with `where`, `filter`,
+  `order` and `desc`, then a last `map` or another iterator: anything else
+  (a `limit`, a query in a variable) raises `Rotor::UntranslatableError`.
+  Orders come after the outer query's.
+- A `for`'s rows are made by its body as Quarz code, with the columns it
+  reads: the body runs for each distinct outer row, building the inner
+  query again (some microseconds a row). For large results, prefer
+  `join`, whose pairs are built directly; `where`, `order`, `select`
+  (`select { |u, p| ... }`), `count` and `limit` follow it, with a block
+  parameter per table.
+- A column's getter of a model a block captured is its value:
+  `Post.where { user_id == u.id }`.
+- Joins are INNER only; LEFT joins and `through` associations come later.
+
 ## Developing
 
 To work on rotor against a local checkout of pg, write `Cog.local.toml`

@@ -370,4 +370,30 @@ class RepoTest < Test::Case
       assert_equal(["b"], r.all(authors[0].volumes.query.where { title == "b" }).map { |b| b.title })
     end
   end
+
+  def test_joins
+    with_repo do |repo|
+      library(repo)
+      r, c = counting(repo)
+      # A `for` over two queries: one statement.
+      pairs = r.all(for a in Author.order { id }, v in Volume.order { id } when v.author_id == a.id do "#{a.name}:#{v.title}" end)
+      assert_equal(1, c.count)
+      assert_equal(["Ann:a", "Ann:b", "Cy:c"], pairs)
+      # Through an association, with a condition, as models.
+      rows = r.all(for a in Author.order { id }, v in a.volumes.query when v.title != "b" do [a, v] end)
+      assert_equal([["Ann", "a"], ["Cy", "c"]], rows.map { |x| [x[0].name, x[1].title] })
+      # Three tables.
+      stars = r.all(for a in Author.order { id }, v in a.volumes.query.order { id }, m in v.remarks.query.order { id } do [a.name, m.stars] end)
+      assert_equal([["Ann", 5], ["Ann", 3], ["Cy", 4]], stars)
+      # The explicit forms, pairs of models.
+      joined = r.all(Author.query.join { volumes }.order { |a, v| v.id })
+      assert_equal([["Ann", "a"], ["Ann", "b"], ["Cy", "c"]], joined.map { |x| [x[0].name, x[1].title] })
+      named = r.all(Author.query.join { volumes }.where { |a, v| v.title != "a" }.order { |a, v| v.id }.select { |a, v| "#{a.name}/#{v.title}" })
+      assert_equal(["Ann/b", "Cy/c"], named)
+      by = r.all(Volume.query.join(Author) { |v, a| v.author_id == a.id && a.name == "Cy" })
+      assert_equal([["c", "Cy"]], by.map { |x| [x[0].title, x[1].name] })
+      assert_equal(3, r.count(Author.query.join { volumes }))
+      assert_equal(2, r.all(for a in Author.query, v in a.volumes.query do v.id end.limit(2)).size)
+    end
+  end
 end

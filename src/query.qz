@@ -2,10 +2,20 @@
 # the repository that sets its timestamps.
 data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [])
 
-# How a query's row becomes a `T`: from the values of the columns it
-# fetched, the second argument telling whether those are all of the
-# model's.
-type Loader[T] = (Hash[Symbol, Object?], Bool) -> T
+# A table a query reads: the first, or one joined to it, with the
+# conditions of its JOIN (`INNER JOIN ... ON` them, `CROSS JOIN` for
+# none), the columns it fetches (nil for all of them), and those it
+# fetches whatever a `select` reads (the key an association's join
+# needs).
+data Source = (table: TableInfo, model: Type[Object], on: Array[Sql], fetch: Array[Column]?, keep: Array[Symbol] = [])
+
+# The values of a row's columns from one of a query's tables, and
+# whether those are all of the table's columns.
+data Fetched = (values: Hash[Symbol, Object?], all: Bool)
+
+# How a query's rows become `T`s: from the values each of its tables
+# gave, row by row.
+type Loader[T] = (Array[Array[Fetched]]) -> Array[T]
 
 # What a query of models does with them for a preload
 # (`Rotor::Query#preload`): a row as a model, and a row with the
@@ -38,13 +48,12 @@ class Query[T]
   # What a query gives: its rows, their number, or whether there is one.
   enum Shape = Rows | Count | Exists
 
-  @table: TableInfo
-  @model: Type[Object]
+  # Its tables: the model's, then those joined to it.
+  @sources: Array[Source]
   @wheres: Array[Sql]
   @orders: Array[[Sql, Bool]]
-  # The columns a `select` fetches, or nil for all of them.
-  @fetch: Array[Column]?
-  # Whether `select` made it.
+  # Whether `select` made it (or a `flat_map`, whose rows the block's
+  # queries give).
   @projected: Bool
   @loader: Loader[T]
   @limit: Int?
@@ -56,14 +65,18 @@ class Query[T]
   @ops: ModelOps[T]?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @fetch: Array[Column]?, @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
+  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
   end
 
-  # The table.
-  def table -> TableInfo = @table
+  # The table (the first, in a join).
+  def table -> TableInfo = @sources[0].table
 
-  # The columns its rows have, in order: what `to_sql` selects.
-  def fetched -> Array[Column] = @fetch || @table.columns
+  # Its tables: the first, then those joined to it.
+  def sources -> Array[Source] = @sources
+
+  # The columns its rows have, in order (each table's in turn, in a
+  # join): what `to_sql` selects.
+  def fetched -> Array[Column] = @sources.flat_map { |s| s.fetch || s.table.columns }
 
   # What it gives: its rows, their number, or whether there is one.
   def shape -> Shape = @shape
@@ -74,12 +87,13 @@ class Query[T]
   # The rows whose column `name` is `value` (the repository's `get`).
   def where_key(name: Symbol, value: Object?) -> Query[T]
     rows!("where_key")
-    c = @table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{@table.name}` has no column `#{name}`")
-    col = Dialect.quote(c.name.to_s)
+    single!("where_key")
+    c = table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{table.name}` has no column `#{name}`")
+    col = Piece::Column.new(0, c.name)
     s = if value.nil?
-          Sql.new([Piece::Text.new("#{col} IS NULL")], Translator::IS, nil, nil, false)
+          Sql.new([col, Piece::Text.new(" IS NULL")], Translator::IS, nil, nil, false)
         else
-          Sql.new([Piece::Text.new("#{col} = "), Piece::Param.new(value)], Translator::CMP, nil, nil, false)
+          Sql.new([col, Piece::Text.new(" = "), Piece::Param.new(value)], Translator::CMP, nil, nil, false)
         end
     copy(wheres: @wheres + [s])
   end
@@ -88,11 +102,12 @@ class Query[T]
   # ...)`, FALSE for none (a preload's query).
   def where_in(name: Symbol, values: Array[Value]) -> Query[T]
     rows!("where_in")
-    c = @table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{@table.name}` has no column `#{name}`")
+    single!("where_in")
+    c = table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{table.name}` has no column `#{name}`")
     if values.empty?
       return copy(wheres: @wheres + [Sql.new([Piece::Text.new("FALSE")], Translator::ATOM, nil, false, true)])
     end
-    pieces: Array[Piece] = [Piece::Text.new("#{Dialect.quote(c.name.to_s)} IN (")]
+    pieces: Array[Piece] = [Piece::Column.new(0, c.name), Piece::Text.new(" IN (")]
     values.each_with_index do |v, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + [Piece::Param.new(v)]
@@ -103,11 +118,42 @@ class Query[T]
   # Ordered by the column `name` too (nil: unchanged): a preload's query.
   def order_by_key(name: Symbol?) -> Query[T]
     return self unless name
-    copy(orders: @orders + [[Sql.new([Piece::Text.new(Dialect.quote(name.to_s))], Translator::ATOM, nil, nil, false), false]])
+    single!("order_by_key")
+    copy(orders: @orders + [[Sql.new([Piece::Column.new(0, name)], Translator::ATOM, nil, nil, false), false]])
   end
 
-  # A row's `T` from the values of `fetched`.
-  def load(values: Hash[Symbol, Object?]) -> T = @loader.call(values, @fetch.nil?)
+  # A row's `T` from the values of its table's columns (those of
+  # `fetched`), for a query of one table.
+  def load(values: Hash[Symbol, Object?]) -> T
+    single!("load")
+    @loader.call([[Fetched.new(values, @sources[0].fetch.nil?)]])[0]
+  end
+
+  # A row's `T` from the values of each of its tables.
+  def load_row(values: Array[Fetched]) -> T = @loader.call([values])[0]
+
+  # The `T`s of the rows a database gave for `to_sql`.
+  def load_rows(rows: Array[Row]) -> Array[T]
+    case @shape
+    in Shape::Count
+      @loader.call(rows.map { |r| [Fetched.new({value: r.int(0)}, true)] })
+    in Shape::Exists
+      @loader.call(rows.map { |r| [Fetched.new({value: r.bool(0)}, true)] })
+    in Shape::Rows
+      lists = @sources.map { |s| s.fetch || s.table.columns }
+      @loader.call(rows.map do |r|
+        at = 0
+        lists.each_with_index.map do |cols, i|
+          values: Hash[Symbol, Object?] = {}
+          cols.each do |c|
+            values = values.put(c.name, r.value(at, c.type))
+            at += 1
+          end
+          Fetched.new(values, @sources[i].fetch.nil?)
+        end
+      end)
+    end
+  end
 
   # The rows for which the block is true. The row is the block's
   # receiver (`where { age > 18 }`) or its parameter (`where { |u|
@@ -154,15 +200,15 @@ class Query[T]
   def preload(&spec: Quoted[shareable T.() -> Object]) -> Query[T]
     rows!("preload")
     @ops || raise ArgumentError.new("`preload` of a query that does not give models")
-    added = Preloads.parse(@table, @model.name, spec.expr, spec.file)
-    Query[T].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), @ops)
+    added = Preloads.parse(table, @sources[0].model.name, spec.expr, spec.file)
+    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), @ops)
   end
 
   # The rows `repo` loaded with the preloads done (`preload`).
   def preloaded(rows: Array[T], repo: Repo) -> Array[T]
     ops = @ops
     return rows if @preloads.empty? || ops.nil?
-    found = Preloads.run(repo, rows.map { |r| ops.as_model.call(r) }, @table, @preloads)
+    found = Preloads.run(repo, rows.map { |r| ops.as_model.call(r) }, table, @preloads)
     rows.each_with_index.map { |r, i| ops.attach.call(r, found[i]) }
   end
 
@@ -194,16 +240,131 @@ class Query[T]
     project(f.expr, f.file, ->(row: T) { proc.call(row) })
   end
 
+  # The rows of the queries the block gives for each row, in one query
+  # with a JOIN: what a `for` comprehension over several queries calls
+  # (Quarz's docs/01 §11). The block's query is a model's (`Post.where
+  # { ... }`, or its `query`), with `where`, `filter`, `order` and `desc`,
+  # and a last `map`, `select` or `flat_map`, or an association's
+  # (`u.posts.query`, joined by its key); its conditions, those on the row
+  # (`u`) included, are the JOIN's, its orders come after this query's.
+  # Its rows are made by the block, run for each distinct row of this
+  # query (with the columns the block reads of it): building the inner
+  # query again costs some microseconds per row, so a large result reads
+  # better through `join`, which makes pairs.
+  #
+  # ```
+  # class FUser < Rotor::Model
+  #   table "users" do
+  #     column :id, Int, primary: true
+  #     column :name, String
+  #     has_many FPost, name: :posts, foreign_key: :user_id
+  #   end
+  # end
+  #
+  # class FPost < Rotor::Model
+  #   table "posts" do
+  #     column :id, Int, primary: true
+  #     column :user_id, Int
+  #     column :title, String
+  #     column :published, Bool, default: false
+  #   end
+  # end
+  #
+  # q = for u in FUser.query, p in FPost.where { published } when p.user_id == u.id do [u.name, p.title] end
+  # q.to_sql[0]  # => "SELECT \"u0\".\"id\", \"u0\".\"name\", \"p1\".\"title\" FROM \"users\" AS \"u0\" INNER JOIN \"posts\" AS \"p1\" ON \"p1\".\"published\" AND \"p1\".\"user_id\" = \"u0\".\"id\""
+  # pairs = for u in FUser.query, p in u.posts.query do [u, p] end
+  # pairs.to_sql[0]  # => "SELECT \"u0\".\"id\", \"u0\".\"name\", \"p1\".\"id\", \"p1\".\"user_id\", \"p1\".\"title\", \"p1\".\"published\" FROM \"users\" AS \"u0\" INNER JOIN \"posts\" AS \"p1\" ON \"p1\".\"user_id\" = \"u0\".\"id\""
+  # ```
+  def flat_map[R](&f: Quoted[shareable (T) -> Query[R]]) -> Query[R]
+    rows!("flat_map")
+    joinable!("flat_map")
+    plan = Joins.plan(@sources, f.expr, f.captures, f.file)
+    k = @sources.size
+    base = @loader
+    proc = f.proc
+    Query[R].new(plan.sources, @wheres, @orders + plan.orders, true, nil, nil, Shape::Rows,
+                 ->(rows: Array[Array[Fetched]]) {
+                   # (The inner query of each distinct outer row, built once.)
+                   memo: Hash[Array[Hash[Symbol, Object?]], Query[R]] = {}
+                   rows.map do |r|
+                     outer = r.take(k)
+                     key = outer.map { |x| x.values }
+                     q = if found = memo[key]?
+                           found
+                         else
+                           built = proc.call(base.call([outer])[0])
+                           memo = memo.put(key, built)
+                           built
+                         end
+                     q.load_row(r.drop(k))
+                   end
+                 })
+  end
+
+  # Its rows paired with those of the association the block names
+  # (`User.query.join { posts }`), joined by its key: Ecto's `assoc`,
+  # Rails' `joins`. Conditions, orders and projections of the pairs
+  # follow, with a parameter for each (`where { |u, p| p.published }`).
+  #
+  # ```
+  # class JUser < Rotor::Model
+  #   table "users" do
+  #     column :id, Int, primary: true
+  #     column :name, String
+  #     has_many JPost, name: :posts, foreign_key: :user_id
+  #   end
+  # end
+  #
+  # class JPost < Rotor::Model
+  #   table "posts" do
+  #     column :id, Int, primary: true
+  #     column :user_id, Int
+  #     column :title, String
+  #   end
+  # end
+  #
+  # q = JUser.query.join { posts }.where { |u, p| p.title.start_with?("Q") }.select { |u, p| "#{u.name}: #{p.title}" }
+  # q.to_sql  # => ["SELECT \"u0\".\"id\", \"u0\".\"name\", \"p1\".\"title\" FROM \"users\" AS \"u0\" INNER JOIN \"posts\" AS \"p1\" ON \"p1\".\"user_id\" = \"u0\".\"id\" WHERE \"p1\".\"title\" LIKE $1", ["Q%"]]
+  # ```
+  def join[R <: Model](&assoc: Quoted[shareable T.() -> HasMany[R]]) -> Query[[T, R]]
+    proc = assoc.proc
+    join_association(assoc.expr, assoc.file, ->(t: T) { t.instance_exec(&proc) })
+  end
+
+  # :ditto:
+  def join[R <: Model](&assoc: Quoted[shareable (T) -> HasMany[R]]) -> Query[[T, R]]
+    proc = assoc.proc
+    join_association(assoc.expr, assoc.file, ->(t: T) { proc.call(t) })
+  end
+
+  # Its rows paired with the rows of `other` for which the block is true
+  # (`User.query.join(Post) { |u, p| p.user_id == u.id }`): an INNER JOIN
+  # on the condition, for models without an association or with several.
+  def join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool]) -> Query[[T, R]]
+    joining!
+    joined = @sources + [Source.new(other.table_info, other, [], nil)]
+    t, e = Translator.of(joined, cond.expr, cond.captures, cond.file)
+    on = t.sql(e)
+    base = @loader
+    Query[[T, R]].new(@sources + [Source.new(other.table_info, other, [on], nil)], @wheres, @orders, false, nil, nil, Shape::Rows,
+                      ->(rows: Array[Array[Fetched]]) {
+                        ts = base.call(rows.map { |r| [r[0]] })
+                        out: Array[[T, R]] = []
+                        ts.each_with_index { |x, i| out = out + [[x, Joins.load(other, rows[i][1])]] }
+                        out
+                      })
+  end
+
   # The number of rows: `SELECT count(*)`.
   def count -> Query[Int]
     unshaped!("count")
-    Query[Int].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, Shape::Count, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Int) })
+    Query[Int].new(@sources, @wheres, @orders, @projected, @limit, @offset, Shape::Count, ->(rows: Array[Array[Fetched]]) { rows.map { |r| r[0].values[:value]?.as(Int) } })
   end
 
   # Whether there is a row: `SELECT EXISTS (...)`.
   def exists -> Query[Bool]
     unshaped!("exists")
-    Query[Bool].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, Shape::Exists, ->(v: Hash[Symbol, Object?], all: Bool) { v[:value]?.as(Bool) })
+    Query[Bool].new(@sources, @wheres, @orders, @projected, @limit, @offset, Shape::Exists, ->(rows: Array[Array[Fetched]]) { rows.map { |r| r[0].values[:value]?.as(Bool) } })
   end
 
   # The rows' deletion: `DELETE ... WHERE` with the query's conditions
@@ -211,7 +372,7 @@ class Query[T]
   # say which rows).
   def delete -> Statement
     plain!("delete")
-    Statement.new(@table, [Piece::Text.new("DELETE FROM #{Dialect.quote(@table.name)}")] + where_pieces, nil)
+    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.quote(table.name)}")] + where_pieces, nil)
   end
 
   # The rows' update: the block gives a hash literal of columns and their
@@ -231,27 +392,56 @@ class Query[T]
 
   # The statement's pieces.
   def pieces -> Array[Piece]
-    table = [Piece::Text.new(" FROM #{Dialect.quote(@table.name)}")]
-    case @shape
-    in Shape::Count
-      if @limit || @offset
-        [Piece::Text.new("SELECT count(*) FROM (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(") AS \"q\"")]
-      else
-        [Piece::Text.new("SELECT count(*)")] + table + where_pieces
-      end
-    in Shape::Exists
-      [Piece::Text.new("SELECT EXISTS (SELECT 1")] + table + where_pieces + window + [Piece::Text.new(")")]
-    in Shape::Rows
-      [Piece::Text.new("SELECT ")] + select_list + table + where_pieces + order_pieces + window
-    end
+    from = from_pieces
+    out = case @shape
+          in Shape::Count
+            if @limit || @offset
+              [Piece::Text.new("SELECT count(*) FROM (SELECT 1")] + from + where_pieces + window + [Piece::Text.new(") AS \"q\"")]
+            else
+              [Piece::Text.new("SELECT count(*)")] + from + where_pieces
+            end
+          in Shape::Exists
+            [Piece::Text.new("SELECT EXISTS (SELECT 1")] + from + where_pieces + window + [Piece::Text.new(")")]
+          in Shape::Rows
+            [Piece::Text.new("SELECT ")] + select_list + from + where_pieces + order_pieces + window
+          end
+    qualified(out)
+  end
+
+  private def join_association[R <: Model](expr: Meta::Expr, file: String, get: (T) -> HasMany[R]) -> Query[[T, R]]
+    joining!
+    t, e = translator(expr, Array[Object].new, file)
+    first = @sources[0]
+    a, key = Joins.association(t, e, 0, first)
+    target = Source.new(a.target.table_info, a.target, [Joins.key_condition(1, a.foreign_key, 0, key)], nil)
+    base = @loader
+    # (The association's class, from the getter of a row: kept with its
+    # key, whatever a `select` reads.)
+    Query[[T, R]].new([Source.new(first.table, first.model, first.on, first.fetch, first.keep + [key]), target], @wheres, @orders, false, nil, nil, Shape::Rows,
+                      ->(rows: Array[Array[Fetched]]) {
+                        ts = base.call(rows.map { |r| [r[0]] })
+                        out: Array[[T, R]] = []
+                        if one = ts.first?
+                          model = get.call(one).target
+                          ts.each_with_index { |x, i| out = out + [[x, Joins.load(model, rows[i][1])]] }
+                        end
+                        out
+                      })
+  end
+
+  # (A join of a query of one table's models.)
+  private def joining! -> Void
+    rows!("join")
+    single!("join")
+    joinable!("join")
   end
 
   private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
-    Query[T].new(@table, @model, wheres, orders, @fetch, @projected, limit, offset, @shape, @loader, @preloads, @ops)
+    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, @ops)
   end
 
   private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
-    Translator.of(@model, @table.columns, expr, captures, file)
+    Translator.of(@sources, expr, captures, file)
   end
 
   private def add_where(expr: Meta::Expr, captures: Array[Object], file: String) -> Query[T]
@@ -265,7 +455,7 @@ class Query[T]
     t, e = translator(expr, captures, file)
     key = t.sql(e)
     # (`ORDER BY 1` would be the first column.)
-    t.untranslatable("an order by a constant", line_of(e)) if key.known
+    t.untranslatable("an order by a constant", Translator.line_of(e)) if key.known
     copy(orders: @orders + [[key, false]])
   end
 
@@ -276,8 +466,8 @@ class Query[T]
     reads = t.reads(e)
     base = @loader
     # (The row loaded with the columns fetched, then the block on it.)
-    Query[R].new(@table, @model, @wheres, @orders, reads, true, @limit, @offset, @shape,
-                 ->(v: Hash[Symbol, Object?], all: Bool) { f.call(base.call(v, all)) })
+    Query[R].new(@sources.each_with_index.map { |s, i| Joins.fetching(s, reads[i]) }, @wheres, @orders, true, @limit, @offset, @shape,
+                 ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } })
   end
 
   private def update_set(expr: Meta::Expr, captures: Array[Object], file: String) -> Statement
@@ -285,57 +475,41 @@ class Query[T]
     t, e = translator(expr, captures, file)
     pairs = case e
             in Meta::Expr::HashLit(ps, _) then ps
-            in _ then t.untranslatable("an `update` block that is not a hash literal", line_of(e))
+            in _ then t.untranslatable("an `update` block that is not a hash literal", Translator.line_of(e))
             end
-    t.untranslatable("an `update` of no column", line_of(e)) if pairs.empty?
-    sets: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(@table.name)} SET ")]
+    t.untranslatable("an `update` of no column", Translator.line_of(e)) if pairs.empty?
+    sets: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(table.name)} SET ")]
     seen: Array[Symbol] = []
     pairs.each_with_index do |pair, i|
       key, value = pair
       name = case key
              in Meta::Expr::Lit(Symbol => s, _) then s
-             else t.untranslatable("an `update` key that is not a symbol", line_of(key))
+             else t.untranslatable("an `update` key that is not a symbol", Translator.line_of(key))
              end
-      c = @table.columns.find { |x| x.name == name } ||
-        raise ArgumentError.new("#{@model.name} has no column `#{name}` (#{file}:#{line_of(key)})")
+      c = table.columns.find { |x| x.name == name } ||
+        raise ArgumentError.new("#{model_name} has no column `#{name}` (#{file}:#{Translator.line_of(key)})")
       if seen.include?(name)
-        raise ArgumentError.new("an `update` of `#{name}` twice (#{file}:#{line_of(key)})")
+        raise ArgumentError.new("an `update` of `#{name}` twice (#{file}:#{Translator.line_of(key)})")
       end
       seen = seen + [name]
       v = t.sql(value)
       if v.known
         x = v.value
         if x.nil?
-          raise ArgumentError.new("#{@model.name}##{name} cannot be nil (#{file}:#{line_of(value)})") unless c.null
+          raise ArgumentError.new("#{model_name}##{name} cannot be nil (#{file}:#{Translator.line_of(value)})") unless c.null
         elsif c.type == Float && x.is_a?(Int)
           v = Sql.new([Piece::Param.new(x.as(Int).to_f)], Translator::ATOM, nil, x.as(Int).to_f, true)
         elsif !x.is_a?(c.type)
-          raise ArgumentError.new("#{@model.name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{line_of(value)})")
+          raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{Translator.line_of(value)})")
         end
       end
       sets = sets + [Piece::Text.new(", ")] if i > 0
       sets = sets + [Piece::Text.new("#{Dialect.quote(name.to_s)} = ")] + v.pieces
     end
-    Statement.new(@table, sets + where_pieces, nil)
+    Statement.new(table, sets + where_pieces, nil)
   end
 
-  private def line_of(e: Meta::Expr) -> Int
-    case e
-    in Meta::Expr::Lit(_, l) then l
-    in Meta::Expr::Capture(_, _, l) then l
-    in Meta::Expr::Arg(_, _, l) then l
-    in Meta::Expr::SelfRef(_, l) then l
-    in Meta::Expr::Call(_, _, _, _, l) then l
-    in Meta::Expr::And(_, _, l) then l
-    in Meta::Expr::Or(_, _, l) then l
-    in Meta::Expr::Not(_, l) then l
-    in Meta::Expr::If(_, _, _, l) then l
-    in Meta::Expr::ArrayLit(_, l) then l
-    in Meta::Expr::HashLit(_, l) then l
-    in Meta::Expr::Interp(_, l) then l
-    in Meta::Expr::Block(_, _, l) then l
-    end
-  end
+  private def model_name -> String = @sources[0].model.name
 
   # (Conditions and orders are of the model's rows: before a projection,
   # a count or an exists.)
@@ -352,25 +526,86 @@ class Query[T]
     end
   end
 
+  # (A query of one table: what a key, a statement or a preload is of.)
+  private def single!(what: String) -> Void
+    raise ArgumentError.new("`#{what}` of a join: it is of one table's query") if @sources.size > 1
+  end
+
+  # (A join of every row: a limit or an offset is of the joined rows,
+  # and a preload of the models alone, so both come after it.)
+  private def joinable!(what: String) -> Void
+    if @limit || @offset
+      raise ArgumentError.new("`#{what}` of a query with a limit or an offset: write them after it")
+    end
+    raise ArgumentError.new("`#{what}` after `preload`: preload the models of one table's query") unless @preloads.empty?
+  end
+
   private def plain!(what: String) -> Void
+    single!(what)
     if !@orders.empty? || @limit || @offset || @projected || @shape != Shape::Rows
       raise ArgumentError.new("`#{what}` of a query with an order, a limit, an offset or a projection: only its conditions say which rows")
     end
   end
 
+  # (A select of no column selects 1: a row is still one.)
   private def select_list -> Array[Piece]
-    [Piece::Text.new(fetched.map { |c| Dialect.quote(c.name.to_s) }.join(", ")).as(Piece)]
+    out: Array[Piece] = []
+    @sources.each_with_index do |s, i|
+      (s.fetch || s.table.columns).each do |c|
+        out = out + [Piece::Text.new(", ")] unless out.empty?
+        out = out + [Piece::Column.new(i, c.name)]
+      end
+    end
+    out.empty? ? [Piece::Text.new("1").as(Piece)] : out
+  end
+
+  # ` FROM` its tables: in a join, each with its alias, joined by its
+  # conditions.
+  private def from_pieces -> Array[Piece]
+    first = Dialect.quote(table.name)
+    return [Piece::Text.new(" FROM #{first}").as(Piece)] if @sources.size == 1
+    out: Array[Piece] = [Piece::Text.new(" FROM #{first} AS #{alias_of(0)}")]
+    @sources.each_with_index do |s, i|
+      next if i == 0
+      name = "#{Dialect.quote(s.table.name)} AS #{alias_of(i)}"
+      out = if s.on.empty?
+              out + [Piece::Text.new(" CROSS JOIN #{name}")]
+            else
+              out + [Piece::Text.new(" INNER JOIN #{name} ON ")] + conjunction(s.on)
+            end
+    end
+    out
+  end
+
+  # The alias of table `i` in a join: its name's first letter and `i`
+  # (`"u0"`, `"p1"`).
+  private def alias_of(i: Int) -> String = Dialect.quote("#{@sources[i].table.name[0, 1].downcase}#{i}")
+
+  # `pieces` with each column qualified by its table's alias in a join.
+  private def qualified(pieces: Array[Piece]) -> Array[Piece]
+    return pieces if @sources.size == 1
+    pieces.map do |p|
+      case p
+      in Piece::Column(i, n) then Piece::Text.new("#{alias_of(i)}.#{Dialect.quote(n.to_s)}")
+      else p
+      end
+    end
+  end
+
+  # `sqls` joined by AND.
+  private def conjunction(sqls: Array[Sql]) -> Array[Piece]
+    out: Array[Piece] = []
+    sqls.each_with_index do |w, i|
+      out = out + [Piece::Text.new(" AND ")] if i > 0
+      out = out + (sqls.size > 1 && w.prec < Translator::AND + 1 ? [Piece::Text.new("(")] + w.pieces + [Piece::Text.new(")")] : w.pieces)
+    end
+    out
   end
 
   private def where_pieces -> Array[Piece]
     out: Array[Piece] = []
     return out if @wheres.empty?
-    out = [Piece::Text.new(" WHERE ")]
-    @wheres.each_with_index do |w, i|
-      out = out + [Piece::Text.new(" AND ")] if i > 0
-      out = out + (@wheres.size > 1 && w.prec < Translator::AND + 1 ? [Piece::Text.new("(")] + w.pieces + [Piece::Text.new(")")] : w.pieces)
-    end
-    out
+    [Piece::Text.new(" WHERE ").as(Piece)] + conjunction(@wheres)
   end
 
   private def order_pieces -> Array[Piece]

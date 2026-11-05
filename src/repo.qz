@@ -55,16 +55,7 @@ class Repo
   # Runs a query: its rows.
   def run[T](query: Query[T]) -> Array[T]
     sql, params = query.to_sql
-    rows = @adapter.query(sql, params)
-    case query.shape
-    in Query::Shape::Count
-      rows.rows.map { |r| query.load({value: r.int(0)}) }
-    in Query::Shape::Exists
-      rows.rows.map { |r| query.load({value: r.bool(0)}) }
-    in Query::Shape::Rows
-      cols = query.fetched
-      query.preloaded(rows.rows.map { |r| query.load(Repo.values(r, cols)) }, self)
-    end
+    query.preloaded(query.load_rows(@adapter.query(sql, params).rows), self)
   end
 
   # The query's rows: `run(query)`.

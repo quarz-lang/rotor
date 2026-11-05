@@ -1,7 +1,10 @@
-# A piece of SQL: text, or the value of a parameter, numbered (`$n`)
-# when the statement is put together.
+# A piece of SQL: text, a column of one of a query's tables (by the
+# table's index among them: qualified by the table's alias in a join),
+# or the value of a parameter, numbered (`$n`) when the statement is put
+# together.
 enum Piece
   variant Text(text: String)
+  variant Column(source: Int, name: Symbol)
   variant Param(value: Object?)
 end
 
@@ -11,11 +14,21 @@ end
 # capture.
 data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Object?, known: Bool)
 
+# A block of a query's tree as the translator sees it: its parameters,
+# the table (an index among the query's) each one is a row of, or nil,
+# and whether it has a receiver and which table's row that is. `known`
+# is false for a block given to a call the translator does not know,
+# which may or may not have a receiver. `whole` lists the tables of a
+# join whose row its one parameter (or its receiver) is as a whole: what
+# it reads of each is then all of it.
+data Scope = (params: Array[Symbol], rows: Array[Int?], receiver: Bool, row: Int?, known: Bool, whole: Array[Int] = [])
+
 # Translates the tree of a query's block (`Meta::Expr`, Quarz's docs/14
 # §6) to SQL, with the values its captures had when the query was built.
 # The block's row is its receiver (`where { age > 18 }`) or its
-# parameter (`where { |u| u.age > 18 }`); a call of a column's getter on
-# it is the column.
+# parameter (`where { |u| u.age > 18 }`), one per table in a join
+# (`where { |u, p| p.user_id == u.id }`); a call of a column's getter on
+# a row is the column, and on a model the block captured, its value.
 class Translator
   # Precedences, loosest first (PostgreSQL's order).
   OR = 1
@@ -32,28 +45,85 @@ class Translator
   COMPARISONS = {"==": "=", "!=": "<>", "<": "<", "<=": "<=", ">": ">", ">=": ">="}
   ARITHMETIC = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%"}
 
-  @model: Type[Object]
-  @columns: Array[Column]
+  # What `row_in` gives for what is not a row, and for a `self` that may
+  # be any receiver's.
+  NONE = -1
+  ANY = -2
+
+  # The query's tables, in order.
+  @sources: Array[Source]
   @captures: Array[Object]
   @file: String
-  # The block's parameter that is the row, or nil when the row is its
-  # receiver.
-  @row: Symbol?
+  # The blocks the expressions translated are in, the innermost last.
+  @scopes: Array[Scope]
 
-  def initialize(@model: Type[Object], @columns: Array[Column], @captures: Array[Object], @file: String, @row: Symbol?)
+  def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope])
   end
 
-  # The translator of a quoted block over `model`'s rows, and the block's
-  # one expression.
-  def self.of(model: Type[Object], columns: Array[Column], expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
+  # The translator of a quoted block over the rows of `sources`, and the
+  # block's one expression.
+  def self.of(sources: Array[Source], expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
+    params, e = Translator.body(expr, file)
+    tables: Array[Int] = []
+    sources.each_with_index { |_, i| tables = tables + [i] }
+    [Translator.new(sources, captures, file, [Translator.scope(params, tables)]), e]
+  end
+
+  # A block's parameters and its one expression.
+  def self.body(expr: Meta::Expr, file: String) -> [Array[Symbol], Meta::Expr]
     case expr
     in Meta::Expr::Block(params, body, line)
       if body.size != 1
         raise UntranslatableError.new("a block of #{body.size} statements cannot be translated to SQL (#{file}:#{line}): write one expression")
       end
-      [Translator.new(model, columns, captures, file, params.first?), body[0]]
+      [params, body[0]]
     else
       raise UntranslatableError.new("not a block (#{file})")
+    end
+  end
+
+  # The scope of a block over the rows of `tables` (indexes among the
+  # query's): its receiver when it has no parameters (the row of a
+  # single table), else its parameters, one per table (the first
+  # parameter for a single table).
+  def self.scope(params: Array[Symbol], tables: Array[Int]) -> Scope
+    rows: Array[Int?] = []
+    params.each_with_index do |_, i|
+      rows = rows + [tables.size == 1 ? (i == 0 ? tables[0] : nil) : (params.size == tables.size ? tables[i] : nil)]
+    end
+    receiver = params.empty?
+    whole: Array[Int] = tables.size > 1 && params.size != tables.size ? tables : []
+    Scope.new(params, rows, receiver, receiver && tables.size == 1 ? tables[0] : nil, true, whole)
+  end
+
+  # This translator for a block inside the one it translates, whose
+  # scope is `scope`, over `sources` (the tables a `for` has joined so
+  # far).
+  def inner(sources: Array[Source], scope: Scope) -> Translator = Translator.new(sources, @captures, @file, @scopes + [scope])
+
+  # The table whose row `e` is (an index among the query's), `NONE`
+  # for none.
+  def row_of(e: Meta::Expr) -> Int = row_in(e, @scopes)
+
+  # The file the block is written in.
+  def file -> String = @file
+
+  # The line of `e`.
+  def self.line_of(e: Meta::Expr) -> Int
+    case e
+    in Meta::Expr::Lit(_, l) then l
+    in Meta::Expr::Capture(_, _, l) then l
+    in Meta::Expr::Arg(_, _, l) then l
+    in Meta::Expr::SelfRef(_, l) then l
+    in Meta::Expr::Call(_, _, _, _, l) then l
+    in Meta::Expr::And(_, _, l) then l
+    in Meta::Expr::Or(_, _, l) then l
+    in Meta::Expr::Not(_, l) then l
+    in Meta::Expr::If(_, _, _, l) then l
+    in Meta::Expr::ArrayLit(_, l) then l
+    in Meta::Expr::HashLit(_, l) then l
+    in Meta::Expr::Interp(_, l) then l
+    in Meta::Expr::Block(_, _, l) then l
     end
   end
 
@@ -79,25 +149,37 @@ class Translator
     end
   end
 
-  # The column `e` is (a getter called on the row), or nil.
-  def column_of(e: Meta::Expr) -> Column?
+  # The table and column `e` is (a column's getter called on a row), or
+  # nil.
+  def column_of(e: Meta::Expr) -> [Int, Column]?
     case e
-    in Meta::Expr::Call(recv, m, args, block, _)
-      return nil unless recv && row?(recv) && args.empty? && block.nil? && !m.singleton
-      return nil unless @model <= m.owner
-      @columns.find { |c| c.name == m.name }
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton
+      s = row_in(recv, @scopes)
+      return nil if s < 0
+      src = @sources[s]
+      return nil unless src.model <= m.owner
+      c = src.table.columns.find { |x| x.name == m.name } || return nil
+      [s, c]
     else
       nil
     end
   end
 
-  # The columns `e` reads of the row, in the table's order, or nil when
-  # it may read more: it calls another method of the row or passes the
-  # row on (its value is computed in Quarz, `Rotor::Query#select`).
-  def reads(e: Meta::Expr) -> Array[Column]?
-    found = collect(e, 0)
-    return nil unless found
-    @columns.select { |c| found.include?(c.name) }
+  # The columns `e` reads of each table's row, in the table's order, nil
+  # for one whose row it may read more of: it calls another method of the
+  # row or passes the row on (its value is computed in Quarz,
+  # `Rotor::Query#select`). An association's getter reads the key it
+  # needs.
+  def reads(e: Meta::Expr) -> Array[Array[Column]?]
+    found = collect(e, @scopes)
+    @sources.each_with_index.map do |src, i|
+      names = found.select { |x| x[0] == i }.map { |x| x[1] }
+      if names.any? { |n| n.nil? }
+        nil
+      else
+        src.table.columns.select { |c| names.include?(c.name) }
+      end
+    end
   end
 
   # Raises the error for `what` at `line`.
@@ -110,81 +192,142 @@ class Translator
     t == Int || t == Float || t == String || t == Bool || t == Time || t == Bytes || t == Object || t == Nil || t == Array || t == Comparable
   end
 
-  # The names of the columns `e` reads, or nil when it uses the row
-  # otherwise. `n` is how many blocks of the tree `e` is inside: the
-  # row is then `Arg(row, n)`; in a receiver block, a `self` inside
-  # another block may be that block's receiver or the row (the tree does
-  # not say which blocks have one), so it counts as the whole row.
-  private def collect(e: Meta::Expr, n: Int = 0) -> Array[Symbol]?
+  # The table whose row `e` is in `scopes` (innermost last): an `Arg`
+  # naming a parameter that is a row, or a `SelfRef` to a receiver that
+  # is one; `NONE` for anything else, `ANY` for a `self` inside a block
+  # that may have a receiver of its own (the tree does not say).
+  private def row_in(e: Meta::Expr, scopes: Array[Scope]) -> Int
     case e
-    in Meta::Expr::Call(recv, m, args, block, _) if recv && args.empty? && block.nil? && !m.singleton && row_at?(recv, n) && @model <= m.owner
-      if c = @columns.find { |x| x.name == m.name }
-        return [c.name]
+    in Meta::Expr::Arg(name, depth, _)
+      return NONE if depth >= scopes.size
+      s = scopes[scopes.size - 1 - depth]
+      i = s.params.find_index(name) || return NONE
+      s.rows[i] || NONE
+    in Meta::Expr::SelfRef(depth, _)
+      seen = 0
+      i = scopes.size - 1
+      while i >= 0
+        s = scopes[i]
+        return ANY unless s.known
+        if s.receiver
+          return s.row || NONE if seen == depth
+          seen += 1
+        end
+        i -= 1
+      end
+      NONE
+    else
+      NONE
+    end
+  end
+
+  # What `e` reads of the rows in `scopes`: pairs of a table and a column,
+  # or of a table and nil for its whole row. A block given to a call
+  # inside the quoted one is a scope of its own, not known.
+  private def collect(e: Meta::Expr, scopes: Array[Scope]) -> Array[[Int, Symbol?]]
+    case e
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton
+      s = row_in(recv, scopes)
+      if s >= 0 && @sources[s].model <= m.owner
+        t = @sources[s].table
+        if c = t.columns.find { |x| x.name == m.name }
+          return read(s, c.name)
+        end
+        if a = t.associations.find { |x| x.name == m.name }
+          k = a.kind == :has_many ? t.primary_key : a.foreign_key
+          return k ? read(s, k) : none
+        end
       end
     else
       nil
     end
     case e
-    in Meta::Expr::SelfRef(depth, _) then @row.nil? && (n > 0 || depth == 0) ? nil : none
-    in Meta::Expr::Arg(name, depth, _) then depth == n && name == @row ? nil : none
+    in Meta::Expr::SelfRef(_, _) then row_reads(e, scopes)
+    in Meta::Expr::Arg(_, _, _) then row_reads(e, scopes)
     in Meta::Expr::Lit(_, _) then none
     in Meta::Expr::Capture(_, _, _) then none
     in Meta::Expr::Call(recv, _, args, block, _)
       xs = args
       xs = xs + [recv] if recv
-      found = all(xs, n)
-      return nil unless found
-      if block
-        inner = collect(block, n)
-        return nil unless inner
-        found = found + inner
-      end
-      found
-    in Meta::Expr::And(l, r, _) then all([l, r], n)
-    in Meta::Expr::Or(l, r, _) then all([l, r], n)
-    in Meta::Expr::Not(x, _) then all([x], n)
+      found = all(xs, scopes)
+      block ? found + collect(block, scopes) : found
+    in Meta::Expr::And(l, r, _) then all([l, r], scopes)
+    in Meta::Expr::Or(l, r, _) then all([l, r], scopes)
+    in Meta::Expr::Not(x, _) then all([x], scopes)
     in Meta::Expr::If(c, t, f, _)
       xs = [c, t]
       xs = xs + [f] if f
-      all(xs, n)
-    in Meta::Expr::ArrayLit(xs, _) then all(xs, n)
-    in Meta::Expr::HashLit(ps, _) then all(ps.flat_map { |p| [p[0], p[1]] }, n)
-    in Meta::Expr::Interp(xs, _) then all(xs, n)
-    # (A block given to a call inside the quoted one: one level deeper.)
-    in Meta::Expr::Block(_, body, _) then all(body, n + 1)
+      all(xs, scopes)
+    in Meta::Expr::ArrayLit(xs, _) then all(xs, scopes)
+    in Meta::Expr::HashLit(ps, _) then all(ps.flat_map { |p| [p[0], p[1]] }, scopes)
+    in Meta::Expr::Interp(xs, _) then all(xs, scopes)
+    in Meta::Expr::Block(params, body, _)
+      rows: Array[Int?] = []
+      params.each { |_| rows = rows + [nil] }
+      all(body, scopes + [Scope.new(params, rows, false, nil, false)])
     end
   end
 
-  # Whether `e` is the row, `n` blocks deep.
-  private def row_at?(e: Meta::Expr, n: Int) -> Bool
-    case e
-    in Meta::Expr::SelfRef(depth, _) then @row.nil? && n == 0 && depth == 0
-    in Meta::Expr::Arg(name, depth, _) then depth == n && name == @row
-    else false
+  # The whole row `e` is, if it is one (`row_in`).
+  private def row_reads(e: Meta::Expr, scopes: Array[Scope]) -> Array[[Int, Symbol?]]
+    s = row_in(e, scopes)
+    return read(s, nil) if s >= 0
+    # (A join's row as one parameter or a receiver: all of each table.)
+    if (sc = scope_of(e, scopes)) && !sc.whole.empty?
+      out = none
+      sc.whole.each { |t| out = out + read(t, nil) }
+      return out
     end
-  end
-
-  private def none -> Array[Symbol]?
-    out: Array[Symbol] = []
+    return none unless s == ANY
+    out = none
+    scopes.each do |sc|
+      if sc.known && sc.receiver
+        if r = sc.row
+          out = out + read(r, nil)
+        end
+        sc.whole.each { |t| out = out + read(t, nil) }
+      end
+    end
     out
   end
 
-  private def all(es: Array[Meta::Expr], n: Int) -> Array[Symbol]?
-    out: Array[Symbol] = []
-    es.each do |x|
-      found = collect(x, n)
-      return nil unless found
-      out = out + found
+  # The scope of the parameter `e` names or the receiver it is, if
+  # known.
+  private def scope_of(e: Meta::Expr, scopes: Array[Scope]) -> Scope?
+    case e
+    in Meta::Expr::Arg(name, depth, _)
+      return nil if depth >= scopes.size
+      sc = scopes[scopes.size - 1 - depth]
+      sc.params.include?(name) ? sc : nil
+    in Meta::Expr::SelfRef(depth, _)
+      seen = 0
+      i = scopes.size - 1
+      while i >= 0
+        sc = scopes[i]
+        return nil unless sc.known
+        if sc.receiver
+          return sc if seen == depth
+          seen += 1
+        end
+        i -= 1
+      end
+      nil
+    else
+      nil
     end
+  end
+
+  private def read(s: Int, name: Symbol?) -> Array[[Int, Symbol?]] = [[s, name]]
+
+  private def none -> Array[[Int, Symbol?]]
+    out: Array[[Int, Symbol?]] = []
     out
   end
 
-  private def row?(e: Meta::Expr) -> Bool
-    case e
-    in Meta::Expr::SelfRef(depth, _) then @row.nil? && depth == 0
-    in Meta::Expr::Arg(name, depth, _) then depth == 0 && name == @row
-    else false
-    end
+  private def all(es: Array[Meta::Expr], scopes: Array[Scope]) -> Array[[Int, Symbol?]]
+    out = none
+    es.each { |x| out = out + collect(x, scopes) }
+    out
   end
 
   private def node(pieces: Array[Piece], prec: Int) -> Sql = Sql.new(pieces, prec, nil, nil, false)
@@ -237,8 +380,11 @@ class Translator
       untranslatable("the function #{label}", line)
     end
     r = recv.as(Meta::Expr)
-    if c = column_of(Meta::Expr::Call.new(r, m, args, block, line))
-      return Sql.new([Piece::Text.new(Dialect.quote(c.name.to_s))], ATOM, c, nil, false)
+    if found = column_of(Meta::Expr::Call.new(r, m, args, block, line))
+      return Sql.new([Piece::Column.new(found[0], found[1].name)], ATOM, found[1], nil, false)
+    end
+    if v = captured(r, m, args, block, line)
+      return v
     end
     untranslatable("the block given to #{label}", line) if block
     if m.singleton && m.owner == SQL
@@ -284,6 +430,27 @@ class Translator
       return binary(l, op, rr, prec, true)
     end
     untranslatable(label, line)
+  end
+
+  # A column's getter called on a model the block captured
+  # (`where { user_id == u.id }`): the column's value, read when the query
+  # is built (`Rotor::NotLoadedError` when the model was loaded without
+  # it). Nil for any other call.
+  private def captured(recv: Meta::Expr, m: Meta::MethodRef, args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql?
+    return nil unless args.empty? && block.nil? && !m.singleton
+    case recv
+    in Meta::Expr::Capture(index, _, _)
+      case v = @captures[index]
+      in Model => model
+        return nil unless model.class <= m.owner
+        return nil unless model.table_info.columns.any? { |c| c.name == m.name }
+        param(model.read(m.name), line)
+      else
+        nil
+      end
+    else
+      nil
+    end
   end
 
   # `a == b` and the others. Against a value, equality is decided by it:

@@ -179,8 +179,8 @@ class Model
 
   # Every row, as a query (`Rotor::Query`), to refine.
   def self.query -> Query[Self]
-    Query[Self].new(table_info, self, [], [], nil, false, nil, nil, Query::Shape::Rows,
-                    ->(v: Hash[Symbol, Object?], all: Bool) { all ? load(v) : load_partial(v) }, [],
+    Query[Self].new([Source.new(table_info, self, [], nil)], [], [], false, nil, nil, Query::Shape::Rows,
+                    ->(rows: Array[Array[Fetched]]) { rows.map { |r| r[0].all ? load(r[0].values) : load_partial(r[0].values) } }, [],
                     ModelOps[Self].new(->(m: Self) { m.as(Model) }, ->(m: Self, found: Hash[Symbol, Array[Model]]) { m.with_preloaded(found) }))
   end
 
