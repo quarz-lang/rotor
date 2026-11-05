@@ -80,6 +80,9 @@ class Schema
   def belongs_to[T <: Model](target: Type[T], *, name: Symbol? = nil, foreign_key: Symbol? = nil, null: Bool = false) -> Void
     n = name || Inflector.underscore(target.name).to_sym
     key = foreign_key || "#{n}_id".to_sym
+    if key == n
+      raise ArgumentError.new("#{@model}'s association `#{n}` has the name of its key column")
+    end
     check_association(n, target)
     add(key, "bigint", Int, null, nil, false)
     associate(:belongs_to, n, target, key)
@@ -124,6 +127,12 @@ class Schema
     if @associations.any? { |a| a.name == name }
       raise ArgumentError.new("#{@model} declares the association `#{name}` twice")
     end
+    if RESERVED.include?(name)
+      raise ArgumentError.new("#{@model}'s association `#{name}` would replace the model's own `#{name}`")
+    end
+    if @columns.any? { |c| c.name == name }
+      raise ArgumentError.new("#{@model}'s association `#{name}` has the name of a column")
+    end
   end
 
   private def associate(kind: Symbol, name: Symbol, target: Type[Model], key: Symbol) -> Void
@@ -131,7 +140,7 @@ class Schema
   end
 
   # The methods of `Rotor::Model` that a column's getter would replace.
-  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s]
+  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?]
 
   private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool) -> Void
     if RESERVED.include?(name)
@@ -139,6 +148,9 @@ class Schema
     end
     if @columns.any? { |c| c.name == name }
       raise ArgumentError.new("#{@model} declares the column `#{name}` twice")
+    end
+    if @associations.any? { |a| a.name == name }
+      raise ArgumentError.new("#{@model}'s column `#{name}` has the name of an association")
     end
     if primary && null
       raise ArgumentError.new("#{@model}'s primary key `#{name}` cannot be NULL")

@@ -23,6 +23,50 @@ class Note < Rotor::Model
   end
 end
 
+class Author < Rotor::Model
+  table "authors" do
+    column :id, Int, primary: true
+    column :name, String
+    has_many Volume
+  end
+end
+
+class Volume < Rotor::Model
+  table "volumes" do
+    column :id, Int, primary: true
+    column :title, String
+    belongs_to Author, null: true
+    has_many Remark
+  end
+end
+
+class Remark < Rotor::Model
+  table "remarks" do
+    column :id, Int, primary: true
+    column :stars, Int
+    belongs_to Volume
+  end
+end
+
+# An adapter that counts the statements it runs.
+class Counting < Rotor::Adapter
+  @inner: Rotor::Adapter
+  @count: Atom[Int]
+
+  def initialize(@inner: Rotor::Adapter)
+    @count = Atom[Int].new(0)
+  end
+
+  def count -> Int = @count.get
+
+  def query(sql: String, params: Array[Object?]) -> Rotor::Rows
+    @count.update { |n| n + 1 }
+    @inner.query(sql, params)
+  end
+
+  def transaction(&: (Rotor::Adapter) -> Object?) -> Object? = @inner.transaction { |a| yield a }
+end
+
 # Against a real server (PG::Testing): the repository's statements.
 class RepoTest < Test::Case
   SERVER = Atom[PG::Testing::Server | String].new("not started")
@@ -30,7 +74,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -42,7 +86,10 @@ class RepoTest < Test::Case
       created_at timestamptz NOT NULL,
       updated_at timestamptz NOT NULL
     );
-    CREATE TABLE notes (id bigserial PRIMARY KEY, body text NOT NULL DEFAULT 'empty', seen timestamptz)
+    CREATE TABLE notes (id bigserial PRIMARY KEY, body text NOT NULL DEFAULT 'empty', seen timestamptz);
+    CREATE TABLE authors (id bigserial PRIMARY KEY, name text NOT NULL);
+    CREATE TABLE volumes (id bigserial PRIMARY KEY, title text NOT NULL, author_id bigint REFERENCES authors);
+    CREATE TABLE remarks (id bigserial PRIMARY KEY, stars bigint NOT NULL, volume_id bigint NOT NULL REFERENCES volumes)
   SQL
 
   def self.startup
@@ -76,11 +123,27 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
     end
+  end
+
+  # Authors 1 (Ann: volumes 1 "a" and 2 "b"), 2 (Bob: none), 3 (Cy: volume
+  # 3 "c"), and volume 4 "d" without an author; remarks of volumes 1 (5, 3)
+  # and 3 (4).
+  def library(repo: Rotor::Repo) -> Void
+    ["Ann", "Bob", "Cy"].each { |n| repo.insert(Author.new(name: n)) }
+    [["a", 1], ["b", 1], ["c", 3]].each { |t| repo.insert(Volume.new(title: t[0].as(String), author_id: t[1].as(Int))) }
+    repo.insert(Volume.new(title: "d"))
+    [[5, 1], [3, 1], [4, 3]].each { |r| repo.insert(Remark.new(stars: r[0], volume_id: r[1])) }
+  end
+
+  # A repository that counts its statements, over `repo`'s adapter.
+  def counting(repo: Rotor::Repo) -> [Rotor::Repo, Counting]
+    c = Counting.new(repo.adapter)
+    [Rotor::Repo.new(c), c]
   end
 
   def member(name: String, age: Int = 30) -> Member
@@ -206,8 +269,11 @@ class RepoTest < Test::Case
       assert_equal(2, repo.update_all(Member.where { name != "Cy" }) { {age: age + 1} })
       assert_equal([31, 31, 30], repo.all(Member.order { id }.select { age }))
       m = repo.get(Member, 1).as(Member)
-      assert(repo.delete(m))
-      assert(!repo.delete(m))
+      assert_equal(m, repo.delete(m))
+      e = assert_raise(Rotor::StaleError) { repo.delete(m) }
+      assert_equal("Member id: 1: its row no longer exists", e.message)
+      assert_raise(Rotor::StaleError) { repo.update(m.with(age: 1)) }
+      assert_raise(Rotor::StaleError) { repo.touch(m) }
       assert_equal(1, repo.delete_all(Member.where { name == "Bob" }))
       assert_equal(["Cy"], repo.all(Member.query.select { name }))
     end
@@ -254,6 +320,54 @@ class RepoTest < Test::Case
       assert_equal(["Pooled"], repo.all(Member.query.select { name }))
       repo.transaction { |tx| tx.update_all(Member.query) { |m| {age: 1} } }
       assert_equal([1], repo.all(Member.query.select { age }))
+    end
+  end
+
+  def test_preload_has_many_and_belongs_to
+    with_repo do |repo|
+      library(repo)
+      authors = repo.all(Author.order { id })
+      r, c = counting(repo)
+      loaded = r.preload(authors) { volumes }
+      assert_equal(1, c.count)
+      assert_equal([["a", "b"], Array[String].new, ["c"]], loaded.map { |w| w.volumes.map { |b| b.title } })
+      assert(!authors[0].volumes.loaded?)
+      # Already preloaded: not loaded again.
+      again = r.preload(loaded) { volumes }
+      assert_equal(1, c.count)
+      assert_equal(2, again[0].volumes.size)
+      volumes = repo.all(Volume.order { id })
+      with_writers = r.preload(volumes) { author }
+      assert_equal(2, c.count)
+      assert_equal(Array[String?].new + ["Ann", "Ann", "Cy", nil], with_writers.map { |b| b.author&.name })
+      one = r.preload(volumes[2]) { [author, remarks] }
+      assert_equal(4, c.count)
+      assert_equal("Cy", one.author&.name)
+      assert_equal([4], one.remarks.map { |v| v.stars })
+    end
+  end
+
+  def test_nested_preload_and_a_query_option
+    with_repo do |repo|
+      library(repo)
+      r, c = counting(repo)
+      authors = r.all(Author.order { id }.preload { nest(volumes) { [remarks, author] } })
+      # The authors, their volumes, the volumes' remarks and authors.
+      assert_equal(4, c.count)
+      assert_equal([[[5, 3], Array[Int].new], Array[Array[Int]].new, [[4]]], authors.map { |w| w.volumes.map { |b| b.remarks.map { |v| v.stars } } })
+      assert_equal("Ann", authors[0].volumes.first&.author&.name)
+      rs = r.all(Remark.order { id }.preload { nest(volume) { author } })
+      assert_equal(Array[String?].new + ["Ann", "Ann", "Cy"], rs.map { |v| v.volume&.author&.name })
+      # Named twice, one preload: the nested one kept.
+      both = r.preload(authors) { [nest(volumes) { remarks }, volumes] }
+      assert(both[0].volumes.first&.remarks&.loaded? == true)
+      # Children in the order of their key, whatever the table's.
+      r.update(Volume.load({id: 1, title: "a"}).with(title: "a2"))
+      again = r.preload(r.all(Author.order { id })) { volumes }
+      assert_equal(["a2", "b"], again[0].volumes.map { |b| b.title })
+      # The association's query, run.
+      assert_equal(["a2", "b"], r.all(authors[0].volumes.query.order { title }).map { |b| b.title })
+      assert_equal(["b"], r.all(authors[0].volumes.query.where { title == "b" }).map { |b| b.title })
     end
   end
 end

@@ -1,0 +1,162 @@
+# An association a preload names, with those to preload of its models
+# (`Rotor::Repo#preload`: `{ [nest(posts) { comments }, account] }`).
+data Preload = (name: Symbol, nested: Array[Preload])
+
+# Preloading: reading a preload's block, and loading what it names with
+# one query per association and level (`WHERE key IN (...)`).
+module Preloads
+  # PostgreSQL's limit of parameters in a statement: a longer list of
+  # keys is queried in chunks.
+  MAX_PARAMS = 65535
+
+  # The associations the block `expr` of a preload names, of a model of
+  # table `info`.
+  def self.parse(info: TableInfo, model: String, expr: Meta::Expr, file: String) -> Array[Preload]
+    case expr
+    in Meta::Expr::Block(_, body, line)
+      if body.size != 1
+        raise UntranslatableError.new("a preload's block of #{body.size} statements (#{file}:#{line}): write the associations, as `{ posts }` or `{ [posts, account] }`")
+      end
+      merge(items(info, model, body[0], file))
+    else
+      raise UntranslatableError.new("not a block (#{file})")
+    end
+  end
+
+  # `specs` with those of one association made one, their nested ones
+  # merged in turn (`[nest(posts) { comments }, posts]` is one preload of
+  # `posts`).
+  def self.merge(specs: Array[Preload]) -> Array[Preload]
+    out: Array[Preload] = []
+    specs.each do |s|
+      if i = out.index { |o| o.name == s.name }
+        out = out.set(i, Preload.new(s.name, merge(out[i].nested + s.nested)))
+      else
+        out = out + [Preload.new(s.name, merge(s.nested))]
+      end
+    end
+    out
+  end
+
+  # What the repository preloads for `models` (all of table `info`): for
+  # each model, by association name, its associated models.
+  def self.run(repo: Repo, models: Array[Model], info: TableInfo, specs: Array[Preload]) -> Array[Hash[Symbol, Array[Model]]]
+    out: Array[Hash[Symbol, Array[Model]]] = models.map { |m| Hash[Symbol, Array[Model]].new }
+    return out if models.empty?
+    specs.each do |spec|
+      a = info.associations.find { |x| x.name == spec.name } || raise ArgumentError.new("`#{info.name}` has no association `#{spec.name}`")
+      found = if a.kind == :has_many
+                has_many(repo, models, info, a)
+              else
+                belongs_to(repo, models, info, a)
+              end
+      found = nested(repo, found, a.target.table_info, spec.nested) unless spec.nested.empty?
+      found.each_with_index { |f, i| out = out.set(i, out[i].put(a.name, f)) }
+    end
+    out
+  end
+
+  private def self.items(info: TableInfo, model: String, e: Meta::Expr, file: String) -> Array[Preload]
+    case e
+    in Meta::Expr::ArrayLit(xs, _)
+      xs.flat_map { |x| items(info, model, x, file) }
+    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, [inner], Meta::Expr::Block(_, body, line), _) if m.name == :nest && m.owner == Model
+      a = association(info, model, inner, file)
+      if body.size != 1
+        raise UntranslatableError.new("a `nest` block of #{body.size} statements (#{file}:#{line}): write the associations")
+      end
+      [Preload.new(a.name, items(a.target.table_info, a.target.name, body[0], file))]
+    else
+      [Preload.new(association(info, model, e, file).name, [])]
+    end
+  end
+
+  private def self.association(info: TableInfo, model: String, e: Meta::Expr, file: String) -> Association
+    case e
+    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, [], nil, line) if !m.singleton
+      info.associations.find { |a| a.name == m.name } ||
+        raise UntranslatableError.new("`#{m.name}` is not an association of #{model} (#{file}:#{line}): a preload names associations")
+    in Meta::Expr::Call(_, _, _, _, line)
+      raise UntranslatableError.new("a preload names associations of the model, as `{ posts }` (#{file}:#{line})")
+    in Meta::Expr::Capture(_, name, line)
+      raise UntranslatableError.new("`#{name}` is a variable where the preload is written, not an association (#{file}:#{line})")
+    else
+      raise UntranslatableError.new("a preload names associations of the model, as `{ posts }` (#{file})")
+    end
+  end
+
+  # Each model's `a` (a `has_many`): those it has preloaded, else the
+  # target's rows whose foreign key is its key.
+  private def self.has_many(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
+    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{a.name}` needs")
+    HasMany.foreign_key!(a.target, a.foreign_key, models[0].class.name, a.name)
+    keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
+    by_key: Hash[Value, Array[Model]] = {}
+    fetch(repo, a.target, a.foreign_key, keys).each do |row|
+      k = Model.value(row.read(a.foreign_key))
+      next if k.nil?
+      by_key = by_key.put(k, (by_key[k]? || []) + [row])
+    end
+    models.map do |m|
+      m.preloaded(a.name) || ((k = Model.key_of(m, pk)) ? by_key[k]? || [] : [])
+    end
+  end
+
+  # Each model's `a` (a `belongs_to`): the one it has preloaded, else the
+  # target's row its foreign key names, or none.
+  private def self.belongs_to(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
+    target = a.target.table_info
+    pk = target.primary_key || raise SchemaError.new("#{a.target.name} has no primary key, which #{models[0].class.name}##{a.name} needs")
+    keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, a.foreign_key) })
+    by_key: Hash[Value, Model] = {}
+    fetch(repo, a.target, pk, keys).each do |row|
+      k = Model.value(row.read(pk))
+      by_key = by_key.put(k, row) if k
+    end
+    models.map do |m|
+      if found = m.preloaded(a.name)
+        found
+      elsif (k = Model.key_of(m, a.foreign_key)) && (row = by_key[k]?)
+        [row]
+      else
+        Array[Model].new
+      end
+    end
+  end
+
+  # The models of `found` (for each model, its associated ones) with
+  # `specs` preloaded in turn, all of them at once.
+  private def self.nested(repo: Repo, found: Array[Array[Model]], info: TableInfo, specs: Array[Preload]) -> Array[Array[Model]]
+    all = found.flat_map { |ms| ms }
+    loaded = run(repo, all, info, specs)
+    out: Array[Array[Model]] = []
+    at = 0
+    found.each do |ms|
+      out = out + [ms.each_with_index.map { |m, j| m.with_preloaded(loaded[at + j]) }]
+      at += ms.size
+    end
+    out
+  end
+
+  # The keys of `values` that are not nil, once each.
+  private def self.distinct(values: Array[Value?]) -> Array[Value]
+    seen: Hash[Value, Bool] = {}
+    out: Array[Value] = []
+    values.each do |v|
+      next if v.nil? || seen.key?(v)
+      seen = seen.put(v, true)
+      out = out + [v]
+    end
+    out
+  end
+
+  # The rows of `target` whose `column` is one of `keys`, in chunks, in
+  # the order of `target`'s primary key (when it has one).
+  private def self.fetch(repo: Repo, target: Type[Model], column: Symbol, keys: Array[Value]) -> Array[Model]
+    out: Array[Model] = []
+    q = target.query
+    key = target.table_info.primary_key
+    keys.each_slice(MAX_PARAMS) { |chunk| out = out + repo.all(q.where_in(column, chunk).order_by_key(key)) }
+    out
+  end
+end

@@ -1,11 +1,16 @@
 # What a model's table is, for the statements made from its values and
 # the repository that sets its timestamps.
-data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?)
+data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [])
 
 # How a query's row becomes a `T`: from the values of the columns it
 # fetched, the second argument telling whether those are all of the
 # model's.
 type Loader[T] = (Hash[Symbol, Object?], Bool) -> T
+
+# What a query of models does with them for a preload
+# (`Rotor::Query#preload`): a row as a model, and a row with the
+# associations preloaded for it.
+data ModelOps[T] = (as_model: (T) -> Model, attach: (T, Hash[Symbol, Array[Model]]) -> T)
 
 # A query over a model's table, as a value: what `Rotor::Model.where`
 # and the others build, and a repository runs. Each method gives a new
@@ -45,9 +50,13 @@ class Query[T]
   @limit: Int?
   @offset: Int?
   @shape: Shape
+  # The associations to preload for its rows, and how (a query of
+  # models: nil after `select`).
+  @preloads: Array[Preload]
+  @ops: ModelOps[T]?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @fetch: Array[Column]?, @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T])
+  def initialize(@table: TableInfo, @model: Type[Object], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @fetch: Array[Column]?, @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
   end
 
   # The table.
@@ -73,6 +82,28 @@ class Query[T]
           Sql.new([Piece::Text.new("#{col} = "), Piece::Param.new(value)], Translator::CMP, nil, nil, false)
         end
     copy(wheres: @wheres + [s])
+  end
+
+  # The rows whose column `name` is one of `values`: `"name" IN ($1,
+  # ...)`, FALSE for none (a preload's query).
+  def where_in(name: Symbol, values: Array[Value]) -> Query[T]
+    rows!("where_in")
+    c = @table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{@table.name}` has no column `#{name}`")
+    if values.empty?
+      return copy(wheres: @wheres + [Sql.new([Piece::Text.new("FALSE")], Translator::ATOM, nil, false, true)])
+    end
+    pieces: Array[Piece] = [Piece::Text.new("#{Dialect.quote(c.name.to_s)} IN (")]
+    values.each_with_index do |v, i|
+      pieces = pieces + [Piece::Text.new(", ")] if i > 0
+      pieces = pieces + [Piece::Param.new(v)]
+    end
+    copy(wheres: @wheres + [Sql.new(pieces + [Piece::Text.new(")")], Translator::LIKE, nil, nil, false)])
+  end
+
+  # Ordered by the column `name` too (nil: unchanged): a preload's query.
+  def order_by_key(name: Symbol?) -> Query[T]
+    return self unless name
+    copy(orders: @orders + [[Sql.new([Piece::Text.new(Dialect.quote(name.to_s))], Translator::ATOM, nil, nil, false), false]])
   end
 
   # A row's `T` from the values of `fetched`.
@@ -115,6 +146,24 @@ class Query[T]
     unshaped!("offset")
     raise ArgumentError.new("a negative offset: #{n}") if n < 0
     copy(offset: n)
+  end
+
+  # Its rows with the associations the block names preloaded, as
+  # `Rotor::Repo#preload` does after they are loaded (`repo.all(User.query.preload
+  # { posts })`): Ecto's `preload:`.
+  def preload(&spec: Quoted[shareable T.() -> Object]) -> Query[T]
+    rows!("preload")
+    @ops || raise ArgumentError.new("`preload` of a query that does not give models")
+    added = Preloads.parse(@table, @model.name, spec.expr, spec.file)
+    Query[T].new(@table, @model, @wheres, @orders, @fetch, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), @ops)
+  end
+
+  # The rows `repo` loaded with the preloads done (`preload`).
+  def preloaded(rows: Array[T], repo: Repo) -> Array[T]
+    ops = @ops
+    return rows if @preloads.empty? || ops.nil?
+    found = Preloads.run(repo, rows.map { |r| ops.as_model.call(r) }, @table, @preloads)
+    rows.each_with_index.map { |r, i| ops.attach.call(r, found[i]) }
   end
 
   # The first row: `limit(1)`.
@@ -198,7 +247,7 @@ class Query[T]
   end
 
   private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
-    Query[T].new(@table, @model, wheres, orders, @fetch, @projected, limit, offset, @shape, @loader)
+    Query[T].new(@table, @model, wheres, orders, @fetch, @projected, limit, offset, @shape, @loader, @preloads, @ops)
   end
 
   private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
@@ -222,6 +271,7 @@ class Query[T]
 
   private def project[R](expr: Meta::Expr, file: String, f: (T) -> R) -> Query[R]
     rows!("select")
+    raise ArgumentError.new("`select` after `preload`: a projection has no models to preload for") unless @preloads.empty?
     t, e = translator(expr, Array[Object].new, file)
     reads = t.reads(e)
     base = @loader

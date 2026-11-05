@@ -12,7 +12,7 @@ Quarz blocks that are translated to SQL. It runs on PostgreSQL through
 Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 ```
 
-Work in progress. What exists: the schema, queries and statements as values (`to_sql`), and a repository that runs them on PostgreSQL.
+Work in progress. What exists: the schema, queries and statements as values (`to_sql`), a repository that runs them on PostgreSQL, and associations with preloading.
 
 ```ruby
 class User < Rotor::Model
@@ -39,7 +39,7 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
 
 - `table` runs its block at compile time on a `Rotor::Schema`, then
   generates, for each column, a getter typed by the column (`T`, or `T?`
-  for `null: true`), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
+  for `null: true`), a getter for each association (Associations, below), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
   `primary_key` (`Symbol?`) and `associations`
   (`Array[Rotor::Association]`).
 - A model holds its values in one hash (`to_h`) and remembers the
@@ -68,8 +68,8 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   model's name). Two models may name each other, in one file or two.
   A target without a `table` block compiles, and raises
   `Rotor::SchemaError` when its metadata is read; a generic target's
-  type arguments are not kept.
-  The queries that follow them come with the queries.
+  type arguments are not kept. Their getters and preloads are below
+  (Associations).
 - Every model runs its own `table`. Its superclass is `Rotor::Model` or
   a class between them without a `table` (for methods models share):
   a model whose superclass has a table does not compile (at its
@@ -205,7 +205,7 @@ PG::Pool.open("postgres://app@localhost/shop") do |pool|
   repo.count(q); repo.exists?(q)
   u = repo.update(u.with(age: 31))         # the changed columns, and updated_at
   u = repo.touch(u)                        # updated_at alone
-  repo.delete(u)                           # Bool
+  repo.delete(u)                           # the model; StaleError when its row is gone
   repo.delete_all(q); repo.update_all(q) { {age: age + 1} }   # Int
   repo.transaction { |tx| tx.insert(other) }                  # a Repo on the transaction
   repo.exec("VACUUM members")                                 # rows changed
@@ -225,10 +225,62 @@ end
   column changed, and runs no UPDATE when none did; `touch` writes it
   alone. `update_all` and raw SQL set none.
 - `insert`, `update` and `touch` give the model as saved, the one given
-  unchanged (so a statement that fails leaves nothing to put back). An `update` of a row that no longer exists changes
-  nothing and is not reported, for now. Transactions do not nest.
+  unchanged (so a statement that fails leaves nothing to put back).
+  `update`, `touch` and `delete` of a model whose row no longer exists
+  (the statement changed no row) raise `Rotor::StaleError`, naming the
+  model and its key (Ecto's `StaleEntryError`). Transactions do not
+  nest.
 - `Rotor::Adapter` (`query`, `transaction`) is the boundary to the
   database; `Rotor::Adapters::PG` is pg's, over a pool or a connection.
+
+## Associations
+
+```ruby
+class User < Rotor::Model
+  table "users" do
+    column :id, Int, primary: true
+    belongs_to Account                  # account_id; user.account -> Account?
+    has_many Post                       # user.posts -> Rotor::HasMany[Post]
+  end
+end
+
+u = repo.get(User, 1).as(User)
+u.posts.loaded?                         # => false
+u.posts.size                            # NotLoadedError: User#posts is not loaded
+repo.all(u.posts.query.where { published })   # the association as a query
+u = repo.preload(u) { [posts, account] }      # one query per association
+u.posts.map { |p| p.title }             # Post's, typed
+u.account                               # Account?
+users = repo.preload(repo.all(User.query)) { nest(posts) { comments } }
+repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
+```
+
+- No lazy loading (as in Ecto): a getter gives what was preloaded and
+  raises `Rotor::NotLoadedError` otherwise. `has_many`'s getter is a
+  `Rotor::HasMany[T]`, `Enumerable` over the preloaded models, whose
+  `query` is the association as a query (refined and run as any) and
+  `loaded?` says whether they are there; `belongs_to`'s gives the model
+  or nil, nil for a NULL key even when not preloaded.
+- `repo.preload(models) { ... }` and `repo.preload(model) { ... }` load
+  what the block names, the getters `table` generated, so that a
+  misspelling does not compile: `{ posts }`, `{ [posts, account] }`, and
+  with `nest` the associations of their models (`{ nest(posts) {
+  comments } }`, `nest(account) { users }`), as deep as wanted. One
+  query per association and level, `WHERE "user_id" IN ($1, ...)` (in
+  chunks at PostgreSQL's 65535 parameters), a model's children in the
+  order of their primary key; an association already preloaded is not
+  loaded again, and one named twice is one preload. The models given are left as they
+  were: preloading gives new ones.
+- `query.preload { ... }` (and `User.preload { ... }`) has
+  `repo.all`/`one`/`first` preload after loading, as Ecto's `preload:`;
+  not with `select` (a projection has no models).
+- Preloaded associations are carried by `with`, `restore` and the
+  repository's `update`, and are not in `to_h`. A target's key column
+  is checked when a query or a preload uses it (`Rotor::SchemaError`
+  when it has none), not at the statement: the target's `table` may run
+  later.
+- An association's name may not be a column's or one of the model's
+  own methods'.
 
 ## Developing
 

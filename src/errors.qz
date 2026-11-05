@@ -32,3 +32,8 @@ end
 # runs, naming what it met and where.
 class UntranslatableError < Error
 end
+
+# `Rotor::Repo#update`, `Rotor::Repo#touch` or `Rotor::Repo#delete` of a model whose row no
+# longer exists: the statement changed no row.
+class StaleError < Error
+end
