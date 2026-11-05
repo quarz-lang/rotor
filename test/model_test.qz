@@ -268,6 +268,18 @@ class ModelTest < Test::Case
     assert_equal(2, w.clear_changes.posts.size)
     assert(!w.to_h.key?(:posts))
     assert(!u.posts.loaded?)
+    # A `belongs_to` whose key changes forgets what was preloaded; the
+    # others stay.
+    moved = v.with(account_id: 10)
+    assert_raise(Rotor::NotLoadedError) { moved.account }
+    assert_equal(2, moved.posts.size)
+    assert_equal(9, v.with(name: "Cy").account&.id)
+    assert_equal(9, v.with(account_id: 9).account&.id)
+    # A new primary key: the `has_many` loaded for the old one go.
+    rekeyed = v.with(id: 4)
+    assert(!rekeyed.posts.loaded?)
+    assert_equal(9, rekeyed.account&.id)
+    assert(v.with(id: 3).posts.loaded?)
     # A preloaded `belongs_to` without its row: nil.
     assert_nil(u.with_preloaded({account: Array[Rotor::Model].new}).account)
     assert_equal("#<Rotor::HasMany User#posts: 2 Post>", v.posts.inspect)

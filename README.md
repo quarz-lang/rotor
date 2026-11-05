@@ -275,7 +275,11 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
   `repo.all`/`one`/`first` preload after loading, as Ecto's `preload:`;
   not with `select` (a projection has no models).
 - Preloaded associations are carried by `with`, `restore` and the
-  repository's `update`, and are not in `to_h`. A target's key column
+  repository's `update`, and are not in `to_h`; a `with` that changes a
+  key forgets what was preloaded for it (reading it raises
+  `Rotor::NotLoadedError`): a `belongs_to`'s foreign key its
+  association, the primary key every `has_many` (loaded for the old
+  key). Ecto keeps the stale structs. A target's key column
   is checked when a query or a preload uses it (`Rotor::SchemaError`
   when it has none), not at the statement: the target's `table` may run
   later.
