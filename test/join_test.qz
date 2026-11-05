@@ -1,0 +1,144 @@
+require "test"
+
+class Writer < Rotor::Model
+  table "writers" do
+    column :id, Int, primary: true
+    column :name, String
+    column :age, Int, default: 0
+    has_many Article, foreign_key: :writer_id
+  end
+end
+
+class Article < Rotor::Model
+  table "articles" do
+    column :id, Int, primary: true
+    column :writer_id, Int
+    column :title, String
+    column :published, Bool, default: false
+    has_many Reply
+  end
+end
+
+class Reply < Rotor::Model
+  table "replies" do
+    column :id, Int, primary: true
+    column :article_id, Int
+    column :body, String
+  end
+end
+
+# A model without an association to the others.
+class Visitor < Rotor::Model
+  table "visitors" do
+    column :id, Int, primary: true
+    column :name, String
+  end
+end
+
+class JoinTest < Test::Case
+  W = "\"w0\".\"id\", \"w0\".\"name\", \"w0\".\"age\""
+  A = "\"a1\".\"id\", \"a1\".\"writer_id\", \"a1\".\"title\", \"a1\".\"published\""
+
+  def check[T](q: Rotor::Query[T], text: String, params: Array[Object?]) -> Void
+    assert_equal([text, params], q.to_sql)
+  end
+
+  def fetched(values: Hash[Symbol, Object?], all: Bool = true) -> Rotor::Fetched = Rotor::Fetched.new(values, all)
+
+  def test_a_for_over_two_queries_is_one_join
+    min = 3
+    q = for w in Writer.query, a in Article.where { published } when a.writer_id == w.id && a.id > min do [w, a] end
+    check(q, "SELECT #{W}, #{A} FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"published\" AND (\"a1\".\"writer_id\" = \"w0\".\"id\" AND \"a1\".\"id\" > $1)", [3])
+    # The conditions of the outer query stay in WHERE; orders follow in
+    # turn; a source without conditions is a CROSS JOIN.
+    q2 = for w in Writer.where { age > 30 }.order { name }, a in Article.query.order { id }.desc do [w.name, a.title] end
+    check(q2, "SELECT \"w0\".\"name\", \"a1\".\"title\" FROM \"writers\" AS \"w0\" CROSS JOIN \"articles\" AS \"a1\" WHERE \"w0\".\"age\" > 30 ORDER BY \"w0\".\"name\", \"a1\".\"id\" DESC", [])
+    # A model without an association joins by a condition.
+    q3 = for w in Writer.query, v in Visitor.query when v.name == w.name do v.id end
+    check(q3, "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
+    check(q3.count, "SELECT count(*) FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
+    check(q3.limit(2), "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" LIMIT 2", [])
+  end
+
+  def test_a_for_through_an_association
+    q = for w in Writer.query, a in w.articles.query when a.published do a.title end
+    check(q, "SELECT \"w0\".\"id\", \"a1\".\"title\" FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"writer_id\" = \"w0\".\"id\" AND \"a1\".\"published\"", [])
+    # Three sources: a nested `flat_map`.
+    q2 = for w in Writer.query, a in w.articles.query, r in a.replies.query do [w.name, r.body] end
+    check(q2, "SELECT \"w0\".\"id\", \"w0\".\"name\", \"a1\".\"id\", \"r2\".\"body\" FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"writer_id\" = \"w0\".\"id\" INNER JOIN \"replies\" AS \"r2\" ON \"r2\".\"article_id\" = \"a1\".\"id\"", [])
+  end
+
+  def test_the_rows_of_a_for_are_made_by_its_block
+    # (The outer row has only the columns the block reads: `id` for the
+    # association, `name` for the body.)
+    q = for w in Writer.query, a in w.articles.query when a.published do "#{w.name}: #{a.title}" end
+    assert_equal("Ann: Q", q.load_row([fetched({id: 1, name: "Ann"}, false), fetched({title: "Q"}, false)]))
+    pairs = for w in Writer.query, a in Article.query when a.writer_id == w.id do [w, a] end
+    w, a = pairs.load_row([fetched({id: 1, name: "Ann", age: 40}), fetched({id: 5, writer_id: 1, title: "Q", published: true})])
+    assert_equal("Ann", w.name)
+    assert_equal("Q", a.title)
+    three = for w in Writer.query, a in w.articles.query, r in a.replies.query do [w.name, r.body] end
+    assert_equal(["Ann", "hi"], three.load_row([fetched({id: 1, name: "Ann"}, false), fetched({id: 5}, false), fetched({body: "hi"}, false)]))
+  end
+
+  def test_join_by_an_association
+    q = Writer.query.join { articles }
+    check(q, "SELECT #{W}, #{A} FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"writer_id\" = \"w0\".\"id\"", [])
+    check(Writer.query.join { |w| w.articles }, q.to_sql[0], [])
+    w, a = q.load_row([fetched({id: 1, name: "Ann", age: 40}), fetched({id: 5, writer_id: 1, title: "Q", published: true})])
+    assert_equal(["Ann", "Q"], [w.name, a.title])
+    # Conditions, orders and projections of the pairs; the writer keeps
+    # its key, which the association needs.
+    s = q.where { |w, a| a.published && w.age > 30 }.order { |w, a| a.id }.select { |w, a| a.title }
+    check(s, "SELECT \"w0\".\"id\", \"a1\".\"title\" FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"writer_id\" = \"w0\".\"id\" WHERE \"a1\".\"published\" AND \"w0\".\"age\" > 30 ORDER BY \"a1\".\"id\"", [])
+    assert_equal("Q", s.load_row([fetched({id: 1}, false), fetched({title: "Q"}, false)]))
+    check(Writer.where { age > 3 }.join { articles }.count, "SELECT count(*) FROM \"writers\" AS \"w0\" INNER JOIN \"articles\" AS \"a1\" ON \"a1\".\"writer_id\" = \"w0\".\"id\" WHERE \"w0\".\"age\" > 3", [])
+  end
+
+  def test_join_by_a_condition
+    n = "Ann"
+    q = Writer.query.join(Visitor) { |w, v| v.name == w.name && w.name != n }
+    check(q, "SELECT #{W}, \"v1\".\"id\", \"v1\".\"name\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" AND \"w0\".\"name\" <> $1", ["Ann"])
+    w, v = q.load_row([fetched({id: 1, name: "Bob", age: 4}), fetched({id: 9, name: "Bob"})])
+    assert_equal([1, 9], [w.id, v.id])
+    # A pair as one parameter reads all of both tables.
+    whole = q.select { |pair| pair[0].name }
+    check(whole, "SELECT #{W}, \"v1\".\"id\", \"v1\".\"name\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" AND \"w0\".\"name\" <> $1", ["Ann"])
+    assert_equal("Bob", whole.load_row([fetched({id: 1, name: "Bob", age: 4}), fetched({id: 9, name: "Bob"})]))
+    nested = for x in q, a in Article.query when a.published do [x[0].name, a.id] end
+    check(nested, "SELECT #{W}, \"v1\".\"id\", \"v1\".\"name\", \"a2\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" AND \"w0\".\"name\" <> $1 INNER JOIN \"articles\" AS \"a2\" ON \"a2\".\"published\"", ["Ann"])
+    assert_equal(["Bob", 5], nested.load_row([fetched({id: 1, name: "Bob", age: 4}), fetched({id: 9, name: "Bob"}), fetched({id: 5}, false)]))
+    assert_equal(whole.to_sql, q.select { [0].map { |i| self[0].name }.first? }.to_sql)
+    # A pair is not a row in SQL: name each.
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |pair| pair.nil? } }
+    assert_match(/the parameter `pair` by itself/, e.message)
+  end
+
+  def test_a_captured_models_column_is_its_value
+    w = Writer.load({id: 7, name: "Ann"})
+    check(Article.where { writer_id == w.id }, "SELECT \"id\", \"writer_id\", \"title\", \"published\" FROM \"articles\" WHERE \"writer_id\" = $1", [7])
+    part = Writer.load_partial({name: "Ann"})
+    assert_raise(Rotor::NotLoadedError) { Article.where { writer_id == part.id } }
+  end
+
+  def test_what_a_join_refuses
+    e = assert_raise(Rotor::UntranslatableError) { for w in Writer.query, a in Article.query.limit(2) do a end }
+    assert_match(/`Rotor::Query#limit` in a `for`'s source/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { for w in Writer.query, a in Article.query.order { |x| w.name } do a.id end }
+    assert_match(/by the outer rows alone/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { for w in Writer.query, a in (w.age > 3 ? Article.query : Article.where { published }) do a end }
+    assert_match(/a `for` source other than a model's query/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { for w in Writer.query, a in Article.query.map { |a| a.title } when a.empty? do a end }
+    assert_match(/`map` before another call/, e.message)
+    e = assert_raise(ArgumentError) { for w in Writer.query.limit(3), a in w.articles.query do a end }
+    assert_match(/with a limit or an offset/, e.message)
+    e = assert_raise(ArgumentError) { for n in Writer.select { name }, a in Article.query do a end }
+    assert_match(/after `select`/, e.message)
+    e = assert_raise(ArgumentError) { Writer.query.join { articles }.delete }
+    assert_match(/`delete` of a join/, e.message)
+    e = assert_raise(ArgumentError) { Writer.preload { articles }.join { articles } }
+    assert_match(/after `preload`/, e.message)
+    e = assert_raise(ArgumentError) { Writer.query.join { articles }.join(Visitor) { |p, v| true } }
+    assert_match(/`join` of a join/, e.message)
+  end
+end

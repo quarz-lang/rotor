@@ -96,6 +96,8 @@ class Statement
       pieces.each do |p|
         case p
         in Piece::Text(s) then b << s
+        # (Unqualified: a query qualifies its columns in a join.)
+        in Piece::Column(_, n) then b << Dialect.quote(n.to_s)
         in Piece::Param(v)
           params = params + [v]
           b << Dialect.param(params.size)

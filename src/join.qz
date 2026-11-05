@@ -1,0 +1,142 @@
+# What `Rotor::Query#flat_map` reads of its block's tree: the tables the
+# block's query joins to the outer query's (after them, with their
+# conditions and the columns each is fetched with) and its orders.
+data Plan = (sources: Array[Source], orders: Array[[Sql, Bool]])
+
+# The translation of joins: a `for` comprehension's inner queries
+# (`Rotor::Query#flat_map`) and associations (`Rotor::Query#join`).
+module Joins
+  # The plan of `flat_map`'s block `expr` over the rows of `sources`:
+  # the outer tables fetched with the columns the whole block reads of
+  # their rows (the block runs on them to make each result), then the
+  # tables of its query.
+  def self.plan(sources: Array[Source], expr: Meta::Expr, captures: Array[Object], file: String) -> Plan
+    params, e = Translator.body(expr, file)
+    t = Translator.new(sources, captures, file, [Translator.scope(params, indexes(sources.size))])
+    inner = inner(t, sources, e)
+    reads = t.reads(e)
+    outer = sources.each_with_index.map { |s, i| fetching(s, reads[i]) }
+    Plan.new(outer + inner.sources.drop(sources.size), inner.orders)
+  end
+
+  # `s` fetching the columns `reads` (and those it keeps), or all of them
+  # for nil.
+  def self.fetching(s: Source, reads: Array[Column]?) -> Source
+    fetch = reads ? s.table.columns.select { |c| reads.include?(c) || s.keep.include?(c.name) } : nil
+    Source.new(s.table, s.model, s.on, fetch, s.keep)
+  end
+
+  # The `has_many` association whose getter `e` calls on the row of
+  # table `i` (`source`), and that table's primary key.
+  def self.association(t: Translator, e: Meta::Expr, i: Int, source: Source) -> [Association, Symbol]
+    line = Translator.line_of(e)
+    case e
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && t.row_of(recv) == i && source.model <= m.owner
+      a = source.table.associations.find { |x| x.name == m.name && x.kind == :has_many } ||
+        t.untranslatable("`#{m.owner.name}##{m.name}`, which is not a `has_many` association,", line)
+      key = source.table.primary_key || raise SchemaError.new("#{source.model.name} has no primary key, which `#{a.name}` needs")
+      HasMany.foreign_key!(a.target, a.foreign_key, source.model.name, a.name)
+      [a, key]
+    else
+      t.untranslatable("a join by something other than an association of the row (`join { posts }`)", line)
+    end
+  end
+
+  # `"t".fk = "s".key`: an association's join.
+  def self.key_condition(t: Int, fk: Symbol, s: Int, key: Symbol) -> Sql
+    Sql.new([Piece::Column.new(t, fk), Piece::Text.new(" = "), Piece::Column.new(s, key)], Translator::CMP, nil, nil, false)
+  end
+
+  # A `target` from the values a row gave of its table.
+  def self.load[R <: Model](target: Type[R], f: Fetched) -> R = f.all ? target.load(f.values) : target.load_partial(f.values)
+
+  # The plan of the query `e`, inside the blocks `t` translates, joined
+  # to `sources`: its table (a model's or an association's, then those
+  # of a nested `flat_map`), with its conditions, and its orders.
+  private def self.inner(t: Translator, sources: Array[Source], e: Meta::Expr) -> Plan
+    # The calls on the source, first to last: name, block, line.
+    steps: Array[[Symbol, Meta::Expr?, Int]] = []
+    cur = e
+    while (c = step_of(cur))
+      steps = [c] + steps
+      cur = receiver_of(cur)
+    end
+    n = sources.size
+    source = case cur
+             in Meta::Expr::Call(Meta::Expr::Lit(v, _), m, _, block, line) if m.singleton && m.owner == Model
+               model = v.as?(Type[Model]) || t.untranslatable("a `for` source of #{v.inspect}", line)
+               steps = [[m.name, block, line]] + steps unless m.name == :query
+               Source.new(model.table_info, model, [], nil)
+             in Meta::Expr::Call(Meta::Expr::Call(Meta::Expr => row, g, [], nil, _), m, [], nil, line) if m.owner == HasMany && m.name == :query
+               owner = t.row_of(row)
+               t.untranslatable("the association query of something other than an outer row", line) if owner < 0
+               a, pk = association(t, Meta::Expr::Call.new(row, g, [], nil, line), owner, sources[owner])
+               Source.new(a.target.table_info, a.target, [key_condition(n, a.foreign_key, owner, pk)], nil)
+             else
+               t.untranslatable("a `for` source other than a model's query (`Post.where { ... }`) or an association's (`u.posts.query`)", Translator.line_of(cur))
+             end
+    sources = sources + [source]
+    orders: Array[[Sql, Bool]] = []
+    steps.each_with_index do |step, i|
+      name, block, line = step
+      last = i == steps.size - 1
+      if name == :desc
+        o = orders.last? || t.untranslatable("`desc` without an `order` before it in a `for`'s source", line)
+        orders = orders.take(orders.size - 1) + [[o[0], true]]
+        next
+      end
+      b = block || t.untranslatable("`Rotor::Query##{name}` in a `for`'s source", line)
+      params, body = Translator.body(b, t.file)
+      bt = t.inner(sources, Translator.scope(params, [n]))
+      case name
+      in :where | :filter
+        s = sources[n]
+        sources = sources.take(n) + [Source.new(s.table, s.model, s.on + [bt.sql(body)], s.fetch, s.keep)] + sources.drop(n + 1)
+      in :order
+        by = bt.sql(body)
+        t.untranslatable("an order by a constant", Translator.line_of(body)) if by.known
+        # (Rebuilt for each outer row, it would be by a constant there.)
+        if bt.reads(body)[n] == Array[Column].new
+          t.untranslatable("an order of a `for`'s source by the outer rows alone (order the outer query)", Translator.line_of(body))
+        end
+        orders = orders + [[by, false]]
+      in :map | :select
+        t.untranslatable("`#{name}` before another call in a `for`'s source", line) unless last
+        sources = sources.take(n) + [fetching(sources[n], bt.reads(body)[n])] + sources.drop(n + 1)
+      in :flat_map
+        t.untranslatable("`flat_map` before another call in a `for`'s source", line) unless last
+        nested = inner(bt, sources, body)
+        reads = bt.reads(body)
+        sources = nested.sources.take(n) + [fetching(nested.sources[n], reads[n])] + nested.sources.drop(n + 1)
+        orders = orders + nested.orders
+      else
+        t.untranslatable("`Rotor::Query##{name}` in a `for`'s source", line)
+      end
+    end
+    Plan.new(sources, orders)
+  end
+
+  # A call of a `Rotor::Query` method on a query (`.where { ... }`):
+  # its name, block and line, or nil.
+  private def self.step_of(e: Meta::Expr) -> [Symbol, Meta::Expr?, Int]?
+    case e
+    in Meta::Expr::Call(Meta::Expr => _, m, _, block, line) if !m.singleton && m.owner == Query
+      [m.name, block, line]
+    else
+      nil
+    end
+  end
+
+  private def self.receiver_of(e: Meta::Expr) -> Meta::Expr
+    case e
+    in Meta::Expr::Call(Meta::Expr => recv, _, _, _, _) then recv
+    else e
+    end
+  end
+
+  private def self.indexes(n: Int) -> Array[Int]
+    out: Array[Int] = []
+    n.times { |i| out = out + [i] }
+    out
+  end
+end

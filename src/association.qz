@@ -43,6 +43,9 @@ class HasMany[T <: Model]
   # Whether the models were preloaded.
   def loaded? -> Bool = !@models.nil?
 
+  # The associated model's class.
+  def target -> Type[T] = @target
+
   # Calls the block with each model; raises `Rotor::NotLoadedError` when
   # they were not preloaded.
   def each(&: (T) -> Void) -> Void
