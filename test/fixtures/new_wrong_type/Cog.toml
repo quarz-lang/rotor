@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/model_test.qz): `new` takes each
+# column as a keyword of the column's type. It is checked against this
+# checkout of rotor.
+[cog]
+name = "new_wrong_type"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

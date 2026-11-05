@@ -1,0 +1,12 @@
+class Pen < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    column :name, String
+    column :note, String, null: true
+  end
+end
+
+p Pen.new(name: 3)
+p Pen.new(name: nil)
+p Pen.new(colour: "red")
+p Pen.new(note: nil)

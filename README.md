@@ -27,7 +27,7 @@ class User < Rotor::Model
   end
 end
 
-u = User.new.with(name: "Ann")   # with(name: 1) does not compile
+u = User.new(name: "Ann")   # User.new(name: 1) does not compile
 u.email                # => nil
 u.age                  # => 0
 u.changed              # => [:name]
@@ -39,15 +39,27 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
 
 - `table` runs its block at compile time on a `Rotor::Schema`, then
   generates, for each column, a getter typed by the column (`T`, or `T?`
-  for `null: true`), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
+  for `null: true`), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
   `primary_key` (`Symbol?`) and `associations`
   (`Array[Rotor::Association]`).
 - A model holds its values in one hash (`to_h`) and remembers the
   columns assigned since it was made or loaded (`changed`, `changed?`;
-  `clear_changes` gives it without them). `new` takes no arguments and starts from the
-  columns' defaults; reading a column that has none and was never set
+  `clear_changes` gives it without them). `new` takes each column as
+  an optional keyword, as `with` does (`User.new(name: "Ann", age: 3)`,
+  checked when the program is compiled), and starts from the columns'
+  defaults for the others: the columns given are changed, in the
+  columns' order; reading a column that has no default and was never set
   raises `Rotor::MissingAttributeError` (a `null: true` one reads nil).
   `load(values)` checks each value against its column's type.
+- A model, and a class between it and `Rotor::Model`, does not write
+  `initialize`: `table` generates the model's constructors
+  (`def_initialize`, Quarz's docs/14 §5), the keyword one and the one
+  `with` and the repository build through
+  (`initialize(point: Rotor::Checkpoint)`). One of the same parameters
+  does not compile ("already has an `initialize` with the same
+  parameters"), a written `initialize()` makes `new` without arguments
+  ambiguous, and one in a class between makes the model's `table` an
+  error.
 - `belongs_to Account` and `has_many Post` take the associated model's
   class (compile-time code cannot turn a name into one), and declare
   the association (`account`, `posts`; or `name:`) and, for
@@ -99,7 +111,7 @@ v = repo.update(v)                    # saved: v.changed => []
   (`T?` for `null: true`, so `email: nil` sets NULL, while a column left
   out keeps its value): `with(age: "x")`, `with(name: nil)` for a column
   that is not `null: true`, and an unknown column do not compile. The
-  primary key may be given (`User.new.with(id: 1)`), but a model whose
+  primary key may be given (`User.new(id: 1)`), but a model whose
   key was assigned is not updated or deleted by it (the row it named is
   not known).
 - So models are `Shareable` (Quarz's docs/03): one can be captured by
@@ -185,7 +197,7 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
 ```ruby
 PG::Pool.open("postgres://app@localhost/shop") do |pool|
   repo = Rotor::Repo.new(pool: pool)       # or connection: a PG::Connection
-  u = repo.insert(User.new.with(name: "Ann"))   # key, defaults and timestamps loaded back
+  u = repo.insert(User.new(name: "Ann"))   # key, defaults and timestamps loaded back
   repo.all(User.where { age >= 18 })       # Array[User]
   repo.one(User.where { email == e })      # User?; MultipleResultsError for more
   repo.one!(q); repo.first(q); repo.get(User, 1)
