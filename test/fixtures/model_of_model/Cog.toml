@@ -1,0 +1,11 @@
+# A program `quarz check` refuses (test/model_test.qz): a model whose
+# superclass has a table. It is checked against this checkout of rotor.
+[cog]
+name = "model_of_model"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

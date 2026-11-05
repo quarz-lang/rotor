@@ -1,0 +1,14 @@
+class Pen < Rotor::Model
+  table do
+    column :id, Int, primary: true
+  end
+end
+
+class Pencil < Pen
+  table do
+    column :id, Int, primary: true
+    column :hardness, String
+  end
+end
+
+p Pencil.new

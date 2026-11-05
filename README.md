@@ -58,11 +58,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `Rotor::SchemaError` when its metadata is read; a generic target's
   type arguments are not kept.
   The queries that follow them come with the queries.
-- A subclass of a model shares its table, unless it has a `table`
-  block of its own: then its columns are its own. (With immutable
-  models, subclasses are not settled yet: see the pull request that
-  made them so.) Single-table inheritance (one table for a hierarchy,
-  with a type column) is not provided.
+- Every model runs its own `table`. Its superclass is `Rotor::Model` or
+  a class between them without a `table` (for methods models share):
+  a model whose superclass has a table does not compile (at its
+  `table`, when the superclass's ran first: in a cog it depends on, or
+  earlier in its own cog's order), and a subclass that inherits a table without one of its own
+  raises `Rotor::SchemaError` at its first use ("Guest has no table; a
+  model declares its own; single-table inheritance is not provided").
+  The members `table` generates belong to the class it ran on (its
+  `with` is typed so), and single-table inheritance (one table for a
+  hierarchy, with a type column) is not provided.
 - A `Time` column takes no `default:` (the compiler cannot bake a time
   into the program).
 - A model without a `table` block raises `Rotor::SchemaError` at its

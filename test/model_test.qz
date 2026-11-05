@@ -56,12 +56,21 @@ class Book < Rotor::Model
   end
 end
 
-class Admin < User
+# A class between a model and Rotor::Model, without a table.
+class Record < Rotor::Model
+  def label -> String = "record #{table_info.name}"
+end
+
+class Admin < Record
   table "admins" do
     column :id, Int, primary: true
     column :email, String
     column :level, Int, default: 1
   end
+end
+
+# Inherits `User`'s table: refused at its first use.
+class Guest < User
 end
 
 class ModelTest < Test::Case
@@ -189,15 +198,36 @@ class ModelTest < Test::Case
     assert(Book.associations[0].target == Shelf)
   end
 
-  def test_a_subclass_with_a_table_of_its_own
+  def test_a_model_under_a_class_without_a_table
     a = Admin.new
     assert_equal(1, a.level)
-    assert_equal(2, a.with(level: 2).level)
+    assert_equal("record admins", a.label)
+    b: Admin = a.with(id: 1, email: "a@example.com", level: 2)
+    assert_equal(2, b.level)
+    assert_equal("Admin", b.class.name)
     e = assert_raise(ArgumentError) { a.with_values({name: "x"}) }
     assert_equal("Admin has no column `name`", e.message)
     e = assert_raise(ArgumentError) { a.with_values({email: nil}) }
     assert_equal("Admin#email cannot be nil", e.message)
     assert(!a.changed?)
+  end
+
+  def test_a_subclass_that_inherits_a_table
+    message = "Guest has no table; a model declares its own; single-table inheritance is not provided"
+    e = assert_raise(Rotor::SchemaError) { Guest.new }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.load({id: 1, name: "x"}) }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.table_name }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.where { name == "x" } }
+    assert_equal(message, e.message)
+  end
+
+  def test_a_model_of_a_model_does_not_compile
+    out = Process.sh("cd test/fixtures/model_of_model && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/Pencil subclasses a model with a table: a model's superclass is Rotor::Model or a class without a `table`/, out.stderr)
   end
 
   def test_columns_cross_tasks
