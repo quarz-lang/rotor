@@ -75,7 +75,7 @@ end
 
 class ModelTest < Test::Case
   def test_typed_accessors
-    u = User.new.with(name: "Ann")
+    u = User.new(name: "Ann")
     assert_equal("Ann", u.name)
     assert_nil(u.email)
     v = u.with(email: "ann@example.com")
@@ -123,6 +123,38 @@ class ModelTest < Test::Case
     a.update { |m| m.with(age: 5) }
     assert_equal(5, a.get.age)
     assert_equal(0, u.age)
+  end
+
+  def test_new_takes_the_columns
+    u: User = User.new(age: 3, name: "Ann")
+    assert_equal("Ann", u.name)
+    assert_equal(3, u.age)
+    # The other columns' defaults, as for `new` without arguments.
+    assert_equal(false, u.admin)
+    assert_nil(u.email)
+    # Changed in the columns' order, as by one `with`.
+    assert_equal([:name, :age], u.changed)
+    assert_equal(u.to_h, User.new.with(name: "Ann", age: 3).to_h)
+    # A nullable column given nil is set to NULL.
+    n = User.new(email: nil)
+    assert_nil(n.email)
+    assert_equal([:email], n.changed)
+    assert(n.to_h.key?(:email))
+    a = Admin.new(email: "a@example.com")
+    assert_equal("a@example.com", a.email)
+    assert_equal(1, a.level)
+    assert_equal("record admins", a.label)
+  end
+
+  def test_new_refuses_a_wrong_type_at_compile_time
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/new_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/argument `name` of initialize\(.*\) -> Void expects String but found Int/, out.stderr)
+    assert_match(/argument `name` of initialize\(.*\) -> Void expects String but found Nil/, out.stderr)
+    assert_match(/initialize\(.*\) -> Void has no parameter `colour`/, out.stderr)
+    # `note: nil` (line 12), a nullable column's NULL, is not refused.
+    refute_match(/main\.qz:12:/, out.stderr)
   end
 
   def test_with_refuses_a_wrong_type_at_compile_time
@@ -193,7 +225,7 @@ class ModelTest < Test::Case
     # `Book belongs_to Shelf` here, each naming the other's class.
     assert_equal([Rotor::Association.new(:has_many, :books, Book, :shelf_id)], Shelf.associations)
     assert_equal([Rotor::Association.new(:belongs_to, :shelf, Shelf, :shelf_id)], Book.associations)
-    b = Book.new.with(shelf_id: 3)
+    b = Book.new(shelf_id: 3)
     assert_equal(3, b.shelf_id)
     assert(Book.associations[0].target == Shelf)
   end
@@ -215,6 +247,10 @@ class ModelTest < Test::Case
   def test_a_subclass_that_inherits_a_table
     message = "Guest has no table; a model declares its own; single-table inheritance is not provided"
     e = assert_raise(Rotor::SchemaError) { Guest.new }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.new(name: "x") }
+    assert_equal(message, e.message)
+    e = assert_raise(Rotor::SchemaError) { Guest.new(Rotor::Checkpoint.new({}, [], nil)) }
     assert_equal(message, e.message)
     e = assert_raise(Rotor::SchemaError) { Guest.load({id: 1, name: "x"}) }
     assert_equal(message, e.message)

@@ -84,7 +84,7 @@ class RepoTest < Test::Case
   end
 
   def member(name: String, age: Int = 30) -> Member
-    Member.new.with(name: name, age: age)
+    Member.new(name: name, age: age)
   end
 
   def test_insert_sets_the_key_and_timestamps
@@ -125,7 +125,7 @@ class RepoTest < Test::Case
       assert(g.admin)
       assert_equal(b"\x00\xff", g.avatar)
       t = Time.utc(2026, 11, 3, 12, 0, 0) + 1.ms * 0.123
-      repo.insert(Note.new.with(body: "b", seen: t))
+      repo.insert(Note.new(body: "b", seen: t))
       assert_equal(t, repo.one!(Note.query).seen)
     end
   end
@@ -193,7 +193,7 @@ class RepoTest < Test::Case
       assert_raise(PG::ServerError) { repo.insert(n) }
       assert_equal([:name, :age, :id], n.changed)
       assert_nil(n.to_h[:created_at]?)
-      s = repo.insert(Note.new.with(body: "x")).with(body: "y")
+      s = repo.insert(Note.new(body: "x")).with(body: "y")
       assert_raise(ArgumentError) { repo.touch(s, :seen, :id) }
       assert_equal([:body], s.changed)
       assert_nil(s.seen)

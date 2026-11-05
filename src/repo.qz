@@ -13,7 +13,7 @@
 #
 # PG::Pool.open("postgres://app@localhost/shop") do |pool|
 #   repo = Rotor::Repo.new(pool: pool)
-#   u = repo.insert(RUser.new.with(name: "Ann"))   # its id and timestamps set
+#   u = repo.insert(RUser.new(name: "Ann"))   # its id and timestamps set
 #   repo.all(RUser.where { age >= 18 })     # Array[RUser]
 #   repo.transaction { |tx| tx.update(u.with(age: 41)) }
 # end
