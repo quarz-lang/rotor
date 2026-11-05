@@ -82,6 +82,16 @@ class SchemaTest < Test::Case
     assert_equal([:posts], s.associations.map { |a| a.name })
     e = assert_raise(ArgumentError) { s.has_many(Rotor::Model) }
     assert_equal("Item's association `models` names Rotor::Model itself: name a model class", e.message)
+    # An association's getter would collide with a column's or the
+    # model's own method.
+    e = assert_raise(ArgumentError) { s.has_many(Post, name: :user_id) }
+    assert_equal("Item's association `user_id` has the name of a column", e.message)
+    e = assert_raise(ArgumentError) { s.column(:posts, Int) }
+    assert_equal("Item's column `posts` has the name of an association", e.message)
+    e = assert_raise(ArgumentError) { s.belongs_to(Account, name: :acc, foreign_key: :acc) }
+    assert_equal("Item's association `acc` has the name of its key column", e.message)
+    e = assert_raise(ArgumentError) { s.has_many(Post, name: :nest) }
+    assert_equal("Item's association `nest` would replace the model's own `nest`", e.message)
     e = assert_raise(ArgumentError) { s.column(:to_h, String) }
     assert_equal("Item's column `to_h` would replace the model's own `to_h`", e.message)
   end

@@ -1,0 +1,25 @@
+class Writer < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many Book
+  end
+end
+
+class Book < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Writer
+    has_many Review
+  end
+end
+
+class Review < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Book
+  end
+end
+
+p Writer.query.preload { postz }
+p Writer.query.preload { nest(books) { reviewz } }
+p Writer.query.preload { [books, nest(books) { [reviews, writer] }] }

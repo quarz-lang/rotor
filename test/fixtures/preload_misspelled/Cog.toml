@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/model_test.qz): a preload names
+# associations by their getters, so a misspelling does not compile. It
+# is checked against this checkout of rotor.
+[cog]
+name = "preload_misspelled"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

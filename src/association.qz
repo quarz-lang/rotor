@@ -1,0 +1,95 @@
+# A model's `has_many` association, as its getter gives it (`user.posts`):
+# the associated models once preloaded (`Rotor::Repo#preload`), and the
+# query that finds them either way. There is no lazy loading: reading
+# the models of one not preloaded raises `Rotor::NotLoadedError`.
+#
+# ```
+# class HUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     has_many HPost, name: :posts, foreign_key: :user_id
+#   end
+# end
+#
+# class HPost < Rotor::Model
+#   table "posts" do
+#     column :id, Int, primary: true
+#     column :user_id, Int
+#     column :published, Bool, default: false
+#   end
+# end
+#
+# u = HUser.load({id: 7})
+# u.posts.loaded?  # => false
+# u.posts.query.to_sql  # => ["SELECT \"id\", \"user_id\", \"published\" FROM \"posts\" WHERE \"user_id\" = $1", [7]]
+# u.posts.query.where { published }.to_sql[0]  # => "SELECT \"id\", \"user_id\", \"published\" FROM \"posts\" WHERE \"user_id\" = $1 AND \"published\""
+# ```
+class HasMany[T <: Model]
+  include Shareable
+  include Enumerable[T]
+
+  @target: Type[T]
+  @owner: String
+  @name: Symbol
+  @foreign_key: Symbol
+  @key_column: Symbol?
+  @key: Value?
+  @models: Array[Model]?
+
+  # (Made by the getter `has_many` generates.)
+  def initialize(@target: Type[T], @owner: String, @name: Symbol, @foreign_key: Symbol, @key_column: Symbol?, @key: Value?, @models: Array[Model]?)
+  end
+
+  # Whether the models were preloaded.
+  def loaded? -> Bool = !@models.nil?
+
+  # Calls the block with each model; raises `Rotor::NotLoadedError` when
+  # they were not preloaded.
+  def each(&: (T) -> Void) -> Void
+    models!.each { |m| yield @target.rebuild(m) }
+  end
+
+  # How many models there are (preloaded).
+  def size -> Int = models!.size
+
+  # Whether there is none (preloaded).
+  def empty? -> Bool = models!.empty?
+
+  # The models, in an array (preloaded).
+  def to_a -> Array[T] = models!.map { |m| @target.rebuild(m) }
+
+  # The association as a query: the target's rows whose foreign key is
+  # this model's key, to refine (`posts.query.where { published }`) and
+  # run (`repo.all(user.posts.query)`). Raises `Rotor::SchemaError` when
+  # the target has no such column, `Rotor::MissingAttributeError` when the
+  # model's key is not set.
+  def query -> Query[T]
+    HasMany.foreign_key!(@target, @foreign_key, @owner, @name)
+    k = @key_column || raise SchemaError.new("#{@owner} has no primary key, which `#{@name}` needs")
+    key = @key
+    raise MissingAttributeError.new("#{@owner}##{k} is not set: `#{@name}` has no query") if key.nil?
+    @target.query.where_key(@foreign_key, key)
+  end
+
+  def inspect -> String
+    if m = @models
+      "#<Rotor::HasMany #{@owner}##{@name}: #{m.size} #{@target.name}>"
+    else
+      "#<Rotor::HasMany #{@owner}##{@name} (not loaded)>"
+    end
+  end
+
+  def to_s -> String = inspect
+
+  # Raises unless `target` has the column `fk` (an association's key,
+  # checked when a query or a preload uses it: the target's `table` may
+  # run after the association's).
+  def self.foreign_key!(target: Type[Model], fk: Symbol, owner: String, name: Symbol) -> Void
+    return if target.find_column(fk)
+    raise SchemaError.new("#{owner}##{name}: #{target.name} has no column `#{fk}`")
+  end
+
+  private def models! -> Array[Model]
+    @models || raise NotLoadedError.new("#{@owner}##{@name} is not loaded: preload it (`repo.preload(model) { #{@name} }`)")
+  end
+end

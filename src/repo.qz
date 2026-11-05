@@ -24,7 +24,8 @@
 # block) are set here, never by SQL: `insert` sets both to now (in UTC, to the microsecond, as the
 # database keeps them), keeping a creation time the model has; `update`
 # sets the update time when a column changed, and issues no UPDATE when
-# none did; `touch` sets it alone.
+# none did; `touch` sets it alone. `update`, `touch` and `delete` of a
+# model whose row no longer exists raise `Rotor::StaleError`.
 class Repo
   @adapter: Adapter
 
@@ -62,7 +63,7 @@ class Repo
       rows.rows.map { |r| query.load({value: r.bool(0)}) }
     in Query::Shape::Rows
       cols = query.fetched
-      rows.rows.map { |r| query.load(Repo.values(r, cols)) }
+      query.preloaded(rows.rows.map { |r| query.load(Repo.values(r, cols)) }, self)
     end
   end
 
@@ -94,6 +95,19 @@ class Repo
     key = q.table.primary_key || raise ArgumentError.new("`#{q.table.name}` has no primary key")
     one(q.where_key(key, id))
   end
+
+  # The models with the associations the block names preloaded: one
+  # query per association and level, `WHERE key IN (...)`, for all the
+  # models at once. The block names them as the getters `table`
+  # generates, so that a misspelling does not compile: `{ posts }`,
+  # `{ [posts, account] }`, and those of their models with `nest`
+  # (`{ nest(posts) { comments } }`). An association a model has
+  # preloaded already is not loaded again. Models are values: the ones
+  # given are left as they were.
+  def preload[M <: Model](models: Array[M], &spec: Quoted[shareable M.() -> Object]) -> Array[M] = preload_all(models, spec.expr, spec.file)
+
+  # :ditto:
+  def preload[M <: Model](model: M, &spec: Quoted[shareable M.() -> Object]) -> M = preload_all([model], spec.expr, spec.file)[0]
 
   # The number of the query's rows.
   def count[T](query: Query[T]) -> Int = run(query.count).first? || 0
@@ -130,7 +144,7 @@ class Repo
               else
                 model
               end
-    run(Statement.update(stamped).as(Statement))
+    stale!(stamped) if changed(Statement.update(stamped).as(Statement)) == 0
     stamped.clear_changes
   end
 
@@ -160,12 +174,16 @@ class Repo
       pieces = pieces + [Piece::Text.new("#{Dialect.quote(n.to_s)} = "), Piece::Param.new(now)]
     end
     pieces = pieces + [Piece::Text.new(" WHERE #{Dialect.quote(key.to_s)} = "), Piece::Param.new(id)]
-    run(Statement.new(t, pieces, nil))
+    stale!(model) if changed(Statement.new(t, pieces, nil)) == 0
     touched.keep_changes(pending)
   end
 
-  # Deletes `model`'s row: whether there was one.
-  def delete(model: Model) -> Bool = run(Statement.delete(model)) > 0
+  # Deletes `model`'s row, and gives the model; raises
+  # `Rotor::StaleError` when there was none.
+  def delete[M <: Model](model: M) -> M
+    stale!(model) if changed(Statement.delete(model)) == 0
+    model
+  end
 
   # Deletes the query's rows: how many.
   def delete_all[T](query: Query[T]) -> Int = run(query.delete)
@@ -216,6 +234,31 @@ class Repo
   # `Rotor::Row`'s typed readers.
   def query[R](sql: String, params: Array[Object?] = [], &: (Row) -> R) -> Array[R]
     @adapter.query(sql, params).rows.map { |r| yield r }
+  end
+
+  # How many rows a statement changed, as the server reported it (nil
+  # for an adapter that does not say).
+  private def changed(statement: Statement) -> Int?
+    sql, params = statement.to_sql
+    @adapter.query(sql, params).affected
+  end
+
+  # (A statement by the model's key changed no row.)
+  private def stale!(model: Model) -> Nothing
+    t = model.table_info
+    key = t.primary_key
+    named = key ? " #{key}: #{model.to_h[key]?.inspect}" : ""
+    raise StaleError.new("#{model.class.name}#{named}: its row no longer exists")
+  end
+
+  private def preload_all[M <: Model](models: Array[M], expr: Meta::Expr, file: String) -> Array[M]
+    first = models.first? || return models
+    if other = models.find { |m| m.class != first.class }
+      raise ArgumentError.new("`preload` of models of one class: #{first.class.name} and #{other.class.name}")
+    end
+    info = first.table_info
+    found = Preloads.run(self, models.map { |m| m.as(Model) }, info, Preloads.parse(info, first.class.name, expr, file))
+    models.each_with_index.map { |m, i| m.with_preloaded(found[i]) }
   end
 
   # Now, in UTC, to the microsecond: what a timestamp column keeps.
