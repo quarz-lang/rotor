@@ -1,0 +1,185 @@
+# Where a parameter made from a quoted block's captures (Quarz's
+# `Quoted#captures`) takes its value: a capture, an item of a captured
+# array, a column of a captured model, or what is made of one of those
+# (a `Float` from an `Int`, a LIKE pattern from a string).
+enum Bind
+  variant Capture(index: Int)
+  variant Item(index: Int, item: Int)
+  variant Read(index: Int, column: Symbol)
+  variant ToFloat(of: Bind)
+  # (`name`: `"start_with?"`, `"end_with?"` or `"include?"`.)
+  variant Like(of: Bind, name: String)
+end
+
+# What a translation looked at of a captured value: its class (nil for
+# nil) and, for an array, its size (-1 otherwise).
+data Kind = (cls: Type[Object]?, size: Int)
+
+# A captured value's kind, as a translation saw it: the same tree with
+# values of the same kinds there translates the same.
+data Guard = (bind: Bind, kind: Kind)
+
+# The guards a translation records, shared by the translators of its
+# nested blocks.
+class Guards
+  var @list: Array[Guard] = []
+
+  def initialize; end
+
+  def add(g: Guard) -> Void
+    @list = @list + [g] unless @list.include?(g)
+  end
+
+  def list -> Array[Guard] = @list
+end
+
+# The values of `Bind`s, from a block's captures.
+module Binds
+  # The value `b` reads of `captures` (a model's column read as the
+  # model reads it: `Rotor::NotLoadedError` when it was not fetched).
+  def self.value(b: Bind, captures: Array[Object]) -> Object?
+    case b
+    in Bind::Capture(i) then captures[i]
+    in Bind::Item(i, j)
+      case v = captures[i]
+      in Array => xs then xs[j]?
+      else nil
+      end
+    in Bind::Read(i, column)
+      case v = captures[i]
+      in Model => m then m.read(column)
+      else nil
+      end
+    in Bind::ToFloat(x)
+      case v = value(x, captures)
+      in Int => n then n.to_f
+      else v
+      end
+    in Bind::Like(x, name)
+      case v = value(x, captures)
+      in String => s then pattern(s, name)
+      else v
+      end
+    end
+  end
+
+  # The kind of `v`.
+  def self.kind(v: Object?) -> Kind
+    case v
+    in nil then Kind.new(nil, -1)
+    in Array => xs then Kind.new(Array, xs.size)
+    else Kind.new(v.class, -1)
+    end
+  end
+
+  # Whether the kinds `guards` saw are those of `captures`.
+  def self.hold?(guards: Array[Guard], captures: Array[Object]) -> Bool
+    guards.all? { |g| kind(value(g.bind, captures)) == g.kind }
+  end
+
+  # `pieces` with each `Rotor::Piece::Bound` piece the parameter of its value in
+  # `captures`.
+  def self.fill(pieces: Array[Piece], captures: Array[Object]) -> Array[Piece]
+    return pieces unless pieces.any? { |p| p.is_a?(Piece::Bound) }
+    pieces.map do |p|
+      case p
+      in Piece::Bound(b) then Piece::Param.new(parameter(value(b, captures)))
+      else p
+      end
+    end
+  end
+
+  # `s` filled (`fill`).
+  def self.fill_sql(s: Sql, captures: Array[Object]) -> Sql
+    return s if s.bind.nil? && !s.pieces.any? { |p| p.is_a?(Piece::Bound) }
+    v = if b = s.bind
+          parameter(value(b, captures))
+        else
+          s.value
+        end
+    Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind)
+  end
+
+  # The LIKE pattern of `s.name(v)` (`start_with?` and the others):
+  # `v` escaped.
+  def self.pattern(v: String, name: String) -> String
+    e = SQL.escape_like(v)
+    case name
+    in "start_with?" then "#{e}%"
+    in "end_with?" then "%#{e}"
+    else "%#{e}%"
+    end
+  end
+
+  # `s` (an `Int`'s parameter or literal) as a `Float`.
+  def self.to_float(s: Sql, i: Int) -> Sql
+    piece = if b = s.bind
+              Piece::Bound.new(Bind::ToFloat.new(b))
+            else
+              Piece::Param.new(i.to_f)
+            end
+    Sql.new([piece], Translator::ATOM, nil, i.to_f, true)
+  end
+
+  # `v` as a statement's parameter: one of its classes (`ArgumentError`
+  # for another; a value the guards admitted is one).
+  def self.parameter(v: Object?) -> Bindable?
+    case v
+    in nil then nil
+    in Int => x then x
+    in Float => x then x
+    in String => x then x
+    in Bool => x then x
+    in Time => x then x
+    in Bytes => x then x
+    in Symbol => x then x
+    else raise ArgumentError.new("a value of class #{v.class.name} as a parameter")
+    end
+  end
+end
+
+# A call's translation key: the site of its block (Quarz's
+# `Quoted#site`) and the models of the query's tables it is over.
+data CacheKey = (site: Int, models: Array[Type[Object]])
+
+# A translation kept, with the guards it holds for.
+data Cached[V] = (guards: Array[Guard], value: V)
+
+# The translations of the queries' blocks, kept for the process: a call
+# whose block was translated over the same models, with captures of the
+# same kinds (`Guard`), takes the translation kept and fills in its
+# parameters. One entry per call site and kinds of its captures: never
+# evicted.
+module Cache
+  CONDITIONS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
+  PLANS = Atom.new(Hash[CacheKey, Array[Cached[InnerPlan]]].new)
+  READS = Atom.new(Hash[CacheKey, Array[Cached[Array[Array[Column]?]]]].new)
+  ASSOCIATIONS = Atom.new(Hash[CacheKey, Array[Cached[[Association, Symbol]]]].new)
+  SETS = Atom.new(Hash[CacheKey, Array[Cached[Array[Piece]]]].new)
+  PRELOADS = Atom.new(Hash[CacheKey, Array[Cached[Array[Preload]]]].new)
+  # How many translations were made (not taken from the cache): for
+  # tests.
+  MADE = Atom.new(0)
+
+  # The number of translations made so far (a call the cache served
+  # adds none).
+  def self.translations -> Int = MADE.get
+
+  # The key of a block of site `site` over `sources`.
+  def self.key(site: Int, sources: Array[Source]) -> CacheKey = CacheKey.new(site, sources.map { |s| s.model })
+
+  # What `atom` keeps for `key` whose guards hold of `captures`, or else
+  # the block's (a translation, its guards), then kept.
+  def self.fetch[V <: Shareable](atom: Atom[Hash[CacheKey, Array[Cached[V]]]], key: CacheKey, captures: Array[Object], &make: () -> [V, Array[Guard]]) -> V
+    if entries = atom.get[key]?
+      if found = entries.find { |c| Binds.hold?(c.guards, captures) }
+        return found.value
+      end
+    end
+    value, guards = make.call
+    MADE.update { |n| n + 1 }
+    kept = Cached[V].new(guards, value)
+    atom.update { |h| h.put(key, (h[key]? || Array[Cached[V]].new) + [kept]) }
+    value
+  end
+end

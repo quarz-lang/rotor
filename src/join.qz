@@ -3,6 +3,12 @@
 # conditions and the columns each is fetched with) and its orders.
 data Plan = (sources: Array[Source], orders: Array[[Sql, Bool]])
 
+# What a `flat_map` block's translation gives, whatever the outer
+# query's own conditions: the columns it reads of each outer table, the
+# tables it joins and its orders (their parameters `Rotor::Piece::Bound`, `Rotor::Cache`
+# keeps it).
+data InnerPlan = (reads: Array[Array[Column]?], joined: Array[Source], orders: Array[[Sql, Bool]])
+
 # The translation of joins: a `for` comprehension's inner queries
 # (`Rotor::Query#flat_map`) and associations (`Rotor::Query#join`).
 module Joins
@@ -10,13 +16,17 @@ module Joins
   # the outer tables fetched with the columns the whole block reads of
   # their rows (the block runs on them to make each result), then the
   # tables of its query.
-  def self.plan(sources: Array[Source], expr: Meta::Expr, captures: Array[Object], file: String) -> Plan
-    params, e = Translator.body(expr, file)
-    t = Translator.new(sources, captures, file, [Translator.scope(params, indexes(sources.size))])
-    inner = inner(t, sources, e)
-    reads = t.reads(e)
-    outer = sources.each_with_index.map { |s, i| fetching(s, reads[i]) }
-    Plan.new(outer + inner.sources.drop(sources.size), inner.orders)
+  # The translation is kept (`Rotor::Cache`) by the block's `site`.
+  def self.plan(sources: Array[Source], expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Plan
+    kept = Cache.fetch(Cache::PLANS, Cache.key(site, sources), captures) do
+      params, e = Translator.body(expr, file)
+      t = Translator.new(sources, captures, file, [Translator.scope(params, indexes(sources.size))])
+      inner = inner(t, sources, e)
+      [InnerPlan.new(t.reads(e), inner.sources.drop(sources.size), inner.orders), t.guards]
+    end
+    outer = sources.each_with_index.map { |s, i| fetching(s, kept.reads[i]) }
+    joined = kept.joined.map { |s| Source.new(s.table, s.model, s.on.map { |x| Binds.fill_sql(x, captures) }, s.fetch, s.keep) }
+    Plan.new(outer + joined, kept.orders.map { |o| [Binds.fill_sql(o[0], captures), o[1]] })
   end
 
   # `s` fetching the columns `reads` (and those it keeps), or all of them
