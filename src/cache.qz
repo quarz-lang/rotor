@@ -183,17 +183,25 @@ module Cache
   # the block's (a translation, its guards), then kept if the key has
   # room (`LIMIT`).
   def self.fetch[V <: Shareable](atom: Atom[Hash[CacheKey, Array[Cached[V]]]], key: CacheKey, captures: Array[Object], &make: () -> [V, Array[Guard]]) -> V
-    if entries = atom.get[key]?
+    entries = atom.get[key]?
+    if entries
       if found = entries.find { |c| Binds.hold?(c.guards, captures) }
         return found.value
       end
     end
     value, guards = make.call
     MADE.update { |n| n + 1 }
+    # (A full key is left alone: no write to the shared table.)
+    return value if entries && entries.size >= LIMIT
     kept = Cached[V].new(guards, value)
     atom.update do |h|
       have = h[key]? || Array[Cached[V]].new
-      have.size < LIMIT ? h.put(key, have + [kept]) : h
+      # (Another task may have kept the same kinds meanwhile.)
+      if have.size >= LIMIT || have.any? { |c| c.guards == guards }
+        h
+      else
+        h.put(key, have + [kept])
+      end
     end
     value
   end
