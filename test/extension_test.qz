@@ -1,0 +1,44 @@
+require "test"
+
+# A user's extension: a method of it in a query block is not the
+# translator's to know, even named as an operator it translates.
+module Loose
+  extension Int
+    def >(other: String) -> Bool = to_s > other
+  end
+end
+
+# A getter of its own, named as a column.
+module Shadow
+  extension Tally
+    def n -> Int = 100
+  end
+end
+
+using Loose
+using Shadow
+
+class Tally < Rotor::Model
+  table "tallies" do
+    column :id, Int, primary: true
+    column :n, Int
+    column :m, Int
+  end
+end
+
+class ExtensionTest < Test::Case
+  def test_another_extension_is_refused
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { n > "3" } }
+    assert_match(/\A`Int#>` of Loose cannot be translated to SQL/, e.message)
+    # (The class's own still is.)
+    assert_equal(["SELECT \"id\", \"n\", \"m\" FROM \"tallies\" WHERE \"m\" > 3", Array[Object?].new], Tally.where { m > 3 }.to_sql)
+  end
+
+  def test_an_extension_getter_is_not_the_column
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { n == 3 } }
+    assert_match(/\A`Tally#n` cannot be translated to SQL/, e.message)
+    t = Tally.load({id: 1, n: 5})
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { id == t.n } }
+    assert_match(/\A`Tally#n` cannot be translated to SQL/, e.message)
+  end
+end

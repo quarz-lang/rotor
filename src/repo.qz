@@ -95,10 +95,10 @@ class Repo
   # (`{ nest(posts) { comments } }`). An association a model has
   # preloaded already is not loaded again. Models are values: the ones
   # given are left as they were.
-  def preload[M <: Model](models: Array[M], &spec: Quoted[shareable M.() -> Object]) -> Array[M] = preload_all(models, spec.expr, spec.file)
+  def preload[M <: Model](models: Array[M], &spec: Quoted[shareable M.() -> Object] using Compare) -> Array[M] = preload_all(models, spec.expr, spec.file)
 
   # :ditto:
-  def preload[M <: Model](model: M, &spec: Quoted[shareable M.() -> Object]) -> M = preload_all([model], spec.expr, spec.file)[0]
+  def preload[M <: Model](model: M, &spec: Quoted[shareable M.() -> Object] using Compare) -> M = preload_all([model], spec.expr, spec.file)[0]
 
   # The number of the query's rows.
   def count[T](query: Query[T]) -> Int = run(query.count).first? || 0
@@ -181,10 +181,10 @@ class Repo
 
   # Updates the query's rows as the block says (`Rotor::Query#update`;
   # no timestamps are set): how many.
-  def update_all[T](query: Query[T], &set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Int = run(query.update(&set))
+  def update_all[T](query: Query[T], &set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Int = run(query.update(&set))
 
   # :ditto:
-  def update_all[T](query: Query[T], &set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Int = run(query.update(&set))
+  def update_all[T](query: Query[T], &set: Quoted[shareable (T) -> Hash[Symbol, Object]] using Compare) -> Int = run(query.update(&set))
 
   # Runs the block in a transaction, with a repository bound to it:
   # committed when the block returns, rolled back when it raises.

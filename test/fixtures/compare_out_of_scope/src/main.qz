@@ -1,0 +1,15 @@
+class Member < Rotor::Model
+  table "members" do
+    column :id, Int, primary: true
+    column :age, Int, null: true
+  end
+end
+
+# In a query block: `Rotor::Compare`'s `>`.
+q = Member.where { age > 18 }
+# Outside one: none.
+u = Member.new(age: 20)
+p(u.age > 18)
+p(18 < u.age)
+# Nor in a block of another call.
+p([u].select { |m| m.age > 18 })

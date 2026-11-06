@@ -35,6 +35,14 @@ class Visitor < Rotor::Model
   end
 end
 
+# A model with a nullable column, compared with `>` (`Rotor::Compare`).
+class Lodger < Rotor::Model
+  table "lodgers" do
+    column :id, Int, primary: true
+    column :level, Int, null: true
+  end
+end
+
 class JoinTest < Test::Case
   W = "\"w0\".\"id\", \"w0\".\"name\", \"w0\".\"age\""
   A = "\"a1\".\"id\", \"a1\".\"writer_id\", \"a1\".\"title\", \"a1\".\"published\""
@@ -58,6 +66,13 @@ class JoinTest < Test::Case
     check(q3, "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
     check(q3.count, "SELECT count(*) FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
     check(q3.limit(2), "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" LIMIT 2", [])
+  end
+
+  def test_a_for_compares_a_nullable_column
+    q = for w in Writer.query, g in Lodger.query when g.level > w.age do g.id end
+    check(q, "SELECT \"w0\".\"age\", \"l1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"lodgers\" AS \"l1\" ON \"l1\".\"level\" > \"w0\".\"age\"", [])
+    e = assert_raise(Rotor::UntranslatableError) { for w in Writer.query, g in Lodger.query when !(g.level > w.age) do g.id end }
+    assert_match(/\A`!\(g.level > w.age\)` is three-valued in SQL when `g.level` can be NULL/, e.message)
   end
 
   def test_a_for_through_an_association

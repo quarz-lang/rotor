@@ -171,19 +171,19 @@ class Query[T]
   # u.age > 18 }`, which `for` comprehensions use); a block that names
   # nothing of the row (`where { true }`) is ambiguous between the two:
   # write `where { |u| true }`.
-  def where(&cond: Quoted[shareable T.() -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
+  def where(&cond: Quoted[shareable T.() -> Bool] using Compare) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # :ditto:
-  def where(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
+  def where(&cond: Quoted[shareable (T) -> Bool] using Compare) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # `where`, by the name `for` comprehensions call.
-  def filter(&cond: Quoted[shareable (T) -> Bool]) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
+  def filter(&cond: Quoted[shareable (T) -> Bool] using Compare) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # Ordered by the block's value, ascending, after the orders given before.
-  def order(&key: Quoted[shareable T.() -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
+  def order(&key: Quoted[shareable T.() -> Object] using Compare) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
 
   # :ditto:
-  def order(&key: Quoted[shareable (T) -> Object]) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
+  def order(&key: Quoted[shareable (T) -> Object] using Compare) -> Query[T] = add_order(key.expr, key.captures, key.file, key.site)
 
   # The last order descending.
   def desc -> Query[T]
@@ -208,7 +208,7 @@ class Query[T]
   # Its rows with the associations the block names preloaded, as
   # `Rotor::Repo#preload` does after they are loaded (`repo.all(User.query.preload
   # { posts })`): Ecto's `preload:`.
-  def preload(&spec: Quoted[shareable T.() -> Object]) -> Query[T]
+  def preload(&spec: Quoted[shareable T.() -> Object] using Compare) -> Query[T]
     rows!("preload")
     ops || raise ArgumentError.new("`preload` of a query that does not give models")
     added = Cache.fetch(Cache::PRELOADS, Cache.key(spec.site, @sources), Array[Object].new) do
@@ -236,19 +236,19 @@ class Query[T]
   # on each row, loaded with those columns only (reading another raises
   # `Rotor::NotLoadedError`). Counting is `count`, a query's shape, not
   # a projection.
-  def select[R](&f: Quoted[shareable T.() -> R]) -> Query[R]
+  def select[R](&f: Quoted[shareable T.() -> R] using Compare) -> Query[R]
     proc = f.proc
     project(f.expr, f.file, f.site, ->(row: T) { row.instance_exec(&proc) })
   end
 
   # :ditto:
-  def select[R](&f: Quoted[shareable (T) -> R]) -> Query[R]
+  def select[R](&f: Quoted[shareable (T) -> R] using Compare) -> Query[R]
     proc = f.proc
     project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
   end
 
   # `select`, by the name `for` comprehensions call.
-  def map[R](&f: Quoted[shareable (T) -> R]) -> Query[R]
+  def map[R](&f: Quoted[shareable (T) -> R] using Compare) -> Query[R]
     proc = f.proc
     project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
   end
@@ -288,7 +288,7 @@ class Query[T]
   # pairs = for u in FUser.query, p in u.posts.query do [u, p] end
   # pairs.to_sql[0]  # => "SELECT \"u0\".\"id\", \"u0\".\"name\", \"p1\".\"id\", \"p1\".\"user_id\", \"p1\".\"title\", \"p1\".\"published\" FROM \"users\" AS \"u0\" INNER JOIN \"posts\" AS \"p1\" ON \"p1\".\"user_id\" = \"u0\".\"id\""
   # ```
-  def flat_map[R](&f: Quoted[shareable (T) -> Query[R]]) -> Query[R]
+  def flat_map[R](&f: Quoted[shareable (T) -> Query[R]] using Compare) -> Query[R]
     rows!("flat_map")
     joinable!("flat_map")
     plan = Joins.plan(@sources, f.expr, f.captures, f.file, f.site)
@@ -339,13 +339,13 @@ class Query[T]
   # q = JUser.query.join { posts }.where { |u, p| p.title.start_with?("Q") }.select { |u, p| "#{u.name}: #{p.title}" }
   # q.to_sql  # => ["SELECT \"u0\".\"id\", \"u0\".\"name\", \"p1\".\"title\" FROM \"users\" AS \"u0\" INNER JOIN \"posts\" AS \"p1\" ON \"p1\".\"user_id\" = \"u0\".\"id\" WHERE \"p1\".\"title\" LIKE $1", ["Q%"]]
   # ```
-  def join[R <: Model](&assoc: Quoted[shareable T.() -> HasMany[R]]) -> Query[[T, R]]
+  def join[R <: Model](&assoc: Quoted[shareable T.() -> HasMany[R]] using Compare) -> Query[[T, R]]
     proc = assoc.proc
     join_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { t.instance_exec(&proc) })
   end
 
   # :ditto:
-  def join[R <: Model](&assoc: Quoted[shareable (T) -> HasMany[R]]) -> Query[[T, R]]
+  def join[R <: Model](&assoc: Quoted[shareable (T) -> HasMany[R]] using Compare) -> Query[[T, R]]
     proc = assoc.proc
     join_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { proc.call(t) })
   end
@@ -353,7 +353,7 @@ class Query[T]
   # Its rows paired with the rows of `other` for which the block is true
   # (`User.query.join(Post) { |u, p| p.user_id == u.id }`): an INNER JOIN
   # on the condition, for models without an association or with several.
-  def join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool]) -> Query[[T, R]]
+  def join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool] using Compare) -> Query[[T, R]]
     joining!
     joined = @sources + [Source.new(other.table_info, other, [], nil)]
     captures = cond.captures
@@ -394,10 +394,10 @@ class Query[T]
   # The rows' update: the block gives a hash literal of columns and their
   # new values, expressions of the row as in `where` (`update { {age:
   # age + 1, name: "x"} }`).
-  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
+  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
 
   # :ditto:
-  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]]) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
+  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]] using Compare) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
 
   # The SQL statement and its parameters.
   def to_sql -> [String, Array[Object?]] = Statement.render(pieces)

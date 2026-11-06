@@ -1,0 +1,113 @@
+# The comparisons a query's block may write on a nullable column:
+# `User.where { age > 18 }` with `age` an `Int?`. Every query block
+# (`where`, `filter`, a join's condition, `order`, `update`, `preload`,
+# `select`) is checked with `using Rotor::Compare` (Quarz's docs/01 §7),
+# so nil compares false there, as SQL's NULL acts in a condition; the
+# translator gives them SQL's comparison, which can be NULL, and refuses
+# them where NULL and false differ (under `!`, as a value). Outside
+# query blocks `Int? > Int` is still a type error. Only `<`, `<=`, `>`
+# and `>=`: nil has no arithmetic, and `==`/`!=` are Quarz's own.
+#
+# ```
+# class CUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     column :age, Int, null: true
+#   end
+# end
+#
+# CUser.where { age > 18 }.to_sql  # => ["SELECT \"id\", \"age\" FROM \"users\" WHERE \"age\" > 18", []]
+# CUser.where { !(age > 18) }      # raises Rotor::UntranslatableError
+# ```
+module Compare
+  # nil compared: false.
+  extension Nil
+    def <(other: Object) -> Bool = false
+    def <=(other: Object) -> Bool = false
+    def >(other: Object) -> Bool = false
+    def >=(other: Object) -> Bool = false
+  end
+
+  # (One method for `Int?` and `Float?`, so that a nil, which is both,
+  # finds one.)
+
+  # An `Int` compared with an `Int?` or a `Float?`: false for nil.
+  extension Int
+    def <(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self < x
+      in Float => x then self < x
+      in nil then false
+      end
+    end
+    def <=(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self <= x
+      in Float => x then self <= x
+      in nil then false
+      end
+    end
+    def >(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self > x
+      in Float => x then self > x
+      in nil then false
+      end
+    end
+    def >=(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self >= x
+      in Float => x then self >= x
+      in nil then false
+      end
+    end
+  end
+
+  # A `Float` compared with a `Float?` or an `Int?`: false for nil.
+  extension Float
+    def <(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self < x
+      in Float => x then self < x
+      in nil then false
+      end
+    end
+    def <=(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self <= x
+      in Float => x then self <= x
+      in nil then false
+      end
+    end
+    def >(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self > x
+      in Float => x then self > x
+      in nil then false
+      end
+    end
+    def >=(other: Int | Float | Nil) -> Bool
+      case other
+      in Int => x then self >= x
+      in Float => x then self >= x
+      in nil then false
+      end
+    end
+  end
+
+  # A `String` compared with a `String?`: false for nil.
+  extension String
+    def <(other: String?) -> Bool = other.nil? ? false : self < other.as(String)
+    def <=(other: String?) -> Bool = other.nil? ? false : self <= other.as(String)
+    def >(other: String?) -> Bool = other.nil? ? false : self > other.as(String)
+    def >=(other: String?) -> Bool = other.nil? ? false : self >= other.as(String)
+  end
+
+  # A `Time` compared with a `Time?`: false for nil.
+  extension Time
+    def <(other: Time?) -> Bool = other.nil? ? false : self < other.as(Time)
+    def <=(other: Time?) -> Bool = other.nil? ? false : self <= other.as(Time)
+    def >(other: Time?) -> Bool = other.nil? ? false : self > other.as(Time)
+    def >=(other: Time?) -> Bool = other.nil? ? false : self >= other.as(Time)
+  end
+end

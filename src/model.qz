@@ -186,31 +186,31 @@ class Model
 
   # `query.preload`: every row, with the associations the block names
   # preloaded.
-  def self.preload(&spec: Quoted[shareable Self.() -> Object]) -> Query[Self] = query.preload(&spec)
+  def self.preload(&spec: Quoted[shareable Self.() -> Object] using Compare) -> Query[Self] = query.preload(&spec)
 
   # `query.where`: the rows for which the block is true.
-  def self.where(&cond: Quoted[shareable Self.() -> Bool]) -> Query[Self] = query.where(&cond)
+  def self.where(&cond: Quoted[shareable Self.() -> Bool] using Compare) -> Query[Self] = query.where(&cond)
 
   # :ditto:
-  def self.where(&cond: Quoted[shareable (Self) -> Bool]) -> Query[Self] = query.where(&cond)
+  def self.where(&cond: Quoted[shareable (Self) -> Bool] using Compare) -> Query[Self] = query.where(&cond)
 
   # `query.filter`.
-  def self.filter(&cond: Quoted[shareable (Self) -> Bool]) -> Query[Self] = query.filter(&cond)
+  def self.filter(&cond: Quoted[shareable (Self) -> Bool] using Compare) -> Query[Self] = query.filter(&cond)
 
   # `query.order`.
-  def self.order(&key: Quoted[shareable Self.() -> Object]) -> Query[Self] = query.order(&key)
+  def self.order(&key: Quoted[shareable Self.() -> Object] using Compare) -> Query[Self] = query.order(&key)
 
   # :ditto:
-  def self.order(&key: Quoted[shareable (Self) -> Object]) -> Query[Self] = query.order(&key)
+  def self.order(&key: Quoted[shareable (Self) -> Object] using Compare) -> Query[Self] = query.order(&key)
 
   # `query.select`.
-  def self.select[R](&f: Quoted[shareable Self.() -> R]) -> Query[R] = query.select(&f)
+  def self.select[R](&f: Quoted[shareable Self.() -> R] using Compare) -> Query[R] = query.select(&f)
 
   # :ditto:
-  def self.select[R](&f: Quoted[shareable (Self) -> R]) -> Query[R] = query.select(&f)
+  def self.select[R](&f: Quoted[shareable (Self) -> R] using Compare) -> Query[R] = query.select(&f)
 
   # `query.map`.
-  def self.map[R](&f: Quoted[shareable (Self) -> R]) -> Query[R] = query.map(&f)
+  def self.map[R](&f: Quoted[shareable (Self) -> R] using Compare) -> Query[R] = query.map(&f)
 
   # `query.count`.
   def self.count -> Query[Int] = query.count

@@ -15,7 +15,22 @@ class Person < Rotor::Model
   end
 end
 
+# Nullable columns of each comparable class (`Rotor::Compare`).
+class Gauge < Rotor::Model
+  table "gauges" do
+    column :id, Int, primary: true
+    column :level, Int, null: true
+    column :cap, Int, null: true
+    column :ratio, Float, null: true
+    column :label, String, null: true
+    column :at, Time, null: true
+    column :on, Bool
+  end
+end
+
 class QueryTest < Test::Case
+  GS = "SELECT \"id\", \"level\", \"cap\", \"ratio\", \"label\", \"at\", \"on\" FROM \"gauges\""
+
   COLS = "SELECT \"id\", \"name\", \"email\", \"age\", \"score\", \"admin\", \"born\", \"joined\" FROM \"people\""
 
   def check[T](q: Rotor::Query[T], text: String, params: Array[Object?]) -> Void
@@ -169,6 +184,53 @@ class QueryTest < Test::Case
     born: Time? = nil
     x = assert_raise(ArgumentError) { Rotor::SQL.not_nil(born) }
     assert_equal("Rotor::SQL.not_nil of nil", x.message)
+  end
+
+  # `Rotor::Compare`: a nullable column compared with `<` and the others,
+  # three-valued, so kept as a condition and refused where NULL and
+  # false differ.
+  def test_comparing_a_nullable_column
+    n: Int? = 5
+    t = Time.at(0)
+    check(Gauge.where { level > 18 }, "#{GS} WHERE \"level\" > 18", [])
+    check(Gauge.where { level >= n }, "#{GS} WHERE \"level\" >= $1", [5])
+    check(Gauge.where { level < cap }, "#{GS} WHERE \"level\" < \"cap\"", [])
+    check(Gauge.where { 3 <= level }, "#{GS} WHERE 3 <= \"level\"", [])
+    check(Gauge.where { |g| g.ratio > 1.5 && g.label < "m" || g.at >= t }, "#{GS} WHERE \"ratio\" > $1 AND \"label\" < $2 OR \"at\" >= $3", [1.5, "m", t])
+    check(Gauge.where { ratio > 1 }, "#{GS} WHERE \"ratio\" > $1", [1.0])
+    # A nil declared `Int?` (an unset filter): one method takes it.
+    none: Int? = nil
+    check(Gauge.where { level > none }, "#{GS} WHERE \"level\" > $1", [nil])
+    check(Gauge.where { |g| g.ratio <= none }, "#{GS} WHERE \"ratio\" <= $1", [nil])
+    # Int and Float mixed, either way.
+    f = 1.5
+    check(Gauge.where { 1.5 < level }, "#{GS} WHERE $1 < \"level\"", [1.5])
+    check(Gauge.where { f <= level && ratio > level }, "#{GS} WHERE $1 <= \"level\" AND \"ratio\" > \"level\"", [1.5])
+    check(Gauge.where { level >= ratio }, "#{GS} WHERE \"level\" >= \"ratio\"", [])
+    check(Gauge.where { on ? level > 1 : false }, "#{GS} WHERE CASE WHEN \"on\" THEN \"level\" > 1 ELSE FALSE END", [])
+    # The explicit forms: not NULL past the nil test.
+    check(Gauge.where { level.nil? || !(level > 18) }, "#{GS} WHERE \"level\" IS NULL OR NOT \"level\" > 18", [])
+    check(Gauge.order { !level.nil? && level > 18 }, "#{GS} ORDER BY NOT \"level\" IS NULL AND \"level\" > 18", [])
+    check(Gauge.where { !level.nil? && Rotor::SQL.not_nil(level) + 1 > 18 }, "#{GS} WHERE NOT \"level\" IS NULL AND \"level\" + 1 > 18", [])
+    # Refused where NULL is not false.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { !(level > 18) } }
+    assert_match(/\A`!\(level > 18\)` is three-valued in SQL when `level` can be NULL \(.*\): test `level.nil\?` explicitly \(`level.nil\? \|\| !\(level > 18\)`\)\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { level > 18 } }
+    assert_match(/\A`level > 18` as a value is NULL, not false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.query.update { {on: level > cap} } }
+    assert_match(/\A`level > cap` as a value is NULL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { (level > 18) == on } }
+    assert_match(/\A`level > 18` as a value is NULL/, e.message)
+  end
+
+  # Outside query blocks `Int? > Int` is still a type error.
+  def test_compare_is_in_scope_in_query_blocks_only
+    out = Process.sh("cd test/fixtures/compare_out_of_scope && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:12:3: error: undefined method `>` for Nil/, out.stderr)
+    assert_match(/main\.qz:13:3: error: no overload of `<` on Int matches \(Int\?\)/, out.stderr)
+    assert_match(/main\.qz:15:3: error: no overload of `select` on Array\[Member\]/, out.stderr)
+    refute_match(/main\.qz:9:/, out.stderr)
   end
 
   def test_in_list_and_like

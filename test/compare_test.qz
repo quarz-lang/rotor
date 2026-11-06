@@ -1,0 +1,27 @@
+require "test"
+
+# What `Rotor::Compare`'s comparisons compute where Quarz runs them
+# (`select`): nil compares false; otherwise the class's own comparison.
+using Rotor::Compare
+
+class CompareTest < Test::Case
+  def test_nil_compares_false
+    n: Int? = nil
+    f: Float? = nil
+    s: String? = nil
+    t: Time? = nil
+    assert(!(n > 1) && !(n < 1) && !(n >= 1) && !(n <= 1))
+    assert(!(1 < n) && !(1.5 > n) && !(2 >= f) && !(2.0 <= n))
+    assert(!(s < "a") && !("a" < s) && !(t > Time.at(0)) && !(Time.at(0) >= t))
+  end
+
+  def test_otherwise_the_class_comparison
+    n: Int? = 3
+    f: Float? = 2.5
+    s: String? = "b"
+    t: Time? = Time.at(10)
+    assert(n > 2 && n >= 3 && !(n < 3) && n <= 3)
+    assert(n > f && f < n && 2 < f && 3.5 > n && !(2.5 > f))
+    assert(s > "a" && "c" > s && t > Time.at(0) && Time.at(20) > t)
+  end
+end

@@ -247,6 +247,11 @@ class RepoTest < Test::Case
       repo.insert(Note.new(body: "never"))
       t = Time.utc(2025, 1, 1)
       assert_equal(["new"], repo.all(Note.where { !seen.nil? && Rotor::SQL.not_nil(seen) > t }).map { |n| n.body })
+      # `Rotor::Compare`: the plain form, NULL rows left out as in Quarz.
+      assert_equal(["new"], repo.all(Note.where { seen > t }).map { |n| n.body })
+      assert_equal(["never", "old"], repo.all(Note.where { seen.nil? || !(seen > t) }.order { body }).map { |n| n.body })
+      # `select` runs it in Quarz: false, not NULL, for "never".
+      assert_equal([false, true, false], repo.all(Note.order { body }.select { seen > t }))
       assert_equal(["never", "old"], repo.all(Note.where { seen.nil? || Rotor::SQL.not_nil(seen) < t }.order { body }).map { |n| n.body })
     end
   end
