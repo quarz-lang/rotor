@@ -217,10 +217,12 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   is the branch Quarz's truthiness takes. An `update` checks against
   the column every value the build knows its value may be (an `if`'s
   branches, operands: `{qty: -f}` with a `Float` is refused), as it
-  does one value. (Arithmetic of `Int` literals alone,
-  `2000000000 * 2`, is still `integer`'s, and an `Int` parameter
-  against an `integer` column of a table rotor did not create is an
-  `integer`.)
+  does one value. Arithmetic of two `integer`s, as PostgreSQL types `Int`
+  literals and CASEs of them, casts the left one to a bigint:
+  `2000000000 * 2` is `2000000000::bigint * 2`, where an `integer`
+  would overflow; `age + 1` stays as it is. (An `Int`
+  parameter or literal against an `integer` column of a table rotor did
+  not create is an `integer`.)
 - `include?` is `col = ANY($1)` with the array as one parameter (pg's
   array parameters): one statement and one translation for every
   length. A nil item is left out of the array and `OR col IS NULL`

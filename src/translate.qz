@@ -27,7 +27,9 @@ end
 # `include?` or LIKE form of something that can be NULL, three-valued in
 # SQL. A `tri` expression is kept where NULL acts as false (a condition,
 # an operand of `&&`/`||`, a CASE WHEN's), and refused anywhere else.
-data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil, nulls: String? = nil, tri: String? = nil)
+# `narrow` marks what PostgreSQL types as an `integer` where Quarz has
+# an `Int`: an `Int` literal, or a CASE of them.
+data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil, nulls: String? = nil, tri: String? = nil, narrow: Bool = false)
 
 # A block of a query's tree as the translator sees it: its parameters,
 # the table (an index among the query's) each one is a row of, or nil,
@@ -222,7 +224,9 @@ class Translator
       if Translator.null?(th) && (el.nil? || Translator.null?(el.as(Sql)))
         return Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
       end
-      Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
+      # (`integer` when its branches are, NULL taking their type.)
+      narrow = (th.narrow || Translator.null?(th)) && (el.nil? || el.as(Sql).narrow || Translator.null?(el.as(Sql)))
+      Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil), narrow)
     in Meta::Expr::Call(recv, m, ms, args, block, line) then call(recv, m, ms, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
     in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
@@ -565,12 +569,12 @@ class Translator
   end
 
   # `s`, three-valued (`Sql#tri`) when `what` is not nil.
-  private def three(s: Sql, what: String?) -> Sql = Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, s.nulls, what)
+  private def three(s: Sql, what: String?) -> Sql = Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, s.nulls, what, s.narrow)
 
   # `s`, NULL where one of `operands` is.
   private def with_nulls(s: Sql, operands: Array[Sql]) -> Sql
     what = operands.find { |x| x.nulls }&.nulls
-    Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, what, s.tri)
+    Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, what, s.tri, s.narrow)
   end
 
   # The error for `!x`, where `what` can be NULL.
@@ -597,7 +601,8 @@ class Translator
     in nil then Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, true, nil, "nil")
     in true then Sql.new([Piece::Text.new("TRUE")], ATOM, nil, true, true)
     in false then Sql.new([Piece::Text.new("FALSE")], ATOM, nil, false, true)
-    in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true)
+    # (Beyond an `integer`'s range PostgreSQL types it as a bigint.)
+    in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true, nil, nil, nil, i >= -2147483648 && i <= 2147483647)
     in Float | String | Time | Bytes | Symbol then param(value, line)
     else untranslatable("the literal #{value.inspect}", line)
     end
@@ -697,8 +702,9 @@ class Translator
       in "nil?" then return is_null(operand(r), "IS NULL")
       in "-@"
         # (`- $1` is ambiguous to PostgreSQL: the parameter cast.)
-        x = operand(r)
-        return with_nulls(prefix("-", cast(x), MUL + 1), [x])
+        # (Of an `integer`, a bigint: `-(-2147483648)` would overflow.)
+        x = bigint(cast(operand(r)))
+        return with_nulls(prefix("-", x, MUL + 1), [x])
       else untranslatable(label, line)
       end
     end
@@ -725,6 +731,10 @@ class Translator
       l, rr = typed(l, rr, true), typed(rr, l, true)
       return with_nulls(binary(l, "||", rr, OTHER, true), [l, rr]) if name == "+" && m.owner == String
       untranslatable(label, line) unless m.owner == Int || m.owner == Float
+      # (Two `integer`s, as `Int` literals are, would overflow where
+      # Quarz's `Int` does not: the left one a bigint, and so the
+      # operation. `/` floors in numeric.)
+      l = bigint(l) if rr.narrow && name != "/"
       # (On a union receiver, `Int#/(Int)` floors and `Float#/` does not:
       # the SQL would be one of them for every row. `+`, `-` and `*`, and
       # `/` by a `Float`, are the same for both.)
@@ -812,7 +822,7 @@ class Translator
   # PostgreSQL refuses there) typed.
   def self.order_key(s: Sql) -> Sql
     return s unless s.pieces == [Piece::Text.new("NULL")]
-    Sql.new([Piece::Text.new("NULL::text")], s.prec, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
+    Sql.new([Piece::Text.new("NULL::text")], s.prec, s.column, s.value, s.known, s.bind, s.nulls, s.tri, s.narrow)
   end
 
   # The values the query's build knows that `e`, used as a value, may
@@ -890,6 +900,13 @@ class Translator
     in Piece::Param(_) | Piece::Bound(_) then true
     else false
     end
+  end
+
+  # `s` as a bigint when it is an `integer` (`Sql#narrow`).
+  private def bigint(s: Sql) -> Sql
+    return s unless s.narrow
+    pieces = s.prec == ATOM ? s.pieces : [Piece::Text.new("(")] + s.pieces + [Piece::Text.new(")")]
+    Sql.new(pieces + [Piece::Text.new("::bigint")], ATOM, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
   end
 
   # `s IS NULL` (`op`), a parameter cast: PostgreSQL cannot type one
