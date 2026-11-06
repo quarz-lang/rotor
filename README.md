@@ -194,11 +194,32 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   is a `Float`'s division, and `%` with a `Float` is refused
   (PostgreSQL has none). An `Int`'s `/` or `%` on what may be an
   `Int` or a `Float` (`(if b then age else score end) / 2`) is
-  refused: which one SQL does would depend on the row. A `Float`
-  parameter that meets anything but a `Float` column itself is written
-  `$1::double precision`, so that PostgreSQL does not take it for a
-  bigint (`age > 25.5`); against the column it takes the column's
-  type, `real` or `numeric` too.
+  refused: which one SQL does would depend on the row. Its `+`, `-`
+  and `*` are computed in double precision for both (SQL's `CASE` of
+  a bigint and a double precision is one), so an `Int` row differs
+  from Quarz beyond 2**53.
+- Parameters are typed where PostgreSQL would not type them as Quarz
+  does: a `Float` that meets anything but a `Float` column itself is
+  written `$1::double precision`, so that it is not taken for a bigint
+  (`age > 25.5`; against the column it takes the column's type, `real`
+  or `numeric` too); an `Int` that meets anything but a column is
+  `::bigint` (an `Int` literal is an `integer`, which `big + 1` would
+  overflow); and by its class (`::bigint`, `::double precision`,
+  `::text`, `::boolean`, `::timestamptz`, `::bytea`) one in a `CASE`'s
+  branch or bare condition, under a unary minus (`age > -x`), beside
+  another parameter (`lo < hi`, compared as text otherwise) and under
+  `IS NULL` (a nil there as `::text`). In arithmetic a `Float`
+  parameter is double precision and an `Int` one a bigint against any
+  other column, so that `r + 0.1` on a `real` column is computed as
+  Quarz does on the value read. An `if` that is nil either way is
+  `NULL`; one whose condition is a captured value other than a `Bool`
+  is the branch Quarz's truthiness takes. An `update` checks against
+  the column every value the build knows its value may be (an `if`'s
+  branches, operands: `{qty: -f}` with a `Float` is refused), as it
+  does one value. (Arithmetic of `Int` literals alone,
+  `2000000000 * 2`, is still `integer`'s, and an `Int` parameter
+  against an `integer` column of a table rotor did not create is an
+  `integer`.)
 - An `include?` list is one parameter per item, and PostgreSQL takes at
   most 65535 in a statement (not checked when the query is built). When
   pg encodes arrays, it becomes `= ANY($1)`.

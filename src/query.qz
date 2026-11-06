@@ -489,7 +489,7 @@ class Query[T]
       _, e = Translator.body(expr, file)
       raise UntranslatableError.new(Translator.value_error(e, null, file))
     end
-    Binds.fill_sql(kept, captures)
+    Binds.fill_sql(what == "order" ? Translator.order_key(kept) : kept, captures)
   end
 
   private def add_where(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Query[T]
@@ -546,6 +546,15 @@ class Query[T]
       end
       seen = seen + [name]
       v = t.operand(value)
+      unless v.known
+        t.known_values(value).each do |x|
+          if x.nil?
+            raise ArgumentError.new("#{model_name}##{name} cannot be nil (#{file}:#{Translator.line_of(value)})") unless c.null
+          elsif !x.is_a?(c.type) && !(c.type == Float && x.is_a?(Int))
+            raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{Translator.line_of(value)})")
+          end
+        end
+      end
       if v.known
         x = v.value
         if x.nil?

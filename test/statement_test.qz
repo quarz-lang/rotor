@@ -77,6 +77,36 @@ class StatementTest < Test::Case
     check(Item.query.update { |i| {price: 3, note: nil} }, "UPDATE \"items\" SET \"price\" = $1, \"note\" = NULL", [3.0])
     e = assert_raise(ArgumentError) { Item.query.update { |i| {nope: 1} } }
     assert_match(/\AItem has no column `nope` \(.*statement_test\.qz:\d+\)\z/, e.message)
+    # An `if`'s branches are checked as a value is.
+    f = 2.5
+    g = 3.7
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: qty > 0 ? f : g} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {name: qty > 0 ? "a" : nil} } }
+    assert_match(/\AItem#name cannot be nil/, e.message)
+    # And an operand's, a captured model's column.
+    e = assert_raise(ArgumentError) { Item.query.update { |_i| {qty: -f} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: qty * f} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    it = Item.load({id: 1, name: "a", price: 2.5, note: nil, qty: 1})
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: qty > 0 ? 3 : it.price} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    # Through `Rotor::SQL.not_nil`, which is its operand.
+    c = true
+    e = assert_raise(ArgumentError) { Item.query.update { |_i| {qty: Rotor::SQL.not_nil(c ? 2.5 : 3.5)} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { |_i| {qty: Rotor::SQL.not_nil(-f)} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    # (A known condition: only the branch it takes, the other not even
+    # translated, as in a condition.)
+    ns: Array[Int?] = [nil]
+    nq = ns[0]
+    check(Item.query.update { {qty: nq ? Rotor::SQL.not_nil(nq) : qty} }, "UPDATE \"items\" SET \"qty\" = \"qty\"", [])
+    so: String? = "a"
+    check(Item.query.update { |_i| {qty: so ? 2 : f} }, "UPDATE \"items\" SET \"qty\" = 2", [])
+    check(Item.query.update { {price: qty * 2} }, "UPDATE \"items\" SET \"price\" = \"qty\" * 2", [])
+    check(Item.query.update { {price: qty > 0 ? f : 1} }, "UPDATE \"items\" SET \"price\" = CASE WHEN \"qty\" > 0 THEN $1::double precision ELSE 1 END", [2.5])
     e = assert_raise(ArgumentError) { Item.query.update { |i| {name: nil} } }
     assert_match(/\AItem#name cannot be nil/, e.message)
     e = assert_raise(ArgumentError) { Item.query.update { |i| {name: 1} } }
