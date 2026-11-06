@@ -161,7 +161,7 @@ class Translator
     in Meta::Expr::Call(_, _, _, _, _, l) then l
     in Meta::Expr::And(_, _, l) then l
     in Meta::Expr::Or(_, _, l) then l
-    in Meta::Expr::Not(_, l) then l
+    in Meta::Expr::Not(_, _, l) then l
     in Meta::Expr::If(_, _, _, l) then l
     in Meta::Expr::ArrayLit(_, l) then l
     in Meta::Expr::HashLit(_, l) then l
@@ -179,7 +179,14 @@ class Translator
       b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, name.to_s) : b
     in Meta::Expr::And(l, r, _) then logical(l, "AND", r, AND, facts(l, true))
     in Meta::Expr::Or(l, r, _) then logical(l, "OR", r, OR, facts(l, false))
-    in Meta::Expr::Not(x, line)
+    in Meta::Expr::Not(x, ms, line)
+      # (A member of a union with a `!` of its own, a class's or an
+      # extension's: not SQL's NOT.)
+      unless ms.empty?
+        m = ms[0]
+        ext = m.extension
+        untranslatable(ext ? "#{Translator.label(m)} of #{ext.name}" : Translator.label(m), line)
+      end
       o = sql(x)
       if what = o.tri || o.nulls
         raise UntranslatableError.new(negation_error(x, what, line))
@@ -262,7 +269,7 @@ class Translator
       (recv ? [recv.as(Meta::Expr)] : Array[Meta::Expr].new).concat(args).any? { |x| column_named?(x, what) }
     in Meta::Expr::And(l, r, _) then column_named?(l, what) || column_named?(r, what)
     in Meta::Expr::Or(l, r, _) then column_named?(l, what) || column_named?(r, what)
-    in Meta::Expr::Not(x, _) then column_named?(x, what)
+    in Meta::Expr::Not(x, _, _) then column_named?(x, what)
     in Meta::Expr::If(c, t, f, _) then column_named?(c, what) || column_named?(t, what) || (f ? column_named?(f.as(Meta::Expr), what) : false)
     in Meta::Expr::ArrayLit(xs, _) then xs.any? { |x| column_named?(x, what) }
     else false
@@ -296,7 +303,7 @@ class Translator
       "#{head}#{list}#{tail}"
     in Meta::Expr::And(l, r, _) then "#{shown_operand(l)} && #{shown_operand(r)}"
     in Meta::Expr::Or(l, r, _) then "#{shown_operand(l)} || #{shown_operand(r)}"
-    in Meta::Expr::Not(x, _) then "!#{shown_operand(x)}"
+    in Meta::Expr::Not(x, _, _) then "!#{shown_operand(x)}"
     in Meta::Expr::If(c, t, f, _)
       f ? "#{shown_operand(c)} ? #{shown_operand(t)} : #{shown_operand(f)}" : "if #{show(c)} then #{show(t)} end"
     in Meta::Expr::ArrayLit(xs, _) then "[#{xs.map { |x| show(x) }.join(", ")}]"
@@ -420,7 +427,7 @@ class Translator
       block ? found + collect(block, scopes) : found
     in Meta::Expr::And(l, r, _) then all([l, r], scopes)
     in Meta::Expr::Or(l, r, _) then all([l, r], scopes)
-    in Meta::Expr::Not(x, _) then all([x], scopes)
+    in Meta::Expr::Not(x, _, _) then all([x], scopes)
     in Meta::Expr::If(c, t, f, _)
       xs = [c, t]
       xs = xs + [f] if f
@@ -526,7 +533,7 @@ class Translator
   private def facts(e: Meta::Expr, truth: Bool) -> Array[[Int, Symbol]]
     out: Array[[Int, Symbol]] = []
     case e
-    in Meta::Expr::Not(x, _) then return facts(x, !truth)
+    in Meta::Expr::Not(x, _, _) then return facts(x, !truth)
     in Meta::Expr::And(l, r, _) then return truth ? facts(l, true) + facts(r, true) : out
     in Meta::Expr::Or(l, r, _) then return truth ? out : facts(l, false) + facts(r, false)
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if m.name == :nil? && !m.singleton
