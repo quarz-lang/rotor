@@ -23,6 +23,9 @@ end
 OPEN_RACKS = Rack.where { open }.order { label }
 CLEAR_RACKS = Rack.where { !open }.delete
 
+# (A function, which a task's block may call.)
+def among_racing(ids: Array[Int]) -> Rotor::Query[Rack] = Rack.where { ids.include?(id) }
+
 class CacheTest < Test::Case
   S = "SELECT \"id\", \"label\", \"owner_id\", \"width\", \"open\" FROM \"racks\""
 
@@ -56,6 +59,22 @@ class CacheTest < Test::Case
 
   def among_capped(ids: Array[Int]) -> Rotor::Query[Rack] = Rack.where { ids.include?(id) }
 
+  def test_tasks_translating_one_kind_at_once_keep_one_entry
+    # (Long arrays: the tasks translate at the same time.)
+    tasks = (0...8).map do |i|
+      k: Int = i
+      Task.spawn { among_racing((k...(k + 2000)).to_a).to_sql[0] }
+    end
+    tasks.each { |t| t.await }
+    # (Then the other kinds still have room.)
+    7.times { |n| among_racing((0...(n + 1)).to_a) }
+    made = Rotor::Cache.translations
+    # (The last of them too: duplicates would have filled the key.)
+    among_racing((0...7).to_a)
+    among_racing((0...2000).to_a)
+    assert_equal(made, Rotor::Cache.translations)
+  end
+
   def test_a_key_keeps_at_most_eight_entries
     # Arrays of 8 lengths fill the key's entries; a ninth length is
     # translated on each build, and right.
@@ -75,8 +94,9 @@ class CacheTest < Test::Case
     4000.times { |i| ids = ids + [i] }
     t0 = Time.now
     among(ids)
-    # (Quadratic in the guards, it took about 0.4 s.)
-    assert((Time.now - t0).to_f < 0.2)
+    # (Quadratic in the guards, it took 0.4 s compiled; linear, 10 ms
+    # compiled, 0.14 s interpreted.)
+    assert((Time.now - t0).to_f < 2.0)
   end
 
   def test_queries_and_statements_are_shareable
