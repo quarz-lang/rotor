@@ -22,15 +22,22 @@ data Guard = (bind: Bind, kind: Kind)
 # The guards a translation records, shared by the translators of its
 # nested blocks.
 class Guards
-  var @list: Array[Guard] = []
+  # (Builders: an array's item adds one each, in constant time.)
+  @list: Array::Builder[Guard]
+  @seen: Hash::Builder[Guard, Bool]
 
-  def initialize; end
-
-  def add(g: Guard) -> Void
-    @list = @list + [g] unless @list.include?(g)
+  def initialize
+    @list = Array::Builder[Guard].new
+    @seen = Hash::Builder[Guard, Bool].new
   end
 
-  def list -> Array[Guard] = @list
+  def add(g: Guard) -> Void
+    return if @seen.key?(g)
+    @seen[g] = true
+    @list << g
+  end
+
+  def list -> Array[Guard] = @list.to_a
 end
 
 # The values of `Bind`s, from a block's captures.
@@ -148,9 +155,13 @@ data Cached[V] = (guards: Array[Guard], value: V)
 # The translations of the queries' blocks, kept for the process: a call
 # whose block was translated over the same models, with captures of the
 # same kinds (`Guard`), takes the translation kept and fills in its
-# parameters. One entry per call site and kinds of its captures: never
-# evicted.
+# parameters. At most `LIMIT` entries per key, never evicted: the kinds
+# are not a finite set (a captured array's length is part of the SQL),
+# so a kind beyond them is translated on each build, as before the
+# cache, and not kept.
 module Cache
+  # The entries a key keeps at most.
+  LIMIT = 8
   CONDITIONS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
   PLANS = Atom.new(Hash[CacheKey, Array[Cached[InnerPlan]]].new)
   READS = Atom.new(Hash[CacheKey, Array[Cached[Array[Array[Column]?]]]].new)
@@ -169,7 +180,8 @@ module Cache
   def self.key(site: Int, sources: Array[Source]) -> CacheKey = CacheKey.new(site, sources.map { |s| s.model })
 
   # What `atom` keeps for `key` whose guards hold of `captures`, or else
-  # the block's (a translation, its guards), then kept.
+  # the block's (a translation, its guards), then kept if the key has
+  # room (`LIMIT`).
   def self.fetch[V <: Shareable](atom: Atom[Hash[CacheKey, Array[Cached[V]]]], key: CacheKey, captures: Array[Object], &make: () -> [V, Array[Guard]]) -> V
     if entries = atom.get[key]?
       if found = entries.find { |c| Binds.hold?(c.guards, captures) }
@@ -179,7 +191,10 @@ module Cache
     value, guards = make.call
     MADE.update { |n| n + 1 }
     kept = Cached[V].new(guards, value)
-    atom.update { |h| h.put(key, (h[key]? || Array[Cached[V]].new) + [kept]) }
+    atom.update do |h|
+      have = h[key]? || Array[Cached[V]].new
+      have.size < LIMIT ? h.put(key, have + [kept]) : h
+    end
     value
   end
 end

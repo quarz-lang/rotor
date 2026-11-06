@@ -475,10 +475,13 @@ class Query[T]
   private def condition(expr: Meta::Expr, captures: Array[Object], file: String, site: Int, what: String) -> Sql
     kept = Cache.fetch(Cache::CONDITIONS, Cache.key(site, @sources), captures) do
       t, e = translator(expr, captures, file)
-      s = t.sql(e)
-      # (`ORDER BY 1` would be the first column.)
-      t.untranslatable("an order by a constant", Translator.line_of(e)) if what == "order" && s.known
-      [s, t.guards]
+      [t.sql(e), t.guards]
+    end
+    # (`ORDER BY 1` would be the first column. Checked on what the cache
+    # gives too: one block may be given to `where` and to `order`.)
+    if what == "order" && kept.known
+      _, e = Translator.body(expr, file)
+      raise UntranslatableError.new("an order by a constant cannot be translated to SQL (#{file}:#{Translator.line_of(e)})")
     end
     Binds.fill_sql(kept, captures)
   end

@@ -44,6 +44,41 @@ class CacheTest < Test::Case
 
   def widen(w: Int) -> Rotor::Statement = Rack.where { id == w }.update { |s| {width: w} }
 
+  def both(&k: Quoted[shareable Rack.() -> Bool]) -> Rotor::Query[Rack] = Rack.where(&k).order(&k)
+
+  def test_an_order_by_a_constant_is_refused_from_the_cache_too
+    flag = true
+    e = assert_raise(Rotor::UntranslatableError) { both { flag } }
+    assert_match(/\Aan order by a constant cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { both { flag } }
+    assert_match(/\Aan order by a constant/, e.message)
+  end
+
+  def among_capped(ids: Array[Int]) -> Rotor::Query[Rack] = Rack.where { ids.include?(id) }
+
+  def test_a_key_keeps_at_most_eight_entries
+    # Arrays of 8 lengths fill the key's entries; a ninth length is
+    # translated on each build, and right.
+    8.times { |n| among_capped((0...n).to_a) }
+    made = Rotor::Cache.translations
+    among_capped([1, 2, 3])
+    assert_equal(made, Rotor::Cache.translations)
+    check(among_capped([1, 2, 3, 4, 5, 6, 7, 8, 9]), "#{S} WHERE \"id\" IN ($1, $2, $3, $4, $5, $6, $7, $8, $9)", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+    check(among_capped([9, 8, 7, 6, 5, 4, 3, 2, 1]), "#{S} WHERE \"id\" IN ($1, $2, $3, $4, $5, $6, $7, $8, $9)", [9, 8, 7, 6, 5, 4, 3, 2, 1])
+    assert_equal(made + 2, Rotor::Cache.translations)
+    check(among_capped([4, 5]), "#{S} WHERE \"id\" IN ($1, $2)", [4, 5])
+    assert_equal(made + 2, Rotor::Cache.translations)
+  end
+
+  def test_a_large_captured_array_translates_in_linear_time
+    ids: Array[Int] = []
+    4000.times { |i| ids = ids + [i] }
+    t0 = Time.now
+    among(ids)
+    # (Quadratic in the guards, it took about 0.4 s.)
+    assert((Time.now - t0).to_f < 0.2)
+  end
+
   def test_queries_and_statements_are_shareable
     check(OPEN_RACKS, "#{S} WHERE \"open\" ORDER BY \"label\"", [])
     assert_equal(["DELETE FROM \"racks\" WHERE NOT \"open\"", []], CLEAR_RACKS.to_sql)

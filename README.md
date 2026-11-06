@@ -188,8 +188,10 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   in the parameters with the values captured this time. The SQL may
   depend on what kind of values the block captured (nil is `IS NULL`, an
   array's size the `IN (...)` list's), so each kind seen at a site is an
-  entry of its own. The cache never evicts: an entry per call site and
-  kinds of its captures, a fixed set for a program. A `where` of three
+  entry of its own. A key (a call site over its models) keeps at most 8
+  entries, never evicted; a kind beyond that is translated on each
+  build, as without the cache: the kinds are not a finite set, an
+  array's length being part of the SQL. A `where` of three
   conditions with an order and a limit builds in about 10 µs compiled
   (22 µs translating each time; 19 µs interpreted, 52 µs before).
 - Queries are `Shareable` (Quarz's docs/03): a query can be a constant
