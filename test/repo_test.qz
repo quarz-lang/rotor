@@ -315,6 +315,15 @@ class RepoTest < Test::Case
       mid = 2000000000
       assert_equal(3, repo.count(Member.where { age < big + 1 }))
       assert_equal(3, repo.count(Member.where { age < mid * 2 }))
+      # `Int` literals alone (`integer`s in SQL, which would overflow).
+      assert_equal(3, repo.count(Member.where { age < 2000000000 * 2 }))
+      assert_equal(3, repo.count(Member.where { age < (age > 0 ? 2000000000 : 1) * 2 + 2000000000 }))
+      assert_equal(3, repo.count(Member.where { age < (age > 0 ? 2000000000 : 1) + (age > 0 ? 2000000000 : 1) }))
+      assert_equal(0, repo.count(Member.where { age < -(age > 0 ? 2000000000 : 1) - (age > 0 ? 2000000000 : 1) }))
+      assert_equal(3, repo.count(Member.where { age < (age > 0 ? 2147483646 : 0) % (age > 0 ? 2147483647 : 1) }))
+      assert_equal(3, repo.count(Member.where { age > -9223372036854775808 * 1 }))
+      assert_equal(3, repo.count(Member.where { age > -(2000000000 * 2) }))
+      assert_equal(3, repo.count(Member.where { age % 3 != 2000000000 * 2 % 3 + 5 }))
       assert_equal(0, repo.count(Member.where { |_m| [1, 2].include?(big) }))
       xn: Int? = nil
       assert_equal(0, repo.count(Member.where { age == (admin ? xn : nil) }))
@@ -428,6 +437,9 @@ class RepoTest < Test::Case
       ["Ann", "Bob", "Cy"].each { |n| repo.insert(member(n)) }
       assert_equal(2, repo.update_all(Member.where { name != "Cy" }) { {age: age + 1} })
       assert_equal([31, 31, 30], repo.all(Member.order { id }.select { age }))
+      assert_equal(1, repo.update_all(Member.where { name == "Cy" }) { |_m| {age: 2000000000 * 2} })
+      assert_equal([31, 31, 4000000000], repo.all(Member.order { id }.select { age }))
+      assert_equal(1, repo.update_all(Member.where { name == "Cy" }) { |_m| {age: 30} })
       m = repo.get(Member, 1).as(Member)
       assert_equal(m, repo.delete(m))
       e = assert_raise(Rotor::StaleError) { repo.delete(m) }
