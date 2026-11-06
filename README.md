@@ -214,10 +214,20 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   other column, so that `r + 0.1` on a `real` column is computed as
   Quarz does on the value read. An `if` that is nil either way is
   `NULL`; one whose condition is a captured value other than a `Bool`
-  is the branch Quarz's truthiness takes. An `update` checks against
-  the column every value the build knows its value may be (an `if`'s
-  branches, operands: `{qty: -f}` with a `Float` is refused), as it
-  does one value. Arithmetic of two `integer`s, as PostgreSQL types `Int`
+  is the branch Quarz's truthiness takes; any other condition that is
+  not a `Bool` (a column, an expression; of an `if`, `&&`, `||` or
+  `!`) is tested as Quarz does, true unless nil: `email ? 1 : 0` is
+  `CASE WHEN "email" IS NOT NULL THEN 1 ELSE 0 END` (one that may be a
+  `Bool` or another value is refused). An `update` checks against the
+  column the class of its value, as Quarz gives it: a known value's, a
+  column's, an expression's (an `if`'s branches, arithmetic by its
+  operands: `{qty: -f}` with a `Float`, `{qty: price}` and `{name: qty}`
+  are refused, where PostgreSQL would round or write the number as
+  text; an `Int` into a `Float` column is accepted). `a && b` and
+  `a || b` are a `Bool` in SQL and one of their operands in Quarz: as
+  a value (an `update`'s, an order key, an operand) they are refused
+  unless both operands are `Bool`s; as a condition they test their
+  operands as above. Arithmetic of two `integer`s, as PostgreSQL types `Int`
   literals and CASEs of them, casts the left one to a bigint:
   `2000000000 * 2` is `2000000000::bigint * 2`, where an `integer`
   would overflow; `age + 1` stays as it is. (An `Int`

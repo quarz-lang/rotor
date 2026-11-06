@@ -366,6 +366,13 @@ class RepoTest < Test::Case
       assert_equal(["Bob"], names.call(Member.where { !email.nil? && email != e }))
       assert_equal(["Cy"], names.call(Member.where { email.nil? || !(email == e) }.where { email != "b@x" }))
       assert_equal(["Ann"], names.call(Member.where { email == e }))
+      # A condition other than a `Bool`: true unless nil, as in Quarz.
+      assert_equal(["Ann", "Bob"], names.call(Member.where { (email ? 1 : 0) == 1 }))
+      assert_equal(["Ann", "Bob"], names.call(Member.where { (email && age > 0 ? 1 : 0) == 1 }))
+      assert_equal(["Cy"], names.call(Member.where { !email }))
+      assert_equal(["Ann", "Bob", "Cy"], names.call(Member.where { (email || name ? 1 : 0) == 1 }))
+      assert_equal(3, repo.update_all(Member.query) { {score: email ? 1.5 : age} })
+      assert_equal([1.5, 1.5, 30.0], repo.all(Member.order { name }.select { score }))
       # nil `include?`d among nils: found, as in Quarz.
       assert_equal(["Ann", "Bob", "Cy"], names.call(Member.where { [email].include?(email) }))
       assert_equal(["Bob", "Cy"], names.call(Member.where { (admin ? name : email) != e }))
@@ -440,6 +447,13 @@ class RepoTest < Test::Case
       assert_equal(1, repo.update_all(Member.where { name == "Cy" }) { |_m| {age: 2000000000 * 2} })
       assert_equal([31, 31, 4000000000], repo.all(Member.order { id }.select { age }))
       assert_equal(1, repo.update_all(Member.where { name == "Cy" }) { |_m| {age: 30} })
+      # A column of another class is refused (PostgreSQL would write 31
+      # as "31", round 1.5 into 2); an `Int` into a `Float` is a `Float`.
+      assert_raise(ArgumentError) { repo.update_all(Member.query) { {name: age} } }
+      assert_raise(ArgumentError) { repo.update_all(Member.query) { {age: score + 1.5} } }
+      assert_raise(Rotor::UntranslatableError) { repo.update_all(Member.query) { {name: email || name} } }
+      assert_equal(3, repo.update_all(Member.query) { {score: age} })
+      assert_equal([31.0, 31.0, 30.0], repo.all(Member.order { id }.select { score }))
       m = repo.get(Member, 1).as(Member)
       assert_equal(m, repo.delete(m))
       e = assert_raise(Rotor::StaleError) { repo.delete(m) }
