@@ -159,7 +159,7 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   captured or literal array (an `IN` list, `FALSE` when empty; one
   parameter per item, within PostgreSQL's 65535); `String#start_with?`,
   `end_with?` and `include?` of a string value (`LIKE`, escaped);
-  `Rotor::SQL.like`, `ilike`, `lower` and `upper`; literals and
+  `Rotor::SQL.like`, `ilike`, `lower`, `upper` and `not_nil` (below); literals and
   captured values. Anything else raises `Rotor::UntranslatableError`
   when the query is built, naming the method and where it is.
 - `==` and `!=` keep Quarz's meaning of nil. Against a value they are
@@ -168,18 +168,37 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   statement cache prepares each text once); `!=` of a nullable column
   and a value is `IS DISTINCT FROM`, which counts nil as different.
   Between two columns, one of which admits NULL, they are `IS [NOT]
-  DISTINCT FROM`; `include?` finds nil with `IS NULL`. What SQL does
-  not keep: `!` over a comparison of a nullable column (`!(email ==
-  "x")` leaves the nil rows out, where Quarz takes them), and a
-  comparison's value in `select`, NULL where Quarz has false.
+  DISTINCT FROM`; `include?` finds nil with `IS NULL`.
+- Every form rotor translates keeps Quarz's meaning; the shapes it
+  cannot are refused when the query is built
+  (`Rotor::UntranslatableError`, saying what to write instead). A
+  comparison of something that can be NULL (`email == e`, `=` in SQL;
+  `ids.include?(email)`, `IN`) is NULL where Quarz has false, which is
+  the same as false in a condition: a `where`, `filter` or join
+  condition, an operand of `&&` and `||`, an `if`'s condition or branches. Anywhere else it
+  is refused: under `!` (`!(email == e)` would leave out the rows Quarz
+  takes: write `email != e`), and as a value (an `order` key, an
+  `update` value, an operand of `==` or another call). `select`'s block
+  is not translated (below): `select { email == e }` is false on a NULL
+  row.
+- `col.nil?` and `!col.nil?` are `IS NULL` and `NOT ... IS NULL`, the
+  explicit form, and what the left side of a `&&` (`!email.nil? &&
+  ...`), of a `||` (`email.nil? || ...`) or an `if`'s condition says
+  of a column holds on the other side: there it is not NULL, so its
+  comparisons are two-valued. SQL's `<>` on a nullable column, which an
+  index can serve, is written out: `!email.nil? && email != e` is
+  `NOT "email" IS NULL AND "email" <> $1` (where `email != e` alone is
+  `IS DISTINCT FROM`), and `email.nil? || !(email == e)` translates.
 - `Int#/` floors and `Int#%` takes the divisor's sign, as in Quarz
   (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`).
 - An `include?` list is one parameter per item, and PostgreSQL takes at
   most 65535 in a statement (not checked when the query is built). When
   pg encodes arrays, it becomes `= ANY($1)`.
 - A nullable column's getter returns `T?`, which `<` does not take (a
-  block cannot narrow a getter's result): such a column is compared
-  with `==`, `!=` and `nil?` only, for now.
+  block cannot narrow a getter's result, nor use `as`):
+  `Rotor::SQL.not_nil(age)` is the column as a `T`, where the
+  condition before it says it is not NULL: `where { !age.nil? &&
+  Rotor::SQL.not_nil(age) > 18 }`. Anywhere else it is refused.
 - Identifiers are always quoted. The SQL is PostgreSQL's
   (`Rotor::Dialect`), the one dialect for now.
 - A block's translation is kept for the process, by its call site

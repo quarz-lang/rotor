@@ -219,6 +219,38 @@ class RepoTest < Test::Case
     end
   end
 
+  # Rows with NULLs: what `!=` (`IS DISTINCT FROM`) and the explicit
+  # form (`!email.nil? && email != e`, `<>`) each find.
+  def test_null_semantics
+    with_repo do |repo|
+      repo.insert(member("Ann").with(email: "a@x"))
+      repo.insert(member("Bob").with(email: "b@x"))
+      repo.insert(member("Cy"))
+      e: String? = "a@x"
+      names = ->(q: Rotor::Query[Member]) { repo.all(q.order { name }).map { |m| m.name } }
+      # Quarz's `!=`: nil differs from "a@x".
+      assert_equal(["Bob", "Cy"], names.call(Member.where { email != e }))
+      # SQL's `<>`, written out: the NULL row is left out by the nil test.
+      assert_equal(["Bob"], names.call(Member.where { !email.nil? && email != e }))
+      assert_equal(["Cy"], names.call(Member.where { email.nil? || !(email == e) }.where { email != "b@x" }))
+      assert_equal(["Ann"], names.call(Member.where { email == e }))
+      # nil `include?`d among nils: found, as in Quarz.
+      assert_equal(["Ann", "Bob", "Cy"], names.call(Member.where { [email].include?(email) }))
+      assert_equal(["Bob", "Cy"], names.call(Member.where { (admin ? name : email) != e }))
+      # An `if` as a condition: its NULL is false, as Quarz's false.
+      assert_equal(["Ann"], names.call(Member.where { admin ? false : email == e }))
+      # `select`'s block runs in Quarz: false, not NULL, for Cy.
+      assert_equal([true, false, false], repo.all(Member.order { name }.select { email == e }))
+      # An ordering comparison of a nullable column, past the nil test.
+      repo.insert(Note.new(body: "old", seen: Time.utc(2020, 1, 1)))
+      repo.insert(Note.new(body: "new", seen: Time.utc(2026, 1, 1)))
+      repo.insert(Note.new(body: "never"))
+      t = Time.utc(2025, 1, 1)
+      assert_equal(["new"], repo.all(Note.where { !seen.nil? && Rotor::SQL.not_nil(seen) > t }).map { |n| n.body })
+      assert_equal(["never", "old"], repo.all(Note.where { seen.nil? || Rotor::SQL.not_nil(seen) < t }.order { body }).map { |n| n.body })
+    end
+  end
+
   def test_update_and_touch
     with_repo do |repo|
       m = repo.insert(member("Ann"))

@@ -81,6 +81,96 @@ class QueryTest < Test::Case
     check(Person.where { name == name }, "#{COLS} WHERE \"name\" = \"name\"", [])
   end
 
+  # Every form translated keeps Quarz's meaning: a comparison that can be
+  # NULL (where Quarz has false) is kept where NULL acts as false, and
+  # refused elsewhere.
+  def test_three_valued_shapes_are_refused
+    f: String? = "a@b"
+    some = ["a", "b"]
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !(email == f) } }
+    assert_match(/\A`!\(email == f\)` is three-valued in SQL when `email` can be NULL \(.*query_test\.qz:\d+\): write `email != f` \(Quarz's meaning, `IS DISTINCT FROM`\), or test `email.nil\?` explicitly\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { |p| !(p.email == f) || p.admin } }
+    assert_match(/\A`!\(p.email == f\)` is three-valued in SQL when `p.email` can be NULL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !some.include?(email) } }
+    assert_match(/\A`!some.include\?\(email\)` is three-valued in SQL when `email` can be NULL \(.*\): test `email.nil\?` explicitly \(`email.nil\? \|\| !some.include\?\(email\)`\)\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { admin && !(age > 1 && email == f) } }
+    assert_match(/\A`!\(\(age > 1\) && \(email == f\)\)` is three-valued/, x.message)
+    # As a value: an order's key, an `update`'s value, an operand.
+    x = assert_raise(Rotor::UntranslatableError) { Person.order { email == f } }
+    assert_match(/\A`email == f` as a value is NULL, not false, in SQL when `email` is NULL \(.*query_test\.qz:\d+\): compare in Quarz \(select the column\), or test `email.nil\?` explicitly\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.query.update { {admin: email == f} } }
+    assert_match(/\A`email == f` as a value is NULL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { (email == f) == false } }
+    assert_match(/\A`email == f` as a value is NULL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { (email == f).nil? } }
+    assert_match(/\A`email == f` as a value/, x.message)
+    # An `if` whose branch can be NULL where Quarz has false: as a value.
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !(admin ? some.include?(email) : true) } }
+    assert_match(/\A`!\(admin \? some.include\?\(email\) : true\)` is three-valued in SQL when `email` can be NULL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.order { admin ? email == f : false } }
+    assert_match(/\A`admin \? \(email == f\) : false` as a value is NULL/, x.message)
+  end
+
+  def test_two_valued_shapes_are_kept
+    e: String? = nil
+    f: String? = "a@b"
+    # Nothing NULL under the `!`.
+    check(Person.where { !(name == "x") }, "#{COLS} WHERE NOT \"name\" = $1", ["x"])
+    check(Person.where { !(email == e) }, "#{COLS} WHERE NOT \"email\" IS NULL", [])
+    # (`!=` of a nullable column is `IS DISTINCT FROM`, never NULL.)
+    check(Person.where { !(email != f) }, "#{COLS} WHERE NOT \"email\" IS DISTINCT FROM $1", ["a@b"])
+    check(Person.where { !(email == name) }, "#{COLS} WHERE NOT \"email\" IS NOT DISTINCT FROM \"name\"", [])
+    # As a condition, NULL is false: kept.
+    check(Person.where { admin || email == f }, "#{COLS} WHERE \"admin\" OR \"email\" = $1", ["a@b"])
+    check(Person.where { email == f ? admin : age > 1 }, "#{COLS} WHERE CASE WHEN \"email\" = $1 THEN \"admin\" ELSE \"age\" > 1 END", ["a@b"])
+    check(Person.where { admin ? email == f : false }, "#{COLS} WHERE CASE WHEN \"admin\" THEN \"email\" = $1 ELSE FALSE END", ["a@b"])
+    check(Person.order { name == "x" }, "#{COLS} ORDER BY \"name\" = $1", ["x"])
+    assert_equal(["UPDATE \"people\" SET \"admin\" = \"email\" IS NULL", Array[Object?].new], Person.query.update { {admin: email == e} }.to_sql)
+    # What the left side of `&&`/`||` says: `email` is not NULL after it.
+    check(Person.where { !email.nil? && email != f }, "#{COLS} WHERE NOT \"email\" IS NULL AND \"email\" <> $1", ["a@b"])
+    check(Person.where { email != nil && !(email == f) }, "#{COLS} WHERE \"email\" IS NOT NULL AND NOT \"email\" = $1", ["a@b"])
+    check(Person.where { email.nil? || !(email == f) }, "#{COLS} WHERE \"email\" IS NULL OR NOT \"email\" = $1", ["a@b"])
+    check(Person.where { |p| p.email.nil? ? true : !(p.email == f) }, "#{COLS} WHERE CASE WHEN \"email\" IS NULL THEN TRUE ELSE NOT \"email\" = $1 END", ["a@b"])
+    # An `if` that can be NULL, compared: as a column is.
+    check(Person.where { (admin ? name : email) != "a" }, "#{COLS} WHERE CASE WHEN \"admin\" THEN \"name\" ELSE \"email\" END IS DISTINCT FROM $1", ["a"])
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !((admin ? nil : 1) == 1) } }
+    assert_match(/three-valued in SQL when `nil` can be NULL \(.*\): write `\(admin \? nil : 1\) != 1` \(.*\), or write the case of nil out instead of `nil`\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !((admin ? e : name) == "a") } }
+    assert_match(/three-valued in SQL when `e` can be NULL \(.*\): write `\(admin \? e : name\) != "a"` \(Quarz's meaning, `IS DISTINCT FROM`\), or decide what a nil `e` means in Quarz, before the query is built\z/, x.message)
+    b: Bool? = nil
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { !(admin && b) } }
+    assert_match(/when `b` can be NULL \(.*\): decide what a nil `b` means in Quarz, before the query is built\z/, x.message)
+    # `include?` of what can be NULL among what can be NULL: nil is nil.
+    check(Person.where { [email, name].include?(email) }, "#{COLS} WHERE \"email\" IS NOT DISTINCT FROM \"email\" OR \"email\" IS NOT DISTINCT FROM \"name\"", [])
+    check(Person.where { !([email].include?(email)) }, "#{COLS} WHERE NOT \"email\" IS NOT DISTINCT FROM \"email\"", [])
+    # A nil `include?`d: found where an item is nil.
+    check(Person.where { !([name].include?(e)) }, "#{COLS} WHERE NOT FALSE", [])
+    check(Person.where { [name, email].include?(nil) }, "#{COLS} WHERE \"email\" IS NULL", [])
+    check(Person.where { [nil, name].include?(e) }, "#{COLS} WHERE TRUE", [])
+    # Not past the `&&`.
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { (!email.nil? && admin) || !(email == f) } }
+    assert_match(/\A`!\(email == f\)` is three-valued/, x.message)
+  end
+
+  def test_not_nil
+    t = Time.at(0)
+    check(Person.where { !born.nil? && Rotor::SQL.not_nil(born) > t }, "#{COLS} WHERE NOT \"born\" IS NULL AND \"born\" > $1", [t])
+    check(Person.where { born.nil? || Rotor::SQL.not_nil(born) < t }, "#{COLS} WHERE \"born\" IS NULL OR \"born\" < $1", [t])
+    check(Person.where { |p| p.born.nil? ? false : Rotor::SQL.not_nil(p.born) > t }, "#{COLS} WHERE CASE WHEN \"born\" IS NULL THEN FALSE ELSE \"born\" > $1 END", [t])
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { Rotor::SQL.not_nil(born) > t } }
+    assert_match(/\A`Rotor::SQL.not_nil\(born\)` where `born` can be NULL \(.*query_test\.qz:\d+\): write `!born.nil\? &&` before it\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { born.nil? && Rotor::SQL.not_nil(born) > t } }
+    assert_match(/where `born` can be NULL/, x.message)
+    three: Int? = 3
+    assert_equal(3, Rotor::SQL.not_nil(three))
+    n: Time? = nil
+    x = assert_raise(ArgumentError) { Person.where { Rotor::SQL.not_nil(n) == born } }
+    assert_match(/\ARotor::SQL.not_nil of nil \(.*query_test\.qz:\d+\)\z/, x.message)
+    born: Time? = nil
+    x = assert_raise(ArgumentError) { Rotor::SQL.not_nil(born) }
+    assert_equal("Rotor::SQL.not_nil of nil", x.message)
+  end
+
   def test_in_list_and_like
     ids = [1, 2, 3]
     none: Array[Int] = []

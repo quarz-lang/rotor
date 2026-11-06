@@ -15,6 +15,21 @@ module SQL
   # `like` with case folded: SQL's ILIKE.
   def self.ilike(s: String, pattern: String) -> Bool = like(s.downcase, pattern.downcase)
 
+  # `c`, which is not nil: in a query's block, a nullable column where
+  # the condition before it says it is not NULL (`where { !age.nil? &&
+  # Rotor::SQL.not_nil(age) > 18 }`), translated as the column itself (a
+  # block cannot narrow a getter's result: `age` is an `Int?` there).
+  # Refused where nothing says so. Raises `ArgumentError` on nil.
+  #
+  # ```
+  # age: Int? = 3
+  # Rotor::SQL.not_nil(age)  # => 3
+  # ```
+  def self.not_nil[T](c: T?) -> T
+    raise ArgumentError.new("Rotor::SQL.not_nil of nil") if c.nil?
+    c
+  end
+
   # `s` in lower case: SQL's `lower`.
   def self.lower(s: String) -> String = s.downcase
 
