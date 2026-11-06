@@ -11,6 +11,7 @@ module Loose
   extension Nil
     def >(other: Int) -> Bool = true
     def ==(other: Int) -> Bool = true
+    def ! -> Bool = false
   end
 end
 
@@ -33,7 +34,38 @@ class Tally < Rotor::Model
   end
 end
 
+# A class of its own `!`.
+class Flag
+  include Shareable
+  @on: Bool
+
+  def initialize(@on: Bool)
+  end
+
+  def ! -> Bool = @on
+end
+
 class ExtensionTest < Test::Case
+  def test_a_negation_of_its_own_is_refused
+    f = Flag.new(true)
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { |_t| !f } }
+    assert_match(/\A`Flag#!` cannot be translated to SQL/, e.message)
+    # A union with such a member: not SQL's NOT either.
+    fs: Array[Bool | Flag] = [true, f]
+    b = fs[0]
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { |_t| !b } }
+    assert_match(/\A`Flag#!` cannot be translated to SQL/, e.message)
+    # Under `&&` too, and an extension's `!` on a nullable member.
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { m > 3 && !b } }
+    assert_match(/\A`Flag#!` cannot be translated to SQL/, e.message)
+    xs: Array[Bool?] = [true]
+    x = xs[0]
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { |_t| !x } }
+    assert_match(/\A`Nil#!` of Loose cannot be translated to SQL/, e.message)
+    # Bool's own is NOT.
+    assert_equal(["SELECT \"id\", \"n\", \"m\", \"k\" FROM \"tallies\" WHERE NOT \"m\" > 3", Array[Object?].new], Tally.where { !(m > 3) }.to_sql)
+  end
+
   def test_another_extension_is_refused
     e = assert_raise(Rotor::UntranslatableError) { Tally.where { n > "3" } }
     assert_match(/\A`Int#>` of Loose cannot be translated to SQL/, e.message)

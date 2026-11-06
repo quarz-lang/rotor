@@ -68,15 +68,11 @@ class Query[T]
   # The associations to preload for its rows, and how (a query of
   # models: nil after `select`).
   @preloads: Array[Preload]
-  # (Its `ModelOps`, as procedures: a `ModelOps[T]` is Shareable only
-  # by its argument.)
-  @as_model: (shareable (T) -> Model)?
-  @attach: (shareable (T, Hash[Symbol, Array[Model]]) -> T)?
+  # How its rows are models, for a preload (nil after `select`).
+  @ops: ModelOps[T]?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], ops: ModelOps[T]? = nil)
-    @as_model = ops&.as_model
-    @attach = ops&.attach
+  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
   end
 
   # The table (the first, in a join).
@@ -480,11 +476,7 @@ class Query[T]
 
   # What the query does with its models for a preload, if it gives
   # models.
-  private def ops -> ModelOps[T]?
-    a = @as_model
-    b = @attach
-    a && b ? ModelOps[T].new(a, b) : nil
-  end
+  private def ops -> ModelOps[T]? = @ops
 
   # (A join of a query of one table's models.)
   private def joining! -> Void
