@@ -106,6 +106,31 @@ class StatementTest < Test::Case
     so: String? = "a"
     check(Item.query.update { |_i| {qty: so ? 2 : f} }, "UPDATE \"items\" SET \"qty\" = 2", [])
     check(Item.query.update { {price: qty * 2} }, "UPDATE \"items\" SET \"price\" = \"qty\" * 2", [])
+    # A column, or an expression over columns, of another class: by the
+    # class Quarz gives it (PostgreSQL would round a double precision
+    # into a bigint, write a number as text).
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: price} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: qty + price} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {qty: qty > 0 ? qty : -price} } }
+    assert_match(/\AItem#qty takes Int, not Float/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {name: qty} } }
+    assert_match(/\AItem#name takes String, not Int/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {note: qty > 1} } }
+    assert_match(/\AItem#note takes String, not Bool/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {name: Rotor::SQL.like(name, "a%")} } }
+    assert_match(/\AItem#name takes String, not Bool/, e.message)
+    check(Item.query.update { {price: qty} }, "UPDATE \"items\" SET \"price\" = \"qty\"", [])
+    check(Item.query.update { {qty: qty / 2 - 1} }, "UPDATE \"items\" SET \"qty\" = floor(\"qty\"::numeric / 2)::bigint - 1", [])
+    check(Item.query.update { {name: Rotor::SQL.lower(name + "x")} }, "UPDATE \"items\" SET \"name\" = lower(\"name\" || $1)", ["x"])
+    check(Item.query.update { {name: qty > 0 ? note : name} }, "UPDATE \"items\" SET \"name\" = CASE WHEN \"qty\" > 0 THEN \"note\" ELSE \"name\" END", [])
+    # `&&` and `||` are a `Bool` in SQL: as a value of other operands
+    # (one of them in Quarz), refused.
+    e = assert_raise(Rotor::UntranslatableError) { Item.query.update { {name: note || name} } }
+    assert_match(/\A`note \|\| name` as a value is one of its operands in Quarz, but a `Bool` in SQL \(.*statement_test\.qz:\d+\): write an `if`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Item.query.update { {qty: qty > 1 && qty} } }
+    assert_match(/\A`\(qty > 1\) && qty` as a value is one of its operands in Quarz/, e.message)
     check(Item.query.update { {price: qty > 0 ? f : 1} }, "UPDATE \"items\" SET \"price\" = CASE WHEN \"qty\" > 0 THEN $1::double precision ELSE 1 END", [2.5])
     e = assert_raise(ArgumentError) { Item.query.update { |i| {name: nil} } }
     assert_match(/\AItem#name cannot be nil/, e.message)

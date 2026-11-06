@@ -140,7 +140,7 @@ module Binds
         else
           s.value
         end
-    Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind, s.nulls, s.tri, s.narrow)
+    Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind, s.nulls, s.tri, s.narrow, s.test)
   end
 
   # An array of one class's values (no nils) as a parameter: pg sends it

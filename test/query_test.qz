@@ -15,6 +15,13 @@ class Person < Rotor::Model
   end
 end
 
+class Flagged < Rotor::Model
+  table "flagged" do
+    column :id, Int, primary: true
+    column :vip, Bool, null: true
+  end
+end
+
 # Nullable columns of each comparable class (`Rotor::Compare`).
 class Gauge < Rotor::Model
   table "gauges" do
@@ -350,6 +357,34 @@ class QueryTest < Test::Case
     sn: String? = nil
     check(Person.where { (so ? age : 0) > 1 }, "#{COLS} WHERE \"age\" > 1", [])
     check(Person.where { (sn ? age : 0) > 1 }, "#{COLS} WHERE 0 > 1", [])
+    # A condition other than a `Bool` is tested for its truthiness, as
+    # in Quarz: true unless nil.
+    check(Person.where { (email ? age : 0) > 1 }, "#{COLS} WHERE CASE WHEN \"email\" IS NOT NULL THEN \"age\" ELSE 0 END > 1", [])
+    check(Person.where { (name ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN \"name\" IS NOT NULL THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { (age + 1 ? score : 0.0) > 1.0 }, "#{COLS} WHERE CASE WHEN \"age\" + 1 IS NOT NULL THEN \"score\" ELSE $1::double precision END > $2::double precision", [0.0, 1.0])
+    check(Person.where { (email && admin ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN \"email\" IS NOT NULL AND \"admin\" THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { (admin || Rotor::SQL.lower(name) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN \"admin\" OR lower(\"name\") IS NOT NULL THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { admin && !email }, "#{COLS} WHERE \"admin\" AND NOT \"email\" IS NOT NULL", [])
+    check(Person.where { !email }, "#{COLS} WHERE NOT \"email\" IS NOT NULL", [])
+    check(Person.where { (if born then 1 end) == 1 }, "#{COLS} WHERE CASE WHEN \"born\" IS NOT NULL THEN 1 END = 1", [])
+    sx: String? = "x"
+    check(Person.where { (sx && admin ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN $1::text IS NOT NULL AND \"admin\" THEN 1 ELSE 0 END = 1", ["x"])
+    # (A nullable `Bool` is SQL's own test: NULL as false.)
+    assert_equal("SELECT \"id\", \"vip\" FROM \"flagged\" WHERE CASE WHEN \"vip\" THEN 1 ELSE 0 END = 1", Flagged.where { (vip ? 1 : 0) == 1 }.to_sql[0])
+    # An `&&` or `||` of such a test is one of its operands in Quarz, a
+    # `Bool` in SQL: refused as a value, kept as a condition.
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (email || name) == true } }
+    assert_match(/\A`email \|\| name` as a value is one of its operands in Quarz, but a `Bool` in SQL \(.*query_test\.qz:\d+\): write an `if`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (email && name) != nil } }
+    assert_match(/\A`email && name` as a value/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (admin ? (email && name) : name) == "x" } }
+    assert_match(/\A`email && name` as a value/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.order { email || name } }
+    assert_match(/\A`email \|\| name` as a value/, e.message)
+    check(Person.where { ((if admin then email || name end) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL OR \"name\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { !(email && admin) }, "#{COLS} WHERE NOT (\"email\" IS NOT NULL AND \"admin\")", [])
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (if (admin ? email : admin) then age else 0 end) > 1 } }
+    assert_match(/\A`admin \? email : admin`, a `Bool` or another value, as a condition cannot be translated to SQL/, e.message)
     # Against a column, untyped as before.
     check(Person.where { age > n && name == "a" }, "#{COLS} WHERE \"age\" > $1 AND \"name\" = $2", [30, "a"])
   end

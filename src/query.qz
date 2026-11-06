@@ -512,6 +512,10 @@ class Query[T]
       _, e = Translator.body(expr, file)
       raise UntranslatableError.new(Translator.value_error(e, null, file))
     end
+    if what == "order" && (tested = kept.test)
+      _, e = Translator.body(expr, file)
+      raise UntranslatableError.new(Translator.test_error(e, tested, file))
+    end
     Binds.fill_sql(what == "order" ? Translator.order_key(kept) : kept, captures)
   end
 
@@ -570,11 +574,11 @@ class Query[T]
       seen = seen + [name]
       v = t.operand(value)
       unless v.known
-        t.known_values(value).each do |x|
-          if x.nil?
+        t.classes(value).each do |k|
+          if k == Nil
             raise ArgumentError.new("#{model_name}##{name} cannot be nil (#{file}:#{Translator.line_of(value)})") unless c.null
-          elsif !x.is_a?(c.type) && !(c.type == Float && x.is_a?(Int))
-            raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{Translator.line_of(value)})")
+          elsif k != c.type && !(c.type == Float && k == Int)
+            raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{k.name} (#{file}:#{Translator.line_of(value)})")
           end
         end
       end
