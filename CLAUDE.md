@@ -47,3 +47,23 @@ throwaway cluster; the others need none.
   diff and every local check above have passed; from then on add
   commits, never force-push, and review each of them before pushing.
 - The description says what was verified.
+
+## Issues
+
+- Open work lives in GitHub issues of the repository that owns the code,
+  one per defect or change. The title is a sentence in the commit-message
+  style, saying what is wrong or what is wanted.
+- The body has the headings **Symptom**, **Reproducer**, **Cause** (when
+  known; say when it is a guess), **Direction** (`Decided (date): ...`,
+  or the options with a recommendation) and **Found in** (the pull
+  request or review that found it).
+- Labels: `bug`, `enhancement`, `documentation`; `soundness` when a
+  guarantee of the type or ownership system breaks (the highest
+  priority); `performance`; `design` when a language or API decision is
+  needed; `needs-decision` while it waits for the maintainer;
+  `after-0.1.0`.
+- A bug found while implementing or reviewing that is outside the pull
+  request's scope is filed as an issue that says which pull request
+  found it, not fixed in that pull request nor left in a comment.
+- A pull request that fixes an issue says `Closes #N` in its description.
+  A decision taken about an issue is recorded as a comment on it.
