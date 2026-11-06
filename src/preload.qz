@@ -60,7 +60,7 @@ module Preloads
     case e
     in Meta::Expr::ArrayLit(xs, _)
       xs.flat_map { |x| items(info, model, x, file) }
-    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, [inner], Meta::Expr::Block(_, body, line), _) if m.name == :nest && m.owner == Model
+    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, _, [inner], Meta::Expr::Block(_, body, line), _) if m.name == :nest && m.owner == Model
       a = association(info, model, inner, file)
       if body.size != 1
         raise UntranslatableError.new("a `nest` block of #{body.size} statements (#{file}:#{line}): write the associations")
@@ -73,10 +73,10 @@ module Preloads
 
   private def self.association(info: TableInfo, model: String, e: Meta::Expr, file: String) -> Association
     case e
-    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, [], nil, line) if !m.singleton
+    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, _, [], nil, line) if !m.singleton
       info.associations.find { |a| a.name == m.name } ||
         raise UntranslatableError.new("`#{m.name}` is not an association of #{model} (#{file}:#{line}): a preload names associations")
-    in Meta::Expr::Call(_, _, _, _, line)
+    in Meta::Expr::Call(_, _, _, _, _, line)
       raise UntranslatableError.new("a preload names associations of the model, as `{ posts }` (#{file}:#{line})")
     in Meta::Expr::Capture(_, name, line)
       raise UntranslatableError.new("`#{name}` is a variable where the preload is written, not an association (#{file}:#{line})")

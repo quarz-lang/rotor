@@ -64,7 +64,9 @@ class QueryTest < Test::Case
     # Quarz's `Int#/` floors and its `%` takes the divisor's sign.
     check(Person.where { age / 2 == 1 }, "#{COLS} WHERE floor(\"age\"::numeric / 2)::bigint = 1", [])
     check(Person.where { age % 3 == 1 }, "#{COLS} WHERE (\"age\" % 3 + 3) % 3 = 1", [])
-    check(Person.where { score / 2.0 > 1.0 }, "#{COLS} WHERE \"score\" / $1 > $2", [2.0, 1.0])
+    check(Person.where { score / 2.0 > 1.0 }, "#{COLS} WHERE \"score\" / $1 > $2::double precision", [2.0, 1.0])
+    # `Int#/(Float)` is a Float's division, not floored.
+    check(Person.where { age / 2.0 > 1.0 }, "#{COLS} WHERE \"age\" / $1::double precision > $2::double precision", [2.0, 1.0])
     check(Person.where { name + "!" == "a!" }, "#{COLS} WHERE \"name\" || $1 = $2", ["!", "a!"])
     # Two `where`s are joined with AND; an OR is parenthesized there.
     check(
@@ -204,8 +206,8 @@ class QueryTest < Test::Case
     check(Gauge.where { |g| g.ratio <= none }, "#{GS} WHERE \"ratio\" <= $1", [nil])
     # Int and Float mixed, either way.
     f = 1.5
-    check(Gauge.where { 1.5 < level }, "#{GS} WHERE $1 < \"level\"", [1.5])
-    check(Gauge.where { f <= level && ratio > level }, "#{GS} WHERE $1 <= \"level\" AND \"ratio\" > \"level\"", [1.5])
+    check(Gauge.where { 1.5 < level }, "#{GS} WHERE $1::double precision < \"level\"", [1.5])
+    check(Gauge.where { f <= level && ratio > level }, "#{GS} WHERE $1::double precision <= \"level\" AND \"ratio\" > \"level\"", [1.5])
     check(Gauge.where { level >= ratio }, "#{GS} WHERE \"level\" >= \"ratio\"", [])
     check(Gauge.where { on ? level > 1 : false }, "#{GS} WHERE CASE WHEN \"on\" THEN \"level\" > 1 ELSE FALSE END", [])
     # The explicit forms: not NULL past the nil test.
@@ -334,6 +336,18 @@ class QueryTest < Test::Case
     assert_match(/\A`String#\*` cannot be translated to SQL/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Person.where { score % 2.0 > 1.0 } }
     assert_match(/\A`Float#%` cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { age % 2.0 > 1.0 } }
+    assert_match(/\A`Int#%` cannot be translated to SQL/, e.message)
+    # An `Int | Float` receiver's `/` is two operations: which one the
+    # SQL does would depend on the row.
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (if admin then age else score end) / 2 > 1 } }
+    assert_match(/\A`Int#\/` and `Float#\/` together \(on a union receiver\) cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (if admin then score else age end) / 2 > 1 } }
+    assert_match(/\A`Float#\/` and `Int#\/` together \(on a union receiver\) cannot be translated to SQL/, e.message)
+    # `+`, `-` and `*` are one operation in SQL for both, and so is `/`
+    # by a `Float`.
+    check(Person.where { (if admin then age else score end) / 2.0 > 1 }, "#{COLS} WHERE CASE WHEN \"admin\" THEN \"age\" ELSE \"score\" END / $1::double precision > 1", [2.0])
+    check(Person.where { (if admin then age else score end) + 1 > 2 }, "#{COLS} WHERE CASE WHEN \"admin\" THEN \"age\" ELSE \"score\" END + 1 > 2", [])
     d = 3.seconds
     e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| d > d } }
     assert_match(/\Aa value of class Duration cannot be translated to SQL/, e.message)
