@@ -35,9 +35,11 @@ class HasMany[T <: Model]
   @key_column: Symbol?
   @key: Value?
   @models: Array[Model]?
+  # The owner's class and the association, for one through a join model.
+  @through: [Type[Object], Association]?
 
   # (Made by the getter `has_many` generates.)
-  def initialize(@target: Type[T], @owner: String, @name: Symbol, @foreign_key: Symbol, @key_column: Symbol?, @key: Value?, @models: Array[Model]?)
+  def initialize(@target: Type[T], @owner: String, @name: Symbol, @foreign_key: Symbol, @key_column: Symbol?, @key: Value?, @models: Array[Model]?, @through: [Type[Object], Association]? = nil)
   end
 
   # Whether the models were preloaded.
@@ -63,14 +65,21 @@ class HasMany[T <: Model]
 
   # The association as a query: the target's rows whose foreign key is
   # this model's key, to refine (`posts.query.where { published }`) and
-  # run (`repo.all(user.posts.query)`). Raises `Rotor::SchemaError` when
-  # the target has no such column, `Rotor::MissingAttributeError` when the
-  # model's key is not set.
+  # run (`repo.all(user.posts.query)`); through a join model, the
+  # target's rows the join model's rows pair with this one, by a
+  # subquery (`"id" IN (SELECT "tag_id" FROM "post_tags" WHERE "post_id"
+  # = $1)`: each once). Raises `Rotor::SchemaError` when the target has
+  # no such column (or the join model no such `belongs_to`),
+  # `Rotor::MissingAttributeError` when the model's key is not set.
   def query -> Query[T]
-    HasMany.foreign_key!(@target, @foreign_key, @owner, @name)
+    HasMany.foreign_key!(@target, @foreign_key, @owner, @name) unless @through
     k = @key_column || raise SchemaError.new("#{@owner} has no primary key, which `#{@name}` needs")
     key = @key
     raise MissingAttributeError.new("#{@owner}##{k} is not set: `#{@name}` has no query") if key.nil?
+    if t = @through
+      keys = Through.keys(t[0], t[1])
+      return @target.query.where_through(keys, key)
+    end
     @target.query.where_key(@foreign_key, key)
   end
 
@@ -94,5 +103,49 @@ class HasMany[T <: Model]
 
   private def models! -> Array[Model]
     @models || raise NotLoadedError.new("#{@owner}##{@name} is not loaded: preload it (`repo.preload(model) { #{@name} }`)")
+  end
+end
+
+# The keys of a `has_many ..., through:` (a join model's): the join
+# model, its column that holds the owner's key and the one that holds the
+# target's, and the target's primary key.
+data ThroughKeys = (join: Type[Model], owner_key: Symbol, target_key: Symbol, target_pk: Symbol)
+
+# The keys of associations through a join model, from its `belongs_to`s,
+# found when an association is used (a query, a preload): the `table`
+# blocks of the owner, the join model and the target have all run then,
+# in whatever order. (A few comparisons of the join model's
+# associations: found again at each use, not kept.)
+module Through
+  # The keys of `owner`'s association `a`: the join model's `belongs_to`
+  # the target (the one `a.source` names, else the one whose target is
+  # `a.target`) and its `belongs_to` the owner (another). Raises
+  # `Rotor::SchemaError` naming both classes when the join model has none
+  # of them, or several where one was needed.
+  def self.keys(owner: Type[Object], a: Association) -> ThroughKeys
+    j = a.through || raise ArgumentError.new("#{owner.name}##{a.name} goes through no join model")
+    what = "#{owner.name}##{a.name} goes through #{j.name}"
+    bs = j.associations.select { |b| b.kind == :belongs_to }
+    t = if s = a.source
+          found = bs.find { |b| b.name == s } || raise SchemaError.new("#{what}, which has no `belongs_to` named `#{s}` (its `source:`)")
+          unless found.target == a.target
+            raise SchemaError.new("#{what}, whose `#{s}` belongs to #{found.target.name}, not #{a.target.name}")
+          end
+          found
+        else
+          ts = bs.select { |b| b.target == a.target }
+          raise SchemaError.new("#{what}, which has no `belongs_to #{a.target.name}`") if ts.empty?
+          if ts.size > 1
+            raise SchemaError.new("#{what}, which has several `belongs_to #{a.target.name}` (#{ts.map { |b| "`#{b.name}`" }.join(", ")}): name one with `source:`")
+          end
+          ts[0]
+        end
+    os = bs.select { |b| b.target == owner && b.name != t.name }
+    raise SchemaError.new("#{what}, which has no `belongs_to #{owner.name}`") if os.empty?
+    if os.size > 1
+      raise SchemaError.new("#{what}, which has several `belongs_to #{owner.name}` (#{os.map { |b| "`#{b.name}`" }.join(", ")}) besides its source")
+    end
+    pk = a.target.primary_key || raise SchemaError.new("#{a.target.name} has no primary key, which #{owner.name}##{a.name} needs")
+    ThroughKeys.new(j, os[0].foreign_key, t.foreign_key, pk)
   end
 end

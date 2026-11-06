@@ -121,6 +121,42 @@ class Query[T]
     copy(wheres: @wheres + [Sql.new(pieces, Translator::CMP, nil, nil, false)])
   end
 
+  # The rows a join model's rows pair with the owner of key `value`
+  # (`Rotor::HasMany#query` through it): `"id" IN (SELECT "tag_id" FROM
+  # "post_tags" WHERE "post_id" = $1)`.
+  def where_through(k: ThroughKeys, value: Value) -> Query[T]
+    rows!("where_through")
+    single!("where_through")
+    j = k.join.table_name
+    sub = " IN (SELECT #{Dialect.quote(k.target_key.to_s)} FROM #{Dialect.quote(j)} WHERE #{Dialect.quote(k.owner_key.to_s)} = "
+    pieces: Array[Piece] = [Piece::Column.new(0, k.target_pk), Piece::Text.new(sub), Piece::Param.new(Binds.parameter(value)), Piece::Text.new(")")]
+    copy(wheres: @wheres + [Sql.new(pieces, Translator::LIKE, nil, nil, false)])
+  end
+
+  # Its rows paired with the owner key of the join model's rows that pair
+  # them with the owners of `keys` (a preload through it): `INNER JOIN
+  # "post_tags" AS "p1" ON "p1"."tag_id" = "t0"."id" WHERE "p1"."post_id"
+  # = ANY($1)`, in the order of the target's primary key.
+  def through_owners(k: ThroughKeys, keys: Array[Value]) -> Query[[T, Value?]]
+    single!("through_owners")
+    rows!("through_owners")
+    jt = k.join.table_info
+    oc = jt.columns.find { |c| c.name == k.owner_key } || raise SchemaError.new("#{k.join.name} has no column `#{k.owner_key}`")
+    on = Joins.key_condition(1, k.target_key, 0, k.target_pk)
+    xs: Array[Object?] = keys.map { |v| v.as(Object) }
+    within = Sql.new([Piece::Column.new(1, k.owner_key), Piece::Text.new(" = ANY("), Piece::Param.new(Binds.items(xs)), Piece::Text.new(")")], Translator::CMP, nil, nil, false)
+    order = Sql.new([Piece::Column.new(0, k.target_pk)], Translator::ATOM, nil, nil, false)
+    base = @loader
+    owner_key = k.owner_key
+    Query[[T, Value?]].new(@sources + [Source.new(jt, k.join, [on], [oc])], @wheres + [within], @orders + [[order, false]], false, nil, nil, Shape::Rows,
+                           ->(rows: Array[Array[Fetched]]) {
+                             ts = base.call(rows.map { |r| [r[0]] })
+                             out: Array[[T, Value?]] = []
+                             ts.each_with_index { |x, i| out = out + [[x, Model.value(rows[i][1].values[owner_key]?)]] }
+                             out
+                           })
+  end
+
   # Ordered by the column `name` too (nil: unchanged): a preload's query.
   def order_by_key(name: Symbol?) -> Query[T]
     return self unless name

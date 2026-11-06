@@ -42,7 +42,9 @@ module Preloads
     return out if models.empty?
     specs.each do |spec|
       a = info.associations.find { |x| x.name == spec.name } || raise ArgumentError.new("`#{info.name}` has no association `#{spec.name}`")
-      found = if a.kind == :has_many
+      found = if a.through
+                through(repo, models, info, a)
+              elsif a.kind == :has_many
                 has_many(repo, models, info, a)
               else
                 belongs_to(repo, models, info, a)
@@ -96,6 +98,32 @@ module Preloads
     end
     models.map do |m|
       m.preloaded(a.name) || ((k = Model.key_of(m, pk)) ? by_key[k]? || [] : [])
+    end
+  end
+
+  # Each model's `a` (a `has_many` through a join model): those it has
+  # preloaded, else the target's rows the join model's pair with it, by
+  # one query joining the join model, each target once per owner (in the
+  # order of its primary key) however many join rows pair them.
+  private def self.through(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
+    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{a.name}` needs")
+    k = Through.keys(models[0].class, a)
+    keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
+    by_key: Hash[Value, Array[Model]] = {}
+    seen: Hash[[Value, Value?], Bool] = {}
+    unless keys.empty?
+      repo.all(a.target.query.through_owners(k, keys)).each do |pair|
+        row, owner = pair
+        next if owner.nil?
+        o = owner.as(Value)
+        t = Model.value(row.read(k.target_pk))
+        next if seen.key?([o, t])
+        seen = seen.put([o, t], true)
+        by_key = by_key.put(o, (by_key[o]? || []) + [row])
+      end
+    end
+    models.map do |m|
+      m.preloaded(a.name) || ((key = Model.key_of(m, pk)) ? by_key[key]? || [] : [])
     end
   end
 

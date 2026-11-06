@@ -29,6 +29,13 @@ data Association = (
   # The associated model's class.
   target: Type[Model],
   # The column that holds the key: this model's for `belongs_to`
-  # (`account_id`), the other's for `has_many` (`user_id`).
-  foreign_key: Symbol
+  # (`account_id`), the other's for `has_many` (`user_id`); for a
+  # `has_many` through a join model, the default `has_many` would have,
+  # unused (the keys are the join model's, `Rotor::Through.keys`).
+  foreign_key: Symbol,
+  # The join model of a `has_many ..., through:`, or nil.
+  through: Type[Model]? = nil,
+  # The join model's `belongs_to` to the target that `source:` names, or
+  # nil (the one whose target is the association's class).
+  source: Symbol? = nil
 )
