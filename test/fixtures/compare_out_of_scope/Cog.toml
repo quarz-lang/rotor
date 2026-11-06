@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/query_test.qz): `Rotor::Compare`
+# is in scope in query blocks only, so `u.age > 18` outside one is still
+# `Int? > Int`. It is checked against this checkout of rotor.
+[cog]
+name = "compare_out_of_scope"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

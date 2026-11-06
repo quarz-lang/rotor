@@ -285,7 +285,7 @@ class Translator
   # nil.
   def column_of(e: Meta::Expr) -> [Int, Column]?
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && m.extension.nil?
       s = row_in(recv, @scopes)
       return nil if s < 0
       src = @sources[s]
@@ -358,7 +358,7 @@ class Translator
   # inside the quoted one is a scope of its own, not known.
   private def collect(e: Meta::Expr, scopes: Array[Scope]) -> Array[[Int, Symbol?]]
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && m.extension.nil?
       s = row_in(recv, scopes)
       if s >= 0 && @sources[s].model <= m.owner
         t = @sources[s].table
@@ -637,6 +637,11 @@ class Translator
       return function(name, args, label, line)
     end
     untranslatable(label, line) unless !m.singleton && primitive?(m.owner)
+    # (An extension's method is the translator's to know only when it is
+    # `Rotor::Compare`'s, a comparison taking nil.)
+    if ext = m.extension
+      untranslatable("#{label} of #{ext.name}", line) unless ext == Compare
+    end
     if args.size == 0
       case name
       in "nil?" then return postfix(operand(r), "IS NULL", IS)
@@ -683,7 +688,7 @@ class Translator
   # is built (`Rotor::NotLoadedError` when the model was loaded without
   # it). Nil for any other call.
   private def captured(recv: Meta::Expr, m: Meta::MethodRef, args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql?
-    return nil unless args.empty? && block.nil? && !m.singleton
+    return nil unless args.empty? && block.nil? && !m.singleton && m.extension.nil?
     case recv
     in Meta::Expr::Capture(index, _, _)
       case v = look(Bind::Capture.new(index))

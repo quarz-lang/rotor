@@ -194,11 +194,25 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
 - An `include?` list is one parameter per item, and PostgreSQL takes at
   most 65535 in a statement (not checked when the query is built). When
   pg encodes arrays, it becomes `= ANY($1)`.
-- A nullable column's getter returns `T?`, which `<` does not take (a
-  block cannot narrow a getter's result, nor use `as`):
-  `Rotor::SQL.not_nil(age)` is the column as a `T`, where the
-  condition before it says it is not NULL: `where { !age.nil? &&
-  Rotor::SQL.not_nil(age) > 18 }`. Anywhere else it is refused.
+- Comparing a nullable column: `where { age > 18 }` is allowed in
+  query blocks, with `age` an `Int?`. Every query block is checked with
+  `using Rotor::Compare` (Quarz's docs/01 §7), whose extensions give
+  `nil` and `Int`, `Float`, `String` and `Time` the comparisons `<`,
+  `<=`, `>` and `>=` with a nil (`Int` and `Float` mixed either way):
+  nil compares false (Quarz's meaning in
+  these blocks), which is what SQL's NULL does in a condition. Where the
+  two would differ (`!(age > 18)`, an `order` key, an `update` value),
+  the query is refused, as above. Outside query blocks `Int? > Int` is
+  still a type error, and nil has no arithmetic (`age + 1` is one in a
+  block too). (As for any column, SQL compares strings by the
+  database's collation, Quarz by bytes. And a comparison on a nullable
+  receiver is taken for `Rotor::Compare`'s even where a `using` of your
+  own redefines it for the class: Quarz's tree records nil's method
+  only; on a non-null receiver another extension's is refused.)
+  `Rotor::SQL.not_nil(age)` is the column as a `T` for the
+  explicit cases, where the condition before it says it is not NULL:
+  `where { !age.nil? && Rotor::SQL.not_nil(age) + 1 > 18 }`; anywhere
+  else it is refused.
 - Identifiers are always quoted. The SQL is PostgreSQL's
   (`Rotor::Dialect`), the one dialect for now.
 - A block's translation is kept for the process, by its call site
