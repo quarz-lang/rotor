@@ -1,0 +1,142 @@
+require "test"
+
+# `has_many ..., through:` a join model. The owner's class is declared
+# before its join model here, and after it below (`Bookcase`): the keys are
+# found when the association is used, whatever order the `table` blocks
+# ran in.
+class Memo < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    column :title, String
+    has_many Label, through: MemoLabel
+  end
+end
+
+class MemoLabel < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Memo
+    belongs_to Label
+    column :position, Int, default: 0
+  end
+end
+
+class Label < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    column :name, String
+  end
+end
+
+# The join model first; two `belongs_to` the target, told apart by
+# `source:`.
+class Lending < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Bookcase
+    belongs_to Label, name: :front
+    belongs_to Label, name: :back
+  end
+end
+
+class Bookcase < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many Label, name: :fronts, through: Lending, source: :front
+    has_many Label, name: :all_labels, through: Lending
+    has_many Label, name: :nones, through: Lending, source: :nope
+    has_many Memo, through: Lending
+  end
+end
+
+# A user following users: the join model's two `belongs_to` the same
+# class, the owner's the one that is not the source.
+class Reader < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many Reader, name: :followed, through: Follow, source: :followee
+  end
+end
+
+class Follow < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    belongs_to Reader, name: :follower
+    belongs_to Reader, name: :followee
+  end
+end
+
+class ThroughTest < Test::Case
+  def check[T](q: Rotor::Query[T], text: String, params: Array[Object?]) -> Void
+    assert_equal([text, params], q.to_sql)
+  end
+
+  def test_the_query_is_the_target_by_a_subquery
+    n = Memo.load({id: 3, title: "a"})
+    sub = "\"id\" IN (SELECT \"label_id\" FROM \"memo_labels\" WHERE \"memo_id\" = $1)"
+    check(n.labels.query, "SELECT \"id\", \"name\" FROM \"labels\" WHERE #{sub}", [3])
+    # It composes as a has_many's does.
+    check(n.labels.query.where { name.start_with?("x") }.order { name },
+          "SELECT \"id\", \"name\" FROM \"labels\" WHERE #{sub} AND \"name\" LIKE $2 ORDER BY \"name\"", [3, "x%"])
+    check(n.labels.query.count, "SELECT count(*) FROM \"labels\" WHERE #{sub}", [3])
+    assert(!n.labels.loaded?)
+    assert_raise(Rotor::NotLoadedError) { n.labels.to_a }
+    e = assert_raise(Rotor::MissingAttributeError) { Memo.new(title: "x").labels.query }
+    assert_match(/Memo#id is not set/, e.message)
+    assert_equal(Rotor::Association.new(:has_many, :labels, Label, :memo_id, MemoLabel, nil), Memo.associations[0])
+  end
+
+  def test_the_preload_query
+    q = Label.query.through_owners(Rotor::Through.keys(Memo, Memo.associations[0]), [1, 2])
+    check(q, "SELECT \"l0\".\"id\", \"l0\".\"name\", \"m1\".\"memo_id\" FROM \"labels\" AS \"l0\" INNER JOIN \"memo_labels\" AS \"m1\" ON \"m1\".\"label_id\" = \"l0\".\"id\" WHERE \"m1\".\"memo_id\" = ANY($1) ORDER BY \"l0\".\"id\"", [[1, 2]])
+  end
+
+  def test_source
+    s = Bookcase.load({id: 1})
+    check(s.fronts.query, "SELECT \"id\", \"name\" FROM \"labels\" WHERE \"id\" IN (SELECT \"front_id\" FROM \"lendings\" WHERE \"bookcase_id\" = $1)", [1])
+    r = Reader.load({id: 5})
+    check(r.followed.query, "SELECT \"id\" FROM \"readers\" WHERE \"id\" IN (SELECT \"followee_id\" FROM \"follows\" WHERE \"follower_id\" = $1)", [5])
+  end
+
+  def test_a_join_model_lacking_a_belongs_to
+    s = Bookcase.load({id: 1})
+    e = assert_raise(Rotor::SchemaError) { s.all_labels.query }
+    assert_equal("Bookcase#all_labels goes through Lending, which has several `belongs_to Label` (`front`, `back`): name one with `source:`", e.message)
+    e = assert_raise(Rotor::SchemaError) { s.nones.query }
+    assert_equal("Bookcase#nones goes through Lending, which has no `belongs_to` named `nope` (its `source:`)", e.message)
+    e = assert_raise(Rotor::SchemaError) { s.memos.query }
+    assert_equal("Bookcase#memos goes through Lending, which has no `belongs_to Memo`", e.message)
+  end
+
+  def test_declaration_errors
+    e = assert_raise(ArgumentError) do
+      Rotor::Schema.new("X").has_many(Label, through: MemoLabel, foreign_key: :x_id)
+    end
+    assert_match(/goes through MemoLabel, whose `belongs_to`s give the keys/, e.message)
+    e = assert_raise(ArgumentError) { Rotor::Schema.new("X").has_many(Label, source: :label) }
+    assert_match(/a `source:` without `through:`/, e.message)
+  end
+
+  def test_not_in_a_join
+    e = assert_raise(Rotor::UntranslatableError) { Memo.query.join { labels } }
+    assert_match(/`Memo#labels`, through MemoLabel, in a join/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { for m in Memo.query, l in m.labels.query do l.name end }
+    assert_match(/`Memo#labels`, through MemoLabel, in a join/, e.message)
+  end
+
+  def test_statements_over_the_query
+    sub = "\"id\" IN (SELECT \"label_id\" FROM \"memo_labels\" WHERE \"memo_id\" = $"
+    m = Memo.load({id: 3, title: "a"})
+    p1: Array[Object?] = [3]
+    assert_equal(["DELETE FROM \"labels\" WHERE #{sub}1)", p1], m.labels.query.delete.to_sql)
+    p2: Array[Object?] = ["z", 3]
+    assert_equal(["UPDATE \"labels\" SET \"name\" = $1 WHERE #{sub}2)", p2], m.labels.query.update { |_l| {name: "z"} }.to_sql)
+  end
+
+  def test_a_new_key_forgets_what_was_preloaded
+    m = Memo.load({id: 3, title: "a"}).with_preloaded({labels: [Label.load({id: 1, name: "x"}).as(Rotor::Model)]})
+    assert_equal(["x"], m.labels.map { |l| l.name })
+    assert_equal(["x"], m.with(title: "b").labels.map { |l| l.name })
+    assert(!m.with(id: 4).labels.loaded?)
+  end
+end

@@ -362,6 +362,50 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 - An association's name may not be a column's or one of the model's
   own methods'.
 
+### Many to many: `has_many ..., through:`
+
+```ruby
+class Post < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    has_many Tag, through: PostTag      # post.tags -> Rotor::HasMany[Tag]
+  end
+end
+
+class PostTag < Rotor::Model             # the join table is a model
+  table do
+    column :id, Int, primary: true
+    belongs_to Post
+    belongs_to Tag
+    column :position, Int, default: 0   # columns of its own are ordinary
+  end
+end
+
+repo.all(post.tags.query.where { name.start_with?("q") })
+posts = repo.preload(posts) { tags }      # one query
+repo.insert(PostTag.new(post_id: post.id, tag_id: tag.id))   # writing: the join model
+```
+
+- The join table is always a model (no model-less join table). Its
+  `belongs_to` the owner and its `belongs_to` the target give the keys;
+  `source:` names the latter when it has several (`has_many User, name:
+  :followed, through: Follow, source: :followee`). They are found when
+  the association is first used (a query, a preload), when every
+  `table` block has run, whatever their order (the owner names the join
+  model, which names the owner); a join model without them raises
+  `Rotor::SchemaError` naming both classes.
+- Read-only (Ecto's `has_many :through`): `post.tags.query` is the
+  target's table alone, `WHERE "id" IN (SELECT "tag_id" FROM
+  "post_tags" WHERE "post_id" = $1)`, refined and run as any query; a
+  preload is one query joining the join table, `SELECT "t0".*,
+  "p1"."post_id" FROM "tags" AS "t0" INNER JOIN "post_tags" AS "p1" ON
+  "p1"."tag_id" = "t0"."id" WHERE "p1"."post_id" = ANY($1)`, grouped by
+  owner, nested as any level. A target appears once per owner, however
+  many join rows pair them (the join rows themselves are the join
+  model's). Join rows are written as the join model's (`insert`,
+  `delete_all(PostTag.where { ... })`); replacing the set at once may
+  come with changesets. Not in `join { ... }` (join the join model).
+
 ### Joins
 
 A query joins other tables in one SELECT, each table with its alias

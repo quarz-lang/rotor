@@ -37,6 +37,24 @@ class Volume < Rotor::Model
     column :title, String
     belongs_to Author, null: true
     has_many Remark
+    has_many Genre, through: VolumeGenre
+  end
+end
+
+# A join model with a column of its own.
+class VolumeGenre < Rotor::Model
+  table "volume_genres" do
+    column :id, Int, primary: true
+    belongs_to Volume
+    belongs_to Genre
+    column :position, Int, default: 0
+  end
+end
+
+class Genre < Rotor::Model
+  table "genres" do
+    column :id, Int, primary: true
+    column :name, String
   end
 end
 
@@ -83,7 +101,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -99,7 +117,9 @@ class RepoTest < Test::Case
     CREATE TABLE authors (id bigserial PRIMARY KEY, name text NOT NULL);
     CREATE TABLE volumes (id bigserial PRIMARY KEY, title text NOT NULL, author_id bigint REFERENCES authors);
     CREATE TABLE remarks (id bigserial PRIMARY KEY, stars bigint NOT NULL, volume_id bigint NOT NULL REFERENCES volumes);
-    CREATE TABLE readings (id bigserial PRIMARY KEY, r real NOT NULL, n numeric NOT NULL)
+    CREATE TABLE readings (id bigserial PRIMARY KEY, r real NOT NULL, n numeric NOT NULL);
+    CREATE TABLE genres (id bigserial PRIMARY KEY, name text NOT NULL);
+    CREATE TABLE volume_genres (id bigserial PRIMARY KEY, volume_id bigint NOT NULL REFERENCES volumes, genre_id bigint NOT NULL REFERENCES genres, position bigint NOT NULL DEFAULT 0)
   SQL
 
   def self.startup
@@ -133,7 +153,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -527,6 +547,41 @@ class RepoTest < Test::Case
       assert_equal([["c", "Cy"]], by.map { |x| [x[0].title, x[1].name] })
       assert_equal(3, r.count(Author.query.join { volumes }))
       assert_equal(2, r.all(for a in Author.query, v in a.volumes.query do v.id end.limit(2)).size)
+    end
+  end
+
+  # Volumes 1 "a" (genres 2 "y", then 1 "x", the pair 1-1 twice), 2 "b"
+  # (none), 3 "c" (genre 1 "x").
+  def shelves(repo: Rotor::Repo) -> Void
+    library(repo)
+    ["x", "y", "z"].each { |n| repo.insert(Genre.new(name: n)) }
+    [[1, 2, 0], [1, 1, 1], [1, 1, 2], [3, 1, 0]].each { |p| repo.insert(VolumeGenre.new(volume_id: p[0], genre_id: p[1], position: p[2])) }
+  end
+
+  def test_has_many_through
+    with_repo do |repo|
+      shelves(repo)
+      vs = repo.all(Volume.order { id }.limit(3))
+      # Each genre once, however many join rows pair them, in the order
+      # of its key.
+      assert_equal(["x", "y"], repo.all(vs[0].genres.query.order { id }).map { |g| g.name })
+      assert_equal(["y"], repo.all(vs[0].genres.query.where { name > "x" }).map { |g| g.name })
+      r, c = counting(repo)
+      loaded = r.preload(vs) { genres }
+      assert_equal(1, c.count)
+      assert_equal([["x", "y"], Array[String].new, ["x"]], loaded.map { |v| v.genres.map { |g| g.name } })
+      # The join rows are a model's: written as any, seen by a fresh
+      # preload.
+      repo.insert(VolumeGenre.new(volume_id: 2, genre_id: 3))
+      repo.delete_all(VolumeGenre.where { volume_id == 1 && genre_id == 2 })
+      again = repo.preload(vs) { genres }
+      assert_equal([["x"], ["z"], ["x"]], again.map { |v| v.genres.map { |g| g.name } })
+      assert_equal([1, 2], repo.all(VolumeGenre.where { volume_id == 1 }.order { position }).map { |j| j.position })
+      # Nested, as any level.
+      authors = r.preload(repo.all(Author.order { id })) { nest(volumes) { genres } }
+      assert_equal(3, c.count)
+      assert_equal([["x"], ["z"]], authors[0].volumes.map { |v| v.genres.map { |g| g.name } })
+      assert_equal([["x"]], authors[2].volumes.map { |v| v.genres.map { |g| g.name } })
     end
   end
 end

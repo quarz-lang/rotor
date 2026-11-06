@@ -407,7 +407,13 @@ class Model
   private static def self.association[T <: Model](target: Type[T], a: Association, key: Symbol?) -> Void
     n = a.name
     fk = a.foreign_key
-    if a.kind == :has_many
+    if (j = a.through) && a.kind == :has_many
+      owner = type
+      doc "The #{target.name} models #{j.name}'s rows pair with this one: a read-only `Rotor::HasMany`, whose elements are there once preloaded (`Rotor::Repo#preload`)."
+      def_method(n) do -> HasMany[T]
+        HasMany[T].new(target, self.class.name, n, fk, key, Model.key_of(self, key), preloaded(n), [owner.as(Type[Object]), a])
+      end
+    elsif a.kind == :has_many
       doc "The #{target.name} models whose `#{fk}` is this one's key: a `Rotor::HasMany`, whose elements are there once preloaded (`Rotor::Repo#preload`)."
       def_method(n) do -> HasMany[T]
         HasMany[T].new(target, self.class.name, n, fk, key, Model.key_of(self, key), preloaded(n))

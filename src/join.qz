@@ -44,6 +44,9 @@ module Joins
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && t.row_of(recv) == i && source.model <= m.owner
       a = source.table.associations.find { |x| x.name == m.name && x.kind == :has_many } ||
         t.untranslatable("`#{m.owner.name}##{m.name}`, which is not a `has_many` association,", line)
+      if j = a.through
+        t.untranslatable("`#{m.owner.name}##{m.name}`, through #{j.name}, in a join (join #{j.name} itself)", line)
+      end
       key = source.table.primary_key || raise SchemaError.new("#{source.model.name} has no primary key, which `#{a.name}` needs")
       HasMany.foreign_key!(a.target, a.foreign_key, source.model.name, a.name)
       [a, key]
