@@ -483,6 +483,12 @@ class Query[T]
       _, e = Translator.body(expr, file)
       raise UntranslatableError.new("an order by a constant cannot be translated to SQL (#{file}:#{Translator.line_of(e)})")
     end
+    # (A key that can be NULL where Quarz has false would sort with the
+    # true ones, after them.)
+    if what == "order" && (null = kept.tri)
+      _, e = Translator.body(expr, file)
+      raise UntranslatableError.new(Translator.value_error(e, null, file))
+    end
     Binds.fill_sql(kept, captures)
   end
 
@@ -539,7 +545,7 @@ class Query[T]
         raise ArgumentError.new("an `update` of `#{name}` twice (#{file}:#{Translator.line_of(key)})")
       end
       seen = seen + [name]
-      v = t.sql(value)
+      v = t.operand(value)
       if v.known
         x = v.value
         if x.nil?

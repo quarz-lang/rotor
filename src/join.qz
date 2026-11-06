@@ -103,7 +103,7 @@ module Joins
         s = sources[n]
         sources = sources.take(n) + [Source.new(s.table, s.model, s.on + [bt.sql(body)], s.fetch, s.keep)] + sources.drop(n + 1)
       in :order
-        by = bt.sql(body)
+        by = bt.operand(body)
         t.untranslatable("an order by a constant", Translator.line_of(body)) if by.known
         # (Rebuilt for each outer row, it would be by a constant there.)
         if bt.reads(body)[n] == Array[Column].new

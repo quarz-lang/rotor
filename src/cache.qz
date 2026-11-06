@@ -104,7 +104,7 @@ module Binds
         else
           s.value
         end
-    Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind)
+    Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind, s.nulls, s.tri)
   end
 
   # The LIKE pattern of `s.name(v)` (`start_with?` and the others):

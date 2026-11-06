@@ -18,8 +18,13 @@ end
 # A translated expression: its pieces, its precedence (to parenthesize it
 # where it is an operand), and what the translator knows of it: the
 # column it is, or the value it has (`known`) when it is a literal or a
-# capture, and then (`bind`) the capture it is made from.
-data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil)
+# capture, and then (`bind`) the capture it is made from. `nulls` names
+# what makes it NULL where Quarz has nil (a nullable column, shown as
+# written), `tri` what makes it NULL where Quarz has false: a comparison,
+# `include?` or LIKE form of something that can be NULL, three-valued in
+# SQL. A `tri` expression is kept where NULL acts as false (a condition,
+# an operand of `&&`/`||`, a CASE WHEN's), and refused anywhere else.
+data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil, nulls: String? = nil, tri: String? = nil)
 
 # A block of a query's tree as the translator sees it: its parameters,
 # the table (an index among the query's) each one is a row of, or nil,
@@ -66,8 +71,13 @@ class Translator
   # What the translation looked at of the captures (shared with the
   # translators of the blocks inside).
   @guards: Guards
+  # The columns (a table's index and a name) known not to be NULL where
+  # the expression being translated is: by the left side of a `&&`
+  # (`!email.nil? && ...`), of a `||` (`email.nil? || ...`), or by an
+  # `if`'s condition.
+  var @non_null: Array[[Int, Symbol]]
 
-  def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope], @guards: Guards = Guards.new)
+  def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope], @guards: Guards = Guards.new, @non_null: Array[[Int, Symbol]] = [])
   end
 
   # The kinds of captured values the translation so far holds for: the
@@ -114,7 +124,7 @@ class Translator
   # This translator for a block inside the one it translates, whose
   # scope is `scope`, over `sources` (the tables a `for` has joined so
   # far).
-  def inner(sources: Array[Source], scope: Scope) -> Translator = Translator.new(sources, @captures, @file, @scopes + [scope], @guards)
+  def inner(sources: Array[Source], scope: Scope) -> Translator = Translator.new(sources, @captures, @file, @scopes + [scope], @guards, @non_null)
 
   # The table whose row `e` is (an index among the query's), `NONE`
   # for none.
@@ -146,14 +156,31 @@ class Translator
   def sql(e: Meta::Expr) -> Sql
     case e
     in Meta::Expr::Lit(value, line) then literal(value, line)
-    in Meta::Expr::Capture(index, _, line) then bound(Bind::Capture.new(index), line)
-    in Meta::Expr::And(l, r, _) then binary(sql(l), "AND", sql(r), AND, true)
-    in Meta::Expr::Or(l, r, _) then binary(sql(l), "OR", sql(r), OR, true)
-    in Meta::Expr::Not(x, _) then prefix("NOT", sql(x), NOT)
-    in Meta::Expr::If(c, t, f, _)
-      pieces = [Piece::Text.new("CASE WHEN ")] + sql(c).pieces + [Piece::Text.new(" THEN ")] + sql(t).pieces
-      pieces = pieces + [Piece::Text.new(" ELSE ")] + sql(f).pieces if f
-      node(pieces + [Piece::Text.new(" END")], ATOM)
+    in Meta::Expr::Capture(index, name, line)
+      b = bound(Bind::Capture.new(index), line)
+      b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, name.to_s) : b
+    in Meta::Expr::And(l, r, _) then logical(l, "AND", r, AND, facts(l, true))
+    in Meta::Expr::Or(l, r, _) then logical(l, "OR", r, OR, facts(l, false))
+    in Meta::Expr::Not(x, line)
+      o = sql(x)
+      if what = o.tri || o.nulls
+        raise UntranslatableError.new(negation_error(x, what, line))
+      end
+      prefix("NOT", o, NOT)
+    in Meta::Expr::If(c, t, f, line)
+      cond = sql(c)
+      # (A branch that is NULL where Quarz has false makes the `if` so,
+      # as an operand of `&&` does: kept as a condition, refused as a
+      # value.)
+      th = assuming(facts(c, true)) { sql(t) }
+      pieces = [Piece::Text.new("CASE WHEN ")] + cond.pieces + [Piece::Text.new(" THEN ")] + th.pieces
+      el = if f
+             x = assuming(facts(c, false)) { sql(f) }
+             pieces = pieces + [Piece::Text.new(" ELSE ")] + x.pieces
+             x
+           end
+      nulls = th.nulls || (el ? el.nulls : Translator.show(e))
+      Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
     in Meta::Expr::Call(recv, m, args, block, line) then call(recv, m, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
     in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
@@ -161,6 +188,96 @@ class Translator
     in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
     in Meta::Expr::Block(_, _, line) then untranslatable("a block", line)
+    end
+  end
+
+  # `e` as SQL where it is a value, not a condition: an `update`'s value,
+  # an order's key, an operand. A comparison that can be NULL
+  # (`Sql#tri`) is refused: NULL is not false there.
+  def operand(e: Meta::Expr) -> Sql
+    s = sql(e)
+    if what = s.tri
+      raise UntranslatableError.new(Translator.value_error(e, what, @file))
+    end
+    s
+  end
+
+  # The error for `e`, which is NULL where `what` is, used as a value.
+  def self.value_error(e: Meta::Expr, what: String, file: String) -> String
+    advice = column_named?(e, what) ? "compare in Quarz (select the column), or test `#{what}.nil?` explicitly" : nil_advice(what)
+    "`#{show(e)}` as a value is NULL, not false, in SQL when `#{what}` is NULL (#{file}:#{line_of(e)}): #{advice}"
+  end
+
+  # What to do when what can be NULL is not a column, which `nil?`
+  # tells nothing of in SQL: a nil captured or written.
+  def self.nil_advice(what: String) -> String
+    return "write the case of nil out instead of `nil`" if what == "nil"
+    "decide what a nil `#{what}` means in Quarz, before the query is built"
+  end
+
+  # Whether `what` is shown in `e` as a call of a getter on a row or
+  # `self`: a column (not a capture, nor a captured model's value).
+  def self.column_named?(e: Meta::Expr, what: String) -> Bool
+    case e
+    in Meta::Expr::Call(recv, _, args, _, _)
+      case recv
+      in Meta::Expr::SelfRef(_, _) | Meta::Expr::Arg(_, _, _) then return true if args.empty? && show(e) == what
+      else nil
+      end
+      (recv ? [recv.as(Meta::Expr)] : Array[Meta::Expr].new).concat(args).any? { |x| column_named?(x, what) }
+    in Meta::Expr::And(l, r, _) then column_named?(l, what) || column_named?(r, what)
+    in Meta::Expr::Or(l, r, _) then column_named?(l, what) || column_named?(r, what)
+    in Meta::Expr::Not(x, _) then column_named?(x, what)
+    in Meta::Expr::If(c, t, f, _) then column_named?(c, what) || column_named?(t, what) || (f ? column_named?(f.as(Meta::Expr), what) : false)
+    in Meta::Expr::ArrayLit(xs, _) then xs.any? { |x| column_named?(x, what) }
+    else false
+    end
+  end
+
+  # `e` as Quarz source, for messages (a row's receiver left implicit).
+  def self.show(e: Meta::Expr) -> String
+    case e
+    in Meta::Expr::Lit(value, _) then value.inspect
+    in Meta::Expr::Capture(_, name, _) then name.to_s
+    in Meta::Expr::Arg(name, _, _) then name.to_s
+    in Meta::Expr::SelfRef(_, _) then "self"
+    in Meta::Expr::Call(recv, m, args, block, _)
+      name = m.name.to_s
+      tail = block ? " { ... }" : ""
+      if recv && args.size == 1 && (COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name))
+        return "#{shown_operand(recv)} #{name} #{shown_operand(args[0])}"
+      end
+      return "-#{shown_operand(recv)}" if recv && name == "-@" && args.empty?
+      head = if m.singleton
+               "#{m.owner.name}.#{name}"
+             else
+               case recv
+               in Meta::Expr::SelfRef(_, _) then name
+               in Meta::Expr => x then "#{shown_operand(x)}.#{name}"
+               else name
+               end
+             end
+      list = args.empty? ? "" : "(#{args.map { |x| show(x) }.join(", ")})"
+      "#{head}#{list}#{tail}"
+    in Meta::Expr::And(l, r, _) then "#{shown_operand(l)} && #{shown_operand(r)}"
+    in Meta::Expr::Or(l, r, _) then "#{shown_operand(l)} || #{shown_operand(r)}"
+    in Meta::Expr::Not(x, _) then "!#{shown_operand(x)}"
+    in Meta::Expr::If(c, t, f, _)
+      f ? "#{shown_operand(c)} ? #{shown_operand(t)} : #{shown_operand(f)}" : "if #{show(c)} then #{show(t)} end"
+    in Meta::Expr::ArrayLit(xs, _) then "[#{xs.map { |x| show(x) }.join(", ")}]"
+    in Meta::Expr::HashLit(_, _) then "{...}"
+    in Meta::Expr::Interp(_, _) then "\"...\""
+    in Meta::Expr::Block(_, _, _) then "{ ... }"
+    end
+  end
+
+  # `show(e)`, parenthesized when it is an operator's.
+  def self.shown_operand(e: Meta::Expr) -> String
+    text = show(e)
+    case e
+    in Meta::Expr::And(_, _, _) | Meta::Expr::Or(_, _, _) | Meta::Expr::If(_, _, _, _) then "(#{text})"
+    in Meta::Expr::Call(Meta::Expr, m, [_], nil, _) if COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name) then "(#{text})"
+    else text
     end
   end
 
@@ -345,13 +462,97 @@ class Translator
     out
   end
 
+  # `l && r` or `l || r`, `r` translated where `known` holds (what `l`
+  # being true, or false, tells of the columns). NULL where either side
+  # is: as false, under `&&` and `||` alike (a nullable `Bool` column's
+  # nil, falsy in Quarz, as well).
+  private def logical(l: Meta::Expr, op: String, r: Meta::Expr, prec: Int, known: Array[[Int, Symbol]]) -> Sql
+    a = sql(l)
+    b = assuming(known) { sql(r) }
+    three(binary(a, op, b, prec, true), a.tri || b.tri || a.nulls || b.nulls)
+  end
+
+  # The block's value, translated with the columns of `known` taken for
+  # non-null as well.
+  private def assuming(known: Array[[Int, Symbol]], &f: () -> Sql) -> Sql
+    return f.call if known.empty?
+    saved = @non_null
+    @non_null = @non_null + known
+    begin
+      f.call
+    ensure
+      @non_null = saved
+    end
+  end
+
+  # The columns `e` being `truth` makes non-null: `!c.nil?`, `c != nil`
+  # and `&&` of them when true, `c.nil?`, `c == nil` and `||` of them
+  # when false.
+  private def facts(e: Meta::Expr, truth: Bool) -> Array[[Int, Symbol]]
+    out: Array[[Int, Symbol]] = []
+    case e
+    in Meta::Expr::Not(x, _) then return facts(x, !truth)
+    in Meta::Expr::And(l, r, _) then return truth ? facts(l, true) + facts(r, true) : out
+    in Meta::Expr::Or(l, r, _) then return truth ? out : facts(l, false) + facts(r, false)
+    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if m.name == :nil? && !m.singleton
+      return truth ? out : nullable_column(recv)
+    in Meta::Expr::Call(Meta::Expr => recv, m, [arg], nil, _) if (m.name == :== || m.name == :!=) && !m.singleton
+      return out unless (m.name == :!=) == truth
+      return nullable_column(recv) if nil_literal?(arg)
+      return nullable_column(arg) if nil_literal?(recv)
+      out
+    else
+      out
+    end
+  end
+
+  # The table and name of the column `e` is, if it is one.
+  private def nullable_column(e: Meta::Expr) -> Array[[Int, Symbol]]
+    out: Array[[Int, Symbol]] = []
+    if found = column_of(e)
+      out = out + [[found[0], found[1].name]]
+    end
+    out
+  end
+
+  private def nil_literal?(e: Meta::Expr) -> Bool
+    case e
+    in Meta::Expr::Lit(nil, _) then true
+    else false
+    end
+  end
+
+  # `s`, three-valued (`Sql#tri`) when `what` is not nil.
+  private def three(s: Sql, what: String?) -> Sql = Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, s.nulls, what)
+
+  # `s`, NULL where one of `operands` is.
+  private def with_nulls(s: Sql, operands: Array[Sql]) -> Sql
+    what = operands.find { |x| x.nulls }&.nulls
+    Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, what, s.tri)
+  end
+
+  # The error for `!x`, where `what` can be NULL.
+  private def negation_error(x: Meta::Expr, what: String, line: Int) -> String
+    column = Translator.column_named?(x, what)
+    test = column ? "test `#{what}.nil?` explicitly" : Translator.nil_advice(what)
+    advice = case x
+             in Meta::Expr::Call(Meta::Expr => l, m, [r], nil, _) if m.name == :== && !m.singleton
+               "write `#{Translator.shown_operand(l)} != #{Translator.shown_operand(r)}` (Quarz's meaning, `IS DISTINCT FROM`), or #{test}"
+             in Meta::Expr::Call(Meta::Expr => l, m, [r], nil, _) if m.name == :!= && !m.singleton
+               "write `#{Translator.shown_operand(l)} == #{Translator.shown_operand(r)}`, or #{test}"
+             else
+               column ? "#{test} (`#{what}.nil? || !#{Translator.shown_operand(x)}`)" : test
+             end
+    "`!#{Translator.shown_operand(x)}` is three-valued in SQL when `#{what}` can be NULL (#{@file}:#{line}): #{advice}"
+  end
+
   private def node(pieces: Array[Piece], prec: Int) -> Sql = Sql.new(pieces, prec, nil, nil, false)
 
   private def text(s: String, prec: Int) -> Sql = node([Piece::Text.new(s)], prec)
 
   private def literal(value: Object, line: Int) -> Sql
     case value
-    in nil then Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, true)
+    in nil then Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, true, nil, "nil")
     in true then Sql.new([Piece::Text.new("TRUE")], ATOM, nil, true, true)
     in false then Sql.new([Piece::Text.new("FALSE")], ATOM, nil, false, true)
     in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true)
@@ -420,8 +621,13 @@ class Translator
       untranslatable("the function #{label}", line)
     end
     r = recv.as(Meta::Expr)
-    if found = column_of(Meta::Expr::Call.new(r, m, args, block, line))
-      return Sql.new([Piece::Column.new(found[0], found[1].name)], ATOM, found[1], nil, false)
+    whole = Meta::Expr::Call.new(r, m, args, block, line)
+    if found = column_of(whole)
+      c = found[1]
+      if c.null && @non_null.any? { |x| x[0] == found[0] && x[1] == c.name }
+        c = Column.new(c.name, c.sql, c.type, false, c.primary, c.default)
+      end
+      return Sql.new([Piece::Column.new(found[0], c.name)], ATOM, c, nil, false, nil, c.null ? Translator.show(whole) : nil)
     end
     if v = captured(r, m, args, block, line)
       return v
@@ -433,8 +639,8 @@ class Translator
     untranslatable(label, line) unless !m.singleton && primitive?(m.owner)
     if args.size == 0
       case name
-      in "nil?" then return postfix(sql(r), "IS NULL", IS)
-      in "-@" then return prefix("-", sql(r), MUL + 1)
+      in "nil?" then return postfix(operand(r), "IS NULL", IS)
+      in "-@" then return with_nulls(prefix("-", operand(r), MUL + 1), [operand(r)])
       else untranslatable(label, line)
       end
     end
@@ -444,30 +650,30 @@ class Translator
       return in_list(r, a, line)
     end
     if m.owner == String && (name == "include?" || name == "start_with?" || name == "end_with?")
-      return like(sql(r), a, name, label, line)
+      return like(operand(r), a, name, label, line)
     end
     if sym = COMPARISONS[m.name]?
       untranslatable(label, line) if m.owner == Array
       return compare(r, sym, a)
     end
     if op = ARITHMETIC[m.name]?
-      return binary(sql(r), "||", sql(a), OTHER, true) if name == "+" && m.owner == String
+      l = operand(r)
+      rr = operand(a)
+      return with_nulls(binary(l, "||", rr, OTHER, true), [l, rr]) if name == "+" && m.owner == String
       untranslatable(label, line) unless m.owner == Int || m.owner == Float
-      l = sql(r)
-      rr = sql(a)
       if m.owner == Int && name == "/"
         # Quarz's `Int#/` floors; PostgreSQL's truncates.
-        return node([Piece::Text.new("floor(")] + wrap(l, ATOM) + [Piece::Text.new("::numeric / ")] + wrap(rr, MUL + 1) + [Piece::Text.new(")::bigint")], ATOM)
+        return with_nulls(node([Piece::Text.new("floor(")] + wrap(l, ATOM) + [Piece::Text.new("::numeric / ")] + wrap(rr, MUL + 1) + [Piece::Text.new(")::bigint")], ATOM), [l, rr])
       end
       if name == "%"
         untranslatable(label, line) unless m.owner == Int
         # Quarz's `Int#%` takes the divisor's sign; PostgreSQL's the
         # dividend's.
         inner = binary(binary(l, "%", rr, MUL, true), "+", rr, ADD, true)
-        return binary(inner, "%", rr, MUL, true)
+        return with_nulls(binary(inner, "%", rr, MUL, true), [l, rr])
       end
       prec = name == "+" || name == "-" ? ADD : MUL
-      return binary(l, op, rr, prec, true)
+      return with_nulls(binary(l, op, rr, prec, true), [l, rr])
     end
     untranslatable(label, line)
   end
@@ -484,7 +690,8 @@ class Translator
       in Model => model
         return nil unless model.class <= m.owner
         return nil unless model.table_info.columns.any? { |c| c.name == m.name }
-        bound(Bind::Read.new(index, m.name), line)
+        b = bound(Bind::Read.new(index, m.name), line)
+        b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, Translator.show(Meta::Expr::Call.new(recv, m, args, block, line))) : b
       else
         nil
       end
@@ -498,8 +705,8 @@ class Translator
   # columns or expressions, one of which admits NULL, `IS NOT DISTINCT
   # FROM`, as Quarz's `==` takes nil for equal to nil.
   private def compare(le: Meta::Expr, op: String, re: Meta::Expr) -> Sql
-    l = sql(le)
-    r = sql(re)
+    l = operand(le)
+    r = operand(re)
     l = coerce(l, r.column)
     r = coerce(r, l.column)
     if op == "=" || op == "<>"
@@ -512,14 +719,15 @@ class Translator
       end
       # (`<>` uses no index either: Quarz's meaning, nil differing from
       # a value.)
-      if !eq && (null_column?(l) || null_column?(r))
+      # (Not only a column: an `if` can be NULL as well.)
+      if !eq && (l.nulls || r.nulls)
         return binary(l, "IS DISTINCT FROM", r, IS, false)
       end
       if !l.known && !r.known && (nullable?(l) || nullable?(r))
         return binary(l, eq ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM", r, IS, false)
       end
     end
-    binary(l, op, r, CMP, false)
+    three(binary(l, op, r, CMP, false), l.nulls || r.nulls)
   end
 
   # A value compared with a `Float` column, as a `Float`.
@@ -532,8 +740,6 @@ class Translator
     end
   end
 
-  private def null_column?(s: Sql) -> Bool = s.column&.null == true
-
   private def nullable?(s: Sql) -> Bool
     c = s.column
     c.nil? || c.null
@@ -543,7 +749,7 @@ class Translator
   # captured array), `FALSE` for none.
   private def in_list(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
     items = case arr
-            in Meta::Expr::ArrayLit(es, _) then es.map { |e| sql(e) }
+            in Meta::Expr::ArrayLit(es, _) then es.map { |e| operand(e) }
             in Meta::Expr::Capture(index, _, l)
               case v = look(Bind::Capture.new(index))
               in Array => xs then (0...xs.size).map { |j| bound(Bind::Item.new(index, j), l) }
@@ -554,16 +760,36 @@ class Translator
     # (A nil among them is `IS NULL`: `IN` never finds a NULL.)
     has_nil = items.any? { |s| s.known && s.value.nil? }
     items = items.reject { |s| s.known && s.value.nil? }
-    target = sql(x)
+    target = operand(x)
+    # (A nil target: found where an item is nil.)
+    if target.known && target.value.nil?
+      return text("TRUE", ATOM) if has_nil
+      nils = items.select { |s| !s.known && s.nulls }
+      return text("FALSE", ATOM) if nils.empty?
+      out = postfix(nils[0], "IS NULL", IS)
+      nils.drop(1).each { |s| out = binary(out, "OR", postfix(s, "IS NULL", IS), OR, true) }
+      return out
+    end
+    # (A target and an item that can both be NULL: equal when both are,
+    # which `IN` does not find.)
+    if target.nulls && items.any? { |s| !s.known && s.nulls }
+      out = binary(target, "IS NOT DISTINCT FROM", items[0], IS, false)
+      items.drop(1).each { |s| out = binary(out, "OR", binary(target, "IS NOT DISTINCT FROM", s, IS, false), OR, true) }
+      return has_nil ? binary(out, "OR", postfix(target, "IS NULL", IS), OR, true) : out
+    end
+    # (NULL where neither is nil: a NULL target, or a NULL item the
+    # target is not found among.)
+    maybe = items.find { |s| s.nulls }&.nulls
+    maybe = target.nulls || maybe unless has_nil
     return has_nil ? postfix(target, "IS NULL", IS) : text("FALSE", ATOM) if items.empty?
     pieces = wrap(target, LIKE + 1) + [Piece::Text.new(" IN (")]
     items.each_with_index do |s, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + s.pieces
     end
-    found = node(pieces + [Piece::Text.new(")")], LIKE)
+    found = three(node(pieces + [Piece::Text.new(")")], LIKE), maybe)
     return found unless has_nil
-    binary(found, "OR", postfix(target, "IS NULL", IS), OR, true)
+    three(binary(found, "OR", postfix(target, "IS NULL", IS), OR, true), maybe)
   end
 
   # `s.include?(v)`, `start_with?`, `end_with?`: `LIKE` with `v` escaped.
@@ -579,16 +805,28 @@ class Translator
             else
               Piece::Param.new(pattern)
             end
-    binary(s, "LIKE", Sql.new([piece], ATOM, nil, pattern, true), LIKE, false)
+    three(binary(s, "LIKE", Sql.new([piece], ATOM, nil, pattern, true), LIKE, false), s.nulls)
   end
 
   # `Rotor::SQL.like(s, pattern)` and the others.
   private def function(name: String, args: Array[Meta::Expr], label: String, line: Int) -> Sql
     case [name, args.size]
-    in ["like", 2] then binary(sql(args[0]), "LIKE", sql(args[1]), LIKE, false)
-    in ["ilike", 2] then binary(sql(args[0]), "ILIKE", sql(args[1]), LIKE, false)
-    in ["lower", 1] then node([Piece::Text.new("lower(")] + sql(args[0]).pieces + [Piece::Text.new(")")], ATOM)
-    in ["upper", 1] then node([Piece::Text.new("upper(")] + sql(args[0]).pieces + [Piece::Text.new(")")], ATOM)
+    in ["like", 2] | ["ilike", 2]
+      a = operand(args[0])
+      b = operand(args[1])
+      three(binary(a, name.upcase, b, LIKE, false), a.nulls || b.nulls)
+    in ["not_nil", 1]
+      a = operand(args[0])
+      if a.known && a.value.nil?
+        raise ArgumentError.new("Rotor::SQL.not_nil of nil (#{@file}:#{line})")
+      end
+      if what = a.nulls
+        raise UntranslatableError.new("`Rotor::SQL.not_nil(#{Translator.show(args[0])})` where `#{what}` can be NULL (#{@file}:#{line}): write `!#{what}.nil? &&` before it")
+      end
+      a
+    in ["lower", 1] | ["upper", 1]
+      a = operand(args[0])
+      with_nulls(node([Piece::Text.new("#{name}(")] + a.pieces + [Piece::Text.new(")")], ATOM), [a])
     else untranslatable(label, line)
     end
   end
