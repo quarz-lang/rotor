@@ -262,6 +262,28 @@ class RepoTest < Test::Case
       assert_equal(0, repo.count(Member.where { |_m| some.nil? }))
       assert_equal(3, repo.count(Member.where { |_m| [no, "b"].include?(no) }))
       assert_equal(3, repo.count(Member.where { email == (admin ? "a" : no) }))
+      # `include?` as `= ANY($1)`, one array parameter whatever its
+      # length; nil items (`IS NULL`) and the empty array.
+      ids = (1..70000).to_a
+      assert_equal(3, repo.count(Member.where { ids.include?(id) }))
+      none: Array[Int] = []
+      assert_equal(0, repo.count(Member.where { none.include?(id) }))
+      assert_equal(3, repo.count(Member.where { !none.include?(id) }))
+      es: Array[String?] = [nil, "x"]
+      assert_equal(3, repo.count(Member.where { es.include?(email) }))
+      xs: Array[String?] = ["x"]
+      assert_equal(0, repo.count(Member.where { xs.include?(email) }))
+      fs = [20.0, 30.5]
+      assert_equal(1, repo.count(Member.where { fs.include?(age) }))
+      mixed: Array[Int | Float] = [30, 0.5]
+      assert_equal(1, repo.count(Member.where { mixed.include?(age) }))
+      assert_equal(2, repo.count(Member.where { [20, 40].include?(age) }))
+      nos: Array[String] = []
+      assert_equal(3, repo.count(Member.where { !nos.include?(email) }))
+      # An array is not a key.
+      assert_raise(ArgumentError) { repo.get(Member, [1, 2]) }
+      names = ["Ann", "Cy"]
+      assert_equal(["Ann", "Cy"], repo.all(Member.where { names.include?(name) }.order { id }).map { |m| m.name })
       big = 3000000000
       mid = 2000000000
       assert_equal(3, repo.count(Member.where { age < big + 1 }))

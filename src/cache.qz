@@ -6,14 +6,18 @@ enum Bind
   variant Capture(index: Int)
   variant Item(index: Int, item: Int)
   variant Read(index: Int, column: Symbol)
+  # A captured array's items but its nils, as one parameter (as Floats
+  # when `to_float`: an array of `Int`s and `Float`s).
+  variant Items(index: Int, to_float: Bool)
   variant ToFloat(of: Bind)
   # (`name`: `"start_with?"`, `"end_with?"` or `"include?"`.)
   variant Like(of: Bind, name: String)
 end
 
 # What a translation looked at of a captured value: its class (nil for
-# nil) and, for an array, its size (-1 otherwise).
-data Kind = (cls: Type[Object]?, size: Int)
+# nil) and, for an array, its items' class (`Binds.item_class`) and
+# whether it holds a nil. Not its length: an array is one parameter.
+data Kind = (cls: Type[Object]?, item: Type[Object]? = nil, nils: Bool = false)
 
 # A captured value's kind, as a translation saw it: the same tree with
 # values of the same kinds there translates the same.
@@ -57,6 +61,20 @@ module Binds
       in Model => m then m.read(column)
       else nil
       end
+    in Bind::Items(i, to_float)
+      case v = captures[i]
+      in Array => xs
+        out: Array[Object?] = []
+        xs.each do |x|
+          case x
+          in nil then nil
+          in Int => n then out = out.push(to_float ? n.to_f : n)
+          else out = out.push(x)
+          end
+        end
+        out
+      else nil
+      end
     in Bind::ToFloat(x)
       case v = value(x, captures)
       in Int => n then n.to_f
@@ -73,10 +91,27 @@ module Binds
   # The kind of `v`.
   def self.kind(v: Object?) -> Kind
     case v
-    in nil then Kind.new(nil, -1)
-    in Array => xs then Kind.new(Array, xs.size)
-    else Kind.new(v.class, -1)
+    in nil then Kind.new(nil)
+    in Array => xs then Kind.new(Array, item_class(xs), xs.any? { |x| x.nil? })
+    else Kind.new(v.class)
     end
+  end
+
+  # The class of an array's items but its nils: nil for none, `Float`
+  # for `Int`s and `Float`s, `Object` for other mixtures.
+  def self.item_class(xs: Array[Object?]) -> Type[Object]?
+    found: Type[Object]? = nil
+    xs.each do |x|
+      next if x.nil?
+      c = x.class
+      if f = found
+        next if f == c
+        found = (f == Float || f == Int) && (c == Float || c == Int) ? Float : Object
+      else
+        found = c
+      end
+    end
+    found
   end
 
   # Whether the kinds `guards` saw are those of `captures`.
@@ -90,6 +125,7 @@ module Binds
     return pieces unless pieces.any? { |p| p.is_a?(Piece::Bound) }
     pieces.map do |p|
       case p
+      in Piece::Bound(Bind::Items => b) then Piece::Param.new(items(value(b, captures).as(Array[Object?])))
       in Piece::Bound(b) then Piece::Param.new(parameter(value(b, captures)))
       else p
       end
@@ -105,6 +141,38 @@ module Binds
           s.value
         end
     Sql.new(fill(s.pieces, captures), s.prec, s.column, v, s.known, s.bind, s.nulls, s.tri)
+  end
+
+  # An array of one class's values (no nils) as a parameter: pg sends it
+  # as one PostgreSQL array.
+  def self.items(xs: Array[Object?]) -> Items
+    if item_class(xs).nil?
+      Array[Int].new
+    else
+      first = xs[0]
+      case first
+      in Int then return xs.map { |x| x.as(Int) }
+      in Float
+        ys: Array[Float] = xs.map { |x| x.as(Float) }
+        return ys
+      in String
+        ys: Array[String] = xs.map { |x| x.as(String) }
+        return ys
+      in Bool
+        ys: Array[Bool] = xs.map { |x| x.as(Bool) }
+        return ys
+      in Time
+        ys: Array[Time] = xs.map { |x| x.as(Time) }
+        return ys
+      in Bytes
+        ys: Array[Bytes] = xs.map { |x| x.as(Bytes) }
+        return ys
+      in Symbol
+        ys: Array[Symbol] = xs.map { |x| x.as(Symbol) }
+        return ys
+      else raise ArgumentError.new("an array of #{first.class.name} as a parameter")
+      end
+    end
   end
 
   # The LIKE pattern of `s.name(v)` (`start_with?` and the others):
@@ -156,9 +224,10 @@ data Cached[V] = (guards: Array[Guard], value: V)
 # whose block was translated over the same models, with captures of the
 # same kinds (`Guard`), takes the translation kept and fills in its
 # parameters. At most `LIMIT` entries per key, never evicted: the kinds
-# are not a finite set (a captured array's length is part of the SQL),
-# so a kind beyond them is translated on each build, as before the
-# cache, and not kept.
+# of several captures multiply (nil or not, a class, an array's items'
+# class; not an array's length, which the SQL does not depend on), so a
+# kind beyond them is translated on each build, as before the cache, and
+# not kept.
 module Cache
   # The entries a key keeps at most.
   LIMIT = 8

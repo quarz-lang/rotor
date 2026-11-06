@@ -88,7 +88,7 @@ class Repo
   end
 
   # The models with the associations the block names preloaded: one
-  # query per association and level, `WHERE key IN (...)`, for all the
+  # query per association and level, `WHERE key = ANY($1)`, for all the
   # models at once. The block names them as the getters `table`
   # generates, so that a misspelling does not compile: `{ posts }`,
   # `{ [posts, account] }`, and those of their models with `nest`

@@ -109,21 +109,16 @@ class Query[T]
     copy(wheres: @wheres + [s])
   end
 
-  # The rows whose column `name` is one of `values`: `"name" IN ($1,
-  # ...)`, FALSE for none (a preload's query).
+  # The rows whose column `name` is one of `values`: `"name" =
+  # ANY($1)`, the values one array parameter, whatever their number (a
+  # preload's query).
   def where_in(name: Symbol, values: Array[Value]) -> Query[T]
     rows!("where_in")
     single!("where_in")
     c = table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{table.name}` has no column `#{name}`")
-    if values.empty?
-      return copy(wheres: @wheres + [Sql.new([Piece::Text.new("FALSE")], Translator::ATOM, nil, false, true)])
-    end
-    pieces: Array[Piece] = [Piece::Column.new(0, c.name), Piece::Text.new(" IN (")]
-    values.each_with_index do |v, i|
-      pieces = pieces + [Piece::Text.new(", ")] if i > 0
-      pieces = pieces + [Piece::Param.new(v)]
-    end
-    copy(wheres: @wheres + [Sql.new(pieces + [Piece::Text.new(")")], Translator::LIKE, nil, nil, false)])
+    xs: Array[Object?] = values.map { |v| v.as(Object) }
+    pieces: Array[Piece] = [Piece::Column.new(0, c.name), Piece::Text.new(" = ANY("), Piece::Param.new(Binds.items(xs)), Piece::Text.new(")")]
+    copy(wheres: @wheres + [Sql.new(pieces, Translator::CMP, nil, nil, false)])
   end
 
   # Ordered by the column `name` too (nil: unchanged): a preload's query.

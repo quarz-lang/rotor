@@ -286,8 +286,8 @@ class ModelTest < Test::Case
   end
 
   def test_preload_queries_and_refusals
-    sql(Post.query.where_in(:user_id, [1, 2]), "SELECT \"id\", \"user_id\" FROM \"posts\" WHERE \"user_id\" IN ($1, $2)", [1, 2])
-    sql(Post.query.where_in(:user_id, Array[Rotor::Value].new), "SELECT \"id\", \"user_id\" FROM \"posts\" WHERE FALSE", [])
+    sql(Post.query.where_in(:user_id, [1, 2]), "SELECT \"id\", \"user_id\" FROM \"posts\" WHERE \"user_id\" = ANY($1)", [[1, 2]])
+    sql(Post.query.where_in(:user_id, Array[Rotor::Value].new), "SELECT \"id\", \"user_id\" FROM \"posts\" WHERE \"user_id\" = ANY($1)", [Array[Int].new])
     e = assert_raise(Rotor::UntranslatableError) { User.query.preload { name } }
     assert_match(/`name` is not an association of User/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { User.query.preload { posts.size } }

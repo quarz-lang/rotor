@@ -89,7 +89,7 @@ class QueryTest < Test::Case
     check(Person.where { email != f }, "#{COLS} WHERE \"email\" IS DISTINCT FROM $1", ["a@b"])
     check(Person.where { name != "x" }, "#{COLS} WHERE \"name\" <> $1", ["x"])
     some = [nil, "a"]
-    check(Person.where { some.include?(email) }, "#{COLS} WHERE \"email\" IN ($1) OR \"email\" IS NULL", ["a"])
+    check(Person.where { some.include?(email) }, "#{COLS} WHERE \"email\" = ANY($1) OR \"email\" IS NULL", [["a"]])
     only_nil: Array[String?] = [nil]
     check(Person.where { only_nil.include?(email) }, "#{COLS} WHERE \"email\" IS NULL", [])
     # Two columns, one nullable: Quarz's `==` takes nil for equal to nil.
@@ -238,10 +238,33 @@ class QueryTest < Test::Case
   def test_in_list_and_like
     ids = [1, 2, 3]
     none: Array[Int] = []
-    check(Person.where { ids.include?(id) }, "#{COLS} WHERE \"id\" IN ($1, $2, $3)", [1, 2, 3])
-    check(Person.where { [4, 5].include?(id) }, "#{COLS} WHERE \"id\" IN (4, 5)", [])
-    check(Person.where { none.include?(id) }, "#{COLS} WHERE FALSE", [])
-    check(Person.where { !none.include?(id) }, "#{COLS} WHERE NOT FALSE", [])
+    # One array parameter, whatever the length (a literal of literals
+    # too); the empty array is `{}`, which `= ANY` finds nothing in.
+    check(Person.where { ids.include?(id) }, "#{COLS} WHERE \"id\" = ANY($1)", [[1, 2, 3]])
+    check(Person.where { [4, 5].include?(id) }, "#{COLS} WHERE \"id\" = ANY($1)", [[4, 5]])
+    check(Person.where { none.include?(id) }, "#{COLS} WHERE \"id\" = ANY($1)", [Array[Int].new])
+    check(Person.where { !none.include?(id) }, "#{COLS} WHERE NOT \"id\" = ANY($1)", [Array[Int].new])
+    # A nil item is removed, and `IS NULL` asked (`= ANY` finds no NULL).
+    ns: Array[String?] = ["a", nil, "b"]
+    check(Person.where { ns.include?(email) }, "#{COLS} WHERE \"email\" = ANY($1) OR \"email\" IS NULL", [["a", "b"]])
+    only: Array[String?] = [nil]
+    check(Person.where { only.include?(email) }, "#{COLS} WHERE \"email\" IS NULL", [])
+    # Floats beside a column that is not a `Float`'s: cast; `Int`s and
+    # `Float`s together: `Float`s.
+    fs = [1.5, 2.5]
+    check(Person.where { fs.include?(age) }, "#{COLS} WHERE \"age\" = ANY($1::double precision[])", [[1.5, 2.5]])
+    check(Person.where { fs.include?(score) }, "#{COLS} WHERE \"score\" = ANY($1)", [[1.5, 2.5]])
+    mixed: Array[Int | Float] = [1, 2.5]
+    check(Person.where { mixed.include?(score) }, "#{COLS} WHERE \"score\" = ANY($1)", [[1.0, 2.5]])
+    # `!` over the empty array is two-valued: found nowhere, NULL or not.
+    nos: Array[String] = []
+    check(Person.where { !nos.include?(email) }, "#{COLS} WHERE NOT \"email\" = ANY($1)", [Array[Int].new])
+    # An array of a class no parameter is.
+    objs: Array[Int | Summary] = [Summary.new(1, "a")]
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { objs.include?(id) } }
+    assert_match(/\A`include\?` on an array of Summary cannot be translated to SQL/, e.message)
+    # A literal with other than literals: an `IN` list.
+    check(Person.where { [age, 3].include?(id) }, "#{COLS} WHERE \"id\" IN (\"age\", 3)", [])
     check(Person.where { name.start_with?("A_") }, "#{COLS} WHERE \"name\" LIKE $1", ["A\\_%"])
     check(Person.where { name.end_with?("%") }, "#{COLS} WHERE \"name\" LIKE $1", ["%\\%"])
     check(Person.where { name.start_with?("a\\") }, "#{COLS} WHERE \"name\" LIKE $1", ["a\\\\%"])
@@ -286,6 +309,8 @@ class QueryTest < Test::Case
     hi = 9
     check(Person.where { |_p| lo < hi }, "#{COLS} WHERE $1::bigint < $2::bigint", [10, 9])
     check(Person.where { |_p| [hi].include?(lo) }, "#{COLS} WHERE $1::bigint IN ($2::bigint)", [10, 9])
+    his = [hi]
+    check(Person.where { |_p| his.include?(lo) }, "#{COLS} WHERE $1::bigint = ANY($2)", [10, [9]])
     # Under `IS NULL` (a nil as text).
     xi: Int? = 3
     xn: Int? = nil
@@ -294,7 +319,7 @@ class QueryTest < Test::Case
     # An `Int` beside an `Int` literal, which is an `integer`.
     big = 3000000000
     check(Person.where { age < big + 1 }, "#{COLS} WHERE \"age\" < $1::bigint + 1", [big])
-    check(Person.where { |_p| [1, 2].include?(big) }, "#{COLS} WHERE $1::bigint IN (1, 2)", [big])
+    check(Person.where { |_p| [1, 2].include?(big) }, "#{COLS} WHERE $1::bigint = ANY($2)", [big, [1, 2]])
     # An `if` nil either way is NULL (a `CASE` of NULLs would be text),
     # not a known nil: an order by it is the `CASE`'s, and a message
     # names the capture.
