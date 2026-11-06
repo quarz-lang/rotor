@@ -546,10 +546,7 @@ class Translator
             in Meta::Expr::ArrayLit(es, _) then es.map { |e| sql(e) }
             in Meta::Expr::Capture(index, _, l)
               case v = look(Bind::Capture.new(index))
-              in Array => xs
-                out: Array[Sql] = []
-                xs.each_with_index { |_, j| out = out + [bound(Bind::Item.new(index, j), l)] }
-                out
+              in Array => xs then (0...xs.size).map { |j| bound(Bind::Item.new(index, j), l) }
               else untranslatable("`include?` on a #{v.class.name}", l)
               end
             else untranslatable("`Array#include?` on an array SQL does not have", line)
