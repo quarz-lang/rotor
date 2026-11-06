@@ -3,12 +3,9 @@
 data Preload = (name: Symbol, nested: Array[Preload])
 
 # Preloading: reading a preload's block, and loading what it names with
-# one query per association and level (`WHERE key IN (...)`).
+# one query per association and level (`WHERE key = ANY($1)`, the keys
+# one array parameter).
 module Preloads
-  # PostgreSQL's limit of parameters in a statement: a longer list of
-  # keys is queried in chunks.
-  MAX_PARAMS = 65535
-
   # The associations the block `expr` of a preload names, of a model of
   # table `info`.
   def self.parse(info: TableInfo, model: String, expr: Meta::Expr, file: String) -> Array[Preload]
@@ -150,13 +147,11 @@ module Preloads
     out
   end
 
-  # The rows of `target` whose `column` is one of `keys`, in chunks, in
-  # the order of `target`'s primary key (when it has one).
+  # The rows of `target` whose `column` is one of `keys` (one array
+  # parameter), in the order of `target`'s primary key (when it has one);
+  # no query for no keys.
   private def self.fetch(repo: Repo, target: Type[Model], column: Symbol, keys: Array[Value]) -> Array[Model]
-    out: Array[Model] = []
-    q = target.query
-    key = target.table_info.primary_key
-    keys.each_slice(MAX_PARAMS) { |chunk| out = out + repo.all(q.where_in(column, chunk).order_by_key(key)) }
-    out
+    return [] if keys.empty?
+    repo.all(target.query.where_in(column, keys).order_by_key(target.table_info.primary_key))
   end
 end

@@ -1,6 +1,9 @@
 # What a parameter of a statement may be: the values PostgreSQL is
 # given (a symbol as its name).
-type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol
+type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol | Items
+
+# An array parameter: one class's values (pg sends it as one array).
+type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Time] | Array[Bytes] | Array[Symbol]
 
 # A piece of SQL: text, a column of one of a query's tables (by the
 # table's index among them: qualified by the table's alias in a join),
@@ -919,16 +922,80 @@ class Translator
     c.nil? || c.null
   end
 
-  # `xs.include?(x)`: `x IN (...)` with the array's items (a literal or a
-  # captured array), `FALSE` for none.
+  # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
+  # of literals or a captured array).
   private def in_list(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
+    # (A captured array, or a literal one of literals: one parameter.)
+    case arr
+    in Meta::Expr::Capture(index, _, l)
+      case v = look(Bind::Capture.new(index))
+      in Array => xs
+        k = Binds.kind(xs)
+        b = Bind::Items.new(index, k.item == Float)
+        return any(x, Piece::Bound.new(b), k.item, k.nils, l)
+      else untranslatable("`include?` on a #{v.class.name}", l)
+      end
+    in Meta::Expr::ArrayLit(es, l) if es.all? { |e| e.is_a?(Meta::Expr::Lit) }
+      vs: Array[Object?] = []
+      es.each do |e|
+        case e
+        in Meta::Expr::Lit(v, _) then vs = vs.push(v)
+        else nil
+        end
+      end
+      item = Binds.item_class(vs)
+      vs = Binds.value(Bind::Items.new(0, item == Float), [vs.as(Object)]).as(Array[Object?])
+      return any(x, Piece::Param.new(Binds.items(vs)), item, vs.size < es.size, l) unless item == Object
+    else nil
+    end
+    in_items(arr, x, line)
+  end
+
+  # `x = ANY(array)`, `array` the parameter of an array of `item`s (nil:
+  # none, or nils only), its nils removed (`nils`: there were some, so
+  # `OR x IS NULL`; `= ANY` never finds a NULL); the empty array is
+  # `{}`, false for every row.
+  private def any(x: Meta::Expr, array: Piece, item: Type[Object]?, nils: Bool, line: Int) -> Sql
+    untranslatable("`include?` on an array of mixed classes", line) if item == Object
+    if k = item
+      unless k == Int || k == Float || k == String || k == Bool || k == Time || k == Bytes || k == Symbol
+        untranslatable("`include?` on an array of #{k.name}", line)
+      end
+    end
+    target = operand(x)
+    # (A nil target: found where an item is nil.)
+    if target.known && target.value.nil?
+      return text(nils ? "TRUE" : "FALSE", ATOM)
+    end
+    # (Nils only: `IS NULL`.)
+    return is_null(target, "IS NULL") if item.nil? && nils
+    target = cast(target)
+    # (Typed by pg: `Int`s, `Bool`s, `Bytes`. Cast: `Float`s beside what
+    # is not a `Float` column. Else what the array meets decides, a
+    # parameter cast by its class included.)
+    type = if item.nil? then nil
+           elsif item == Int then "bigint"
+           elsif item == Float then "double precision"
+           elsif item == String || item == Symbol then "text"
+           elsif item == Bool then "boolean"
+           elsif item == Time then "timestamptz"
+           else "bytea"
+           end
+    c = target.column
+    cast_it = type && item == Float && !(c && c.type == Float)
+    pieces = wrap(target, CMP + 1) + [Piece::Text.new(" = ANY("), array, Piece::Text.new(cast_it ? "::#{type}[])" : ")")]
+    # (NULL for a NULL target, but in an empty array: not found.)
+    maybe = nils || item.nil? ? nil : target.nulls
+    found = three(node(pieces, CMP), maybe)
+    return found unless nils
+    three(binary(found, "OR", is_null(target, "IS NULL"), OR, true), maybe)
+  end
+
+  # `xs.include?(x)` for an array literal with other than literals:
+  # `x IN (...)`.
+  private def in_items(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
     items = case arr
             in Meta::Expr::ArrayLit(es, _) then es.map { |e| operand(e) }
-            in Meta::Expr::Capture(index, _, l)
-              case v = look(Bind::Capture.new(index))
-              in Array => xs then (0...xs.size).map { |j| bound(Bind::Item.new(index, j), l) }
-              else untranslatable("`include?` on a #{v.class.name}", l)
-              end
             else untranslatable("`Array#include?` on an array SQL does not have", line)
             end
     # (A nil among them is `IS NULL`: `IN` never finds a NULL.)

@@ -137,7 +137,7 @@ q = User.where { age >= min && !email.nil? }.order { name }.desc.limit(10)
 q.to_sql
 # => ["SELECT \"id\", ... FROM \"users\" WHERE \"age\" >= $1 AND NOT \"email\" IS NULL ORDER BY \"name\" DESC LIMIT 10", [18]]
 
-User.where { |u| ids.include?(u.id) }        # "id" IN ($1, $2, ...)
+User.where { |u| ids.include?(u.id) }        # "id" = ANY($1), the array one parameter
 User.where { name.start_with?(prefix) }      # "name" LIKE $1, the prefix escaped
 User.select { Summary.new(id, name) }        # Query[Summary]: fetches "id", "name"
 User.where { admin }.count                   # Query[Int]: SELECT count(*) ...
@@ -156,8 +156,9 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
 - What translates: the columns' getters; `== != < <= > >=`, `+ - * / %`
   (`+` of strings is `||`) on numbers, strings, booleans and times;
   `&&`, `||`, `!`; `nil?`; `if`/`?:` (`CASE WHEN`); `include?` on a
-  captured or literal array (an `IN` list, `FALSE` when empty; one
-  parameter per item, within PostgreSQL's 65535); `String#start_with?`,
+  captured array or a literal one of literals (`= ANY($1)`, the array
+  one parameter whatever its length; an array literal with other
+  expressions is an `IN` list); `String#start_with?`,
   `end_with?` and `include?` of a string value (`LIKE`, escaped);
   `Rotor::SQL.like`, `ilike`, `lower`, `upper` and `not_nil` (below); literals and
   captured values. Anything else raises `Rotor::UntranslatableError`
@@ -220,9 +221,15 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `2000000000 * 2`, is still `integer`'s, and an `Int` parameter
   against an `integer` column of a table rotor did not create is an
   `integer`.)
-- An `include?` list is one parameter per item, and PostgreSQL takes at
-  most 65535 in a statement (not checked when the query is built). When
-  pg encodes arrays, it becomes `= ANY($1)`.
+- `include?` is `col = ANY($1)` with the array as one parameter (pg's
+  array parameters): one statement and one translation for every
+  length. A nil item is left out of the array and `OR col IS NULL`
+  added (`= ANY` finds no NULL); an array of nils only is `col IS
+  NULL`; the empty array is `{}`, in which `= ANY` finds nothing. The
+  items are of one class, or `Int`s and `Float`s (sent as `Float`s);
+  pg types an array of `Int`s, `Bool`s or `Bytes`, the column decides
+  the others' (`Float`s beside a column that is not a `Float`'s are
+  cast, `$1::double precision[]`, as a `Float` is).
 - Comparing a nullable column: `where { age > 18 }` is allowed in
   query blocks, with `age` an `Int?`. Every query block is checked with
   `using Rotor::Compare` (Quarz's docs/01 §7), whose extensions give
@@ -246,11 +253,11 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   a query again where it was built before translates nothing, and fills
   in the parameters with the values captured this time. The SQL may
   depend on what kind of values the block captured (nil is `IS NULL`, an
-  array's size the `IN (...)` list's), so each kind seen at a site is an
-  entry of its own. A key (a call site over its models) keeps at most 8
-  entries, never evicted; a kind beyond that is translated on each
-  build, as without the cache: the kinds are not a finite set, an
-  array's length being part of the SQL. A `where` of three
+  array's items' class and whether it holds a nil, not its length), so
+  each kind seen at a site is an entry of its own. A key (a call site
+  over its models) keeps at most 8 entries, never evicted; a kind
+  beyond that is translated on each build, as without the cache: the
+  kinds of several captures multiply (four nullable ones make 16). A `where` of three
   conditions with an order and a limit builds in about 10 µs compiled
   (22 µs translating each time; 19 µs interpreted, 52 µs before).
 - Queries are `Shareable` (Quarz's docs/03): a query can be a constant
@@ -335,8 +342,8 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
   misspelling does not compile: `{ posts }`, `{ [posts, account] }`, and
   with `nest` the associations of their models (`{ nest(posts) {
   comments } }`, `nest(account) { users }`), as deep as wanted. One
-  query per association and level, `WHERE "user_id" IN ($1, ...)` (in
-  chunks at PostgreSQL's 65535 parameters), a model's children in the
+  query per association and level, `WHERE "user_id" = ANY($1)` (the
+  keys one array parameter, however many), a model's children in the
   order of their primary key; an association already preloaded is not
   loaded again, and one named twice is one preload. The models given are left as they
   were: preloading gives new ones.
