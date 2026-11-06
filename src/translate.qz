@@ -183,18 +183,35 @@ class Translator
       end
       prefix("NOT", o, NOT)
     in Meta::Expr::If(c, t, f, line)
+      # (Its parameters cast, a bare one in the condition and those of
+      # the branches: PostgreSQL types a `CASE` of untyped ones as text.)
       cond = sql(c)
+      # (A known condition other than a `Bool` is truthy unless nil, which
+      # its guard keeps: the branch it takes.)
+      if cond.known && !cond.value.is_a?(Bool)
+        return assuming(facts(c, true)) { sql(t) } unless cond.value.nil?
+        return assuming(facts(c, false)) { sql(f.as(Meta::Expr)) } if f
+        return Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, false, nil, Translator.show(e))
+      end
+      cond = cast(cond)
       # (A branch that is NULL where Quarz has false makes the `if` so,
       # as an operand of `&&` does: kept as a condition, refused as a
       # value.)
-      th = assuming(facts(c, true)) { sql(t) }
+      th = cast(assuming(facts(c, true)) { sql(t) })
       pieces = [Piece::Text.new("CASE WHEN ")] + cond.pieces + [Piece::Text.new(" THEN ")] + th.pieces
       el = if f
-             x = assuming(facts(c, false)) { sql(f) }
+             x = cast(assuming(facts(c, false)) { sql(f) })
              pieces = pieces + [Piece::Text.new(" ELSE ")] + x.pieces
              x
            end
       nulls = th.nulls || (el ? el.nulls : Translator.show(e))
+      # (Nil either way, which the captures' guards keep: NULL, which
+      # takes the type of what it meets, where a `CASE` of NULLs is text.
+      # Not a known value: as an order key, the same as the `CASE` it
+      # stands for.)
+      if Translator.null?(th) && (el.nil? || Translator.null?(el.as(Sql)))
+        return Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
+      end
       Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
     in Meta::Expr::Call(recv, m, ms, args, block, line) then call(recv, m, ms, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
@@ -489,7 +506,7 @@ class Translator
 
   # The block's value, translated with the columns of `known` taken for
   # non-null as well.
-  private def assuming(known: Array[[Int, Symbol]], &f: () -> Sql) -> Sql
+  private def assuming[R](known: Array[[Int, Symbol]], &f: () -> R) -> R
     return f.call if known.empty?
     saved = @non_null
     @non_null = @non_null + known
@@ -667,8 +684,11 @@ class Translator
     end
     if args.size == 0
       case name
-      in "nil?" then return postfix(operand(r), "IS NULL", IS)
-      in "-@" then return with_nulls(prefix("-", operand(r), MUL + 1), [operand(r)])
+      in "nil?" then return is_null(operand(r), "IS NULL")
+      in "-@"
+        # (`- $1` is ambiguous to PostgreSQL: the parameter cast.)
+        x = operand(r)
+        return with_nulls(prefix("-", cast(x), MUL + 1), [x])
       else untranslatable(label, line)
       end
     end
@@ -689,7 +709,10 @@ class Translator
     if op = ARITHMETIC[m.name]?
       l = operand(r)
       rr = operand(a)
-      l, rr = typed(l, rr), typed(rr, l)
+      # (A `Float` is double precision also against a `Float` column:
+      # `r + 0.5` on a `real` one computes as Quarz does on the value
+      # read.)
+      l, rr = typed(l, rr, true), typed(rr, l, true)
       return with_nulls(binary(l, "||", rr, OTHER, true), [l, rr]) if name == "+" && m.owner == String
       untranslatable(label, line) unless m.owner == Int || m.owner == Float
       # (On a union receiver, `Int#/(Int)` floors and `Float#/` does not:
@@ -754,10 +777,10 @@ class Translator
     if op == "=" || op == "<>"
       eq = op == "="
       if l.known && l.value.nil?
-        return postfix(r, eq ? "IS NULL" : "IS NOT NULL", IS)
+        return is_null(r, eq ? "IS NULL" : "IS NOT NULL")
       end
       if r.known && r.value.nil?
-        return postfix(l, eq ? "IS NULL" : "IS NOT NULL", IS)
+        return is_null(l, eq ? "IS NULL" : "IS NOT NULL")
       end
       # (`<>` uses no index either: Quarz's meaning, nil differing from
       # a value.)
@@ -772,23 +795,116 @@ class Translator
     three(binary(l, op, r, CMP, false), l.nulls || r.nulls)
   end
 
-  # A value compared with a `Float` column, as a `Float`.
-  # A `Float` parameter, where it meets what is not a `Float` column
-  # itself, cast: pg sends parameters untyped, and PostgreSQL types one
-  # by what it meets (`"age" > $1` would read 25.5 as a bigint). Against
-  # the column it takes the column's type, which may be `real` or
-  # `numeric` (`r == 0.1` finds the `real` 0.1); against an expression,
-  # such as one over a `real` column, it is double precision, where
-  # PostgreSQL computes it as Quarz does on the values read
-  # (`r + 0.0 == 0.1` finds none, as in Quarz).
-  private def typed(s: Sql, other: Sql) -> Sql
-    return s unless s.known && s.value.is_a?(Float)
-    if c = other.column
-      return s if c.type == Float
-    end
-    Sql.new(s.pieces + [Piece::Text.new("::double precision")], ATOM, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
+  # Whether `s` is nil: a known nil, or an `if` nil either way.
+  def self.null?(s: Sql) -> Bool = (s.known && s.value.nil?) || s.pieces == [Piece::Text.new("NULL")]
+
+  # `s` as an order key: an `if` nil either way (NULL, a constant
+  # PostgreSQL refuses there) typed.
+  def self.order_key(s: Sql) -> Sql
+    return s unless s.pieces == [Piece::Text.new("NULL")]
+    Sql.new([Piece::Text.new("NULL::text")], s.prec, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
   end
 
+  # The values the query's build knows that `e`, used as a value, may
+  # be: literals, captures and captured models' columns, in an `if`'s
+  # branches (the one a known condition takes) and in operands. For an
+  # `update` to check against the column, as it does one known value:
+  # the casts of its parameters would have PostgreSQL round a double
+  # precision into a bigint. (Read as a translation does, guarded.)
+  def known_values(e: Meta::Expr) -> Array[Object?]
+    case e
+    in Meta::Expr::If(c, t, f, _)
+      # (Only the branch a known condition takes, as `sql` does.)
+      cond = sql(c)
+      folded = cond.known && !cond.value.is_a?(Bool)
+      th: Array[Object?] = []
+      el: Array[Object?] = []
+      if !folded || !cond.value.nil?
+        th = assuming(facts(c, true)) { known_values(t) }
+      end
+      if !folded || cond.value.nil?
+        if x = f
+          el = assuming(facts(c, false)) { known_values(x) }
+        else
+          el = el.push(nil)
+        end
+      end
+      th + el
+    # (`Rotor::SQL.not_nil` is its operand.)
+    in Meta::Expr::Call(_, m, _, [a], nil, _) if m.singleton && m.owner == SQL && m.name == :not_nil
+      sql(e)
+      known_values(a)
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, args, nil, _) if !m.singleton && (ARITHMETIC.has_key?(m.name) || m.name == :"-@")
+      out = known_values(recv)
+      args.each { |a| out = out + known_values(a) }
+      out
+    else
+      s = sql(e)
+      none: Array[Object?] = []
+      s.known ? none.push(s.value) : none
+    end
+  end
+
+  # A parameter, cast (`cast`) where PostgreSQL, which types an untyped
+  # one by what it meets, would take another type: a `Float` where it
+  # meets what is not a `Float` column itself (`"age" > $1` would read
+  # 25.5 as a bigint), an `Int` where it meets what is not a column (an
+  # `Int` literal is an `integer`: `$1 + 1` would not hold 3000000000),
+  # any where it meets another parameter (`$1 < $2` compares as text: 10
+  # before 9). Against a `Float` column it takes
+  # the column's type, which may be `real` or `numeric` (`r == 0.1`
+  # finds the `real` 0.1); against an expression, such as one over a
+  # `real` column, a `Float` is double precision, where PostgreSQL
+  # computes it as Quarz does on the values read (`r + 0.0 == 0.1` finds
+  # none, as in Quarz).
+  private def typed(s: Sql, other: Sql?, arithmetic: Bool = false) -> Sql
+    o = other || return s
+    return cast(s) if param?(o)
+    if s.value.is_a?(Int)
+      # (In arithmetic, against a `real` column too: `r + $1` would be
+      # computed in `real`.)
+      c = o.column
+      return c && (!arithmetic || c.type == Int) ? s : cast(s)
+    end
+    return s unless s.value.is_a?(Float)
+    if c = o.column
+      return s if c.type == Float && !arithmetic
+    end
+    cast(s)
+  end
+
+  # Whether `s` is a parameter by itself.
+  private def param?(s: Sql) -> Bool
+    return false unless s.known && s.pieces.size == 1
+    case s.pieces[0]
+    in Piece::Param(_) | Piece::Bound(_) then true
+    else false
+    end
+  end
+
+  # `s IS NULL` (`op`), a parameter cast: PostgreSQL cannot type one
+  # there.
+  private def is_null(s: Sql, op: String) -> Sql = postfix(cast(s, "text"), op, IS)
+
+  # `s`, when it is a parameter, cast to its value's class's type:
+  # `$1::bigint`. A nil is cast to `nil_type` if given, else left to take
+  # the type of what it meets.
+  private def cast(s: Sql, nil_type: String? = nil) -> Sql
+    return s unless param?(s)
+    type = case s.value
+           in nil then nil_type || return s
+           in Int then "bigint"
+           in Float then "double precision"
+           in String | Symbol then "text"
+           in Bool then "boolean"
+           in Time then "timestamptz"
+           in Bytes then "bytea"
+           else return s
+           end
+    Sql.new(s.pieces + [Piece::Text.new("::#{type}")], ATOM, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
+  end
+
+  # A value compared with a `Float` column, as a `Float`.
   private def coerce(s: Sql, other: Column?) -> Sql
     case [s.value, other]
     in [Int => i, Column => c] if s.known && c.type == Float
@@ -819,15 +935,18 @@ class Translator
     has_nil = items.any? { |s| s.known && s.value.nil? }
     items = items.reject { |s| s.known && s.value.nil? }
     target = operand(x)
-    items = items.map { |s| typed(s, target) }
-    target = typed(target, items[0]) unless items.empty?
+    unless items.empty?
+      t = target
+      target = typed(target, items[0])
+      items = items.map { |s| typed(s, t) }
+    end
     # (A nil target: found where an item is nil.)
     if target.known && target.value.nil?
       return text("TRUE", ATOM) if has_nil
       nils = items.select { |s| !s.known && s.nulls }
       return text("FALSE", ATOM) if nils.empty?
-      out = postfix(nils[0], "IS NULL", IS)
-      nils.drop(1).each { |s| out = binary(out, "OR", postfix(s, "IS NULL", IS), OR, true) }
+      out = is_null(nils[0], "IS NULL")
+      nils.drop(1).each { |s| out = binary(out, "OR", is_null(s, "IS NULL"), OR, true) }
       return out
     end
     # (A target and an item that can both be NULL: equal when both are,
@@ -835,13 +954,13 @@ class Translator
     if target.nulls && items.any? { |s| !s.known && s.nulls }
       out = binary(target, "IS NOT DISTINCT FROM", items[0], IS, false)
       items.drop(1).each { |s| out = binary(out, "OR", binary(target, "IS NOT DISTINCT FROM", s, IS, false), OR, true) }
-      return has_nil ? binary(out, "OR", postfix(target, "IS NULL", IS), OR, true) : out
+      return has_nil ? binary(out, "OR", is_null(target, "IS NULL"), OR, true) : out
     end
     # (NULL where neither is nil: a NULL target, or a NULL item the
     # target is not found among.)
     maybe = items.find { |s| s.nulls }&.nulls
     maybe = target.nulls || maybe unless has_nil
-    return has_nil ? postfix(target, "IS NULL", IS) : text("FALSE", ATOM) if items.empty?
+    return has_nil ? is_null(target, "IS NULL") : text("FALSE", ATOM) if items.empty?
     pieces = wrap(target, LIKE + 1) + [Piece::Text.new(" IN (")]
     items.each_with_index do |s, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
@@ -849,7 +968,7 @@ class Translator
     end
     found = three(node(pieces + [Piece::Text.new(")")], LIKE), maybe)
     return found unless has_nil
-    three(binary(found, "OR", postfix(target, "IS NULL", IS), OR, true), maybe)
+    three(binary(found, "OR", is_null(target, "IS NULL"), OR, true), maybe)
   end
 
   # `s.include?(v)`, `start_with?`, `end_with?`: `LIKE` with `v` escaped.

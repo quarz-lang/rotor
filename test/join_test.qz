@@ -61,6 +61,10 @@ class JoinTest < Test::Case
     # turn; a source without conditions is a CROSS JOIN.
     q2 = for w in Writer.where { age > 30 }.order { name }, a in Article.query.order { id }.desc do [w.name, a.title] end
     check(q2, "SELECT \"w0\".\"name\", \"a1\".\"title\" FROM \"writers\" AS \"w0\" CROSS JOIN \"articles\" AS \"a1\" WHERE \"w0\".\"age\" > 30 ORDER BY \"w0\".\"name\", \"a1\".\"id\" DESC", [])
+    # An order by an `if` nil either way: typed (a bare NULL is refused).
+    xn: Int? = nil
+    q4 = for w in Writer.query, a in Article.query.order { published ? xn : nil } do a.id end
+    check(q4, "SELECT \"a1\".\"id\" FROM \"writers\" AS \"w0\" CROSS JOIN \"articles\" AS \"a1\" ORDER BY NULL::text", [])
     # A model without an association joins by a condition.
     q3 = for w in Writer.query, v in Visitor.query when v.name == w.name do v.id end
     check(q3, "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])

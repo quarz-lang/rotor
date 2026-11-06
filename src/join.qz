@@ -109,7 +109,7 @@ module Joins
         if bt.reads(body)[n] == Array[Column].new
           t.untranslatable("an order of a `for`'s source by the outer rows alone (order the outer query)", Translator.line_of(body))
         end
-        orders = orders + [[by, false]]
+        orders = orders + [[Translator.order_key(by), false]]
       in :map | :select
         t.untranslatable("`#{name}` before another call in a `for`'s source", line) unless last
         sources = sources.take(n) + [fetching(sources[n], bt.reads(body)[n])] + sources.drop(n + 1)
