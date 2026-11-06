@@ -328,6 +328,7 @@ u = repo.preload(u) { [posts, account] }      # one query per association
 u.posts.map { |p| p.title }             # Post's, typed
 u.account                               # Account?
 users = repo.preload(repo.all(User.query)) { nest(posts) { comments } }
+users = repo.preload(users) { nest(posts) { [nest(comments) { author }, tags] } }   # any depth
 repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 ```
 
@@ -341,7 +342,9 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
   what the block names, the getters `table` generated, so that a
   misspelling does not compile: `{ posts }`, `{ [posts, account] }`, and
   with `nest` the associations of their models (`{ nest(posts) {
-  comments } }`, `nest(account) { users }`), as deep as wanted. One
+  comments } }`, `nest(account) { users }`), and so on at any depth
+  (`{ nest(posts) { nest(comments) { author } } }`); a name that is not
+  an association of its level's model is refused naming that model. One
   query per association and level, `WHERE "user_id" = ANY($1)` (the
   keys one array parameter, however many), a model's children in the
   order of their primary key; an association already preloaded is not

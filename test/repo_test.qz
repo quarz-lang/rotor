@@ -55,6 +55,7 @@ class Genre < Rotor::Model
   table "genres" do
     column :id, Int, primary: true
     column :name, String
+    has_many Volume, through: VolumeGenre
   end
 end
 
@@ -79,15 +80,21 @@ end
 class Counting < Rotor::Adapter
   @inner: Rotor::Adapter
   @count: Atom[Int]
+  @sqls: Atom[Array[String]]
 
   def initialize(@inner: Rotor::Adapter)
     @count = Atom[Int].new(0)
+    @sqls = Atom[Array[String]].new([])
   end
 
   def count -> Int = @count.get
 
+  # The statements run, in order.
+  def sqls -> Array[String] = @sqls.get
+
   def query(sql: String, params: Array[Object?]) -> Rotor::Rows
     @count.update { |n| n + 1 }
+    @sqls.update { |xs| xs + [sql] }
     @inner.query(sql, params)
   end
 
@@ -583,5 +590,51 @@ class RepoTest < Test::Case
       assert_equal([["x"], ["z"]], authors[0].volumes.map { |v| v.genres.map { |g| g.name } })
       assert_equal([["x"]], authors[2].volumes.map { |v| v.genres.map { |g| g.name } })
     end
+  end
+
+  # `nest` inside `nest`, at any depth: one query per association and
+  # level.
+  def test_nested_nests
+    with_repo do |repo|
+      shelves(repo)
+      r, c = counting(repo)
+      authors = r.preload(repo.all(Author.order { id })) { nest(volumes) { nest(remarks) { volume } } }
+      assert_equal([
+        "SELECT \"id\", \"title\", \"author_id\" FROM \"volumes\" WHERE \"author_id\" = ANY($1) ORDER BY \"id\"",
+        "SELECT \"id\", \"stars\", \"volume_id\" FROM \"remarks\" WHERE \"volume_id\" = ANY($1) ORDER BY \"id\"",
+        "SELECT \"id\", \"title\", \"author_id\" FROM \"volumes\" WHERE \"id\" = ANY($1) ORDER BY \"id\"",
+      ], c.sqls)
+      assert_equal([["a", "a"], Array[String].new], authors[0].volumes.map { |v| v.remarks.map { |x| x.volume.as(Volume).title } })
+      assert_equal([5, 3], authors[0].volumes.to_a[0].remarks.map { |x| x.stars })
+      # Through a `through` association, and back.
+      r, c = counting(repo)
+      authors = r.preload(repo.all(Author.order { id })) { [nest(volumes) { nest(genres) { volumes } }, volumes] }
+      assert_equal(3, c.count)
+      assert_equal("SELECT \"g0\".\"id\", \"g0\".\"name\", \"v1\".\"volume_id\" FROM \"genres\" AS \"g0\" INNER JOIN \"volume_genres\" AS \"v1\" ON \"v1\".\"genre_id\" = \"g0\".\"id\" WHERE \"v1\".\"volume_id\" = ANY($1) ORDER BY \"g0\".\"id\"", c.sqls[1])
+      assert_equal("SELECT \"v0\".\"id\", \"v0\".\"title\", \"v0\".\"author_id\", \"v1\".\"genre_id\" FROM \"volumes\" AS \"v0\" INNER JOIN \"volume_genres\" AS \"v1\" ON \"v1\".\"volume_id\" = \"v0\".\"id\" WHERE \"v1\".\"genre_id\" = ANY($1) ORDER BY \"v0\".\"id\"", c.sqls[2])
+      assert_equal([["x:a+c", "y:a"], Array[String].new], authors[0].volumes.map { |v| v.genres.map { |g| "#{g.name}:#{g.volumes.map { |w| w.title }.join("+")}" } })
+      # Across both `nest`s (a `belongs_to`'s, a `has_many`'s), from
+      # `Repo#preload`.
+      rs = repo.preload(repo.all(Remark.order { id })) { nest(volume) { nest(genres) { volumes } } }
+      assert_equal(["x:a+c,y:a", "x:a+c,y:a", "x:a+c"], rs.map { |x| x.volume.as(Volume).genres.map { |g| "#{g.name}:#{g.volumes.map { |w| w.title }.join("+")}" }.join(",") })
+      # Four levels.
+      r, c = counting(repo)
+      deep = r.preload(repo.all(Author.order { id })) { nest(volumes) { nest(genres) { nest(volumes) { remarks } } } }
+      assert_equal(4, c.count)
+      assert_equal([5, 3], deep[0].volumes.to_a[0].genres.to_a[0].volumes.to_a[0].remarks.map { |x| x.stars })
+    end
+  end
+
+  def test_nested_nests_refused_naming_the_level
+    e = assert_raise(Rotor::UntranslatableError) { Author.query.preload { nest(volumes) { nest(remarks) { stars } } } }
+    assert_match(/`stars` is not an association of Remark/, e.message)
+    # (A name of an outer level's model, which Quarz finds there: not
+    # this level's.)
+    e = assert_raise(Rotor::UntranslatableError) { Author.query.preload { nest(volumes) { nest(remarks) { volumes } } } }
+    assert_match(/`volumes` is not an association of Remark/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Remark.query.preload { nest(volume) { nest(author) { stars } } } }
+    assert_match(/`stars` is not an association of Author/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Author.query.preload { nest(volumes) { nest(remarks) { volume.nil? } } } }
+    assert_match(/\Aa preload names associations of the model/, e.message)
   end
 end

@@ -59,7 +59,10 @@ module Preloads
     case e
     in Meta::Expr::ArrayLit(xs, _)
       xs.flat_map { |x| items(info, model, x, file) }
-    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, _, [inner], Meta::Expr::Block(_, body, line), _) if m.name == :nest && m.owner == Model
+    # (`nest` is `Rotor::Model`'s, whichever enclosing `self` the tree
+    # says it is called on: inside a `nest` block, Quarz quotes it as the
+    # outer block's. The association it names is this level's.)
+    in Meta::Expr::Call(Meta::Expr::SelfRef(_, _), m, _, [inner], Meta::Expr::Block(_, body, line), _) if m.name == :nest && m.owner == Model
       a = association(info, model, inner, file)
       if body.size != 1
         raise UntranslatableError.new("a `nest` block of #{body.size} statements (#{file}:#{line}): write the associations")
@@ -72,9 +75,13 @@ module Preloads
 
   private def self.association(info: TableInfo, model: String, e: Meta::Expr, file: String) -> Association
     case e
-    in Meta::Expr::Call(Meta::Expr::SelfRef(0, _), m, _, [], nil, line) if !m.singleton
-      info.associations.find { |a| a.name == m.name } ||
-        raise UntranslatableError.new("`#{m.name}` is not an association of #{model} (#{file}:#{line}): a preload names associations")
+    # (A getter of this level's model: by its method's owner, not by the
+    # `self` the tree says, which in a `nest` block may be an outer
+    # block's that has a method of the name too. One of another model,
+    # an outer level's, is not this level's association.)
+    in Meta::Expr::Call(Meta::Expr::SelfRef(_, _), m, _, [], nil, line) if !m.singleton
+      found = m.owner.name == model ? info.associations.find { |a| a.name == m.name } : nil
+      found || raise UntranslatableError.new("`#{m.name}` is not an association of #{model} (#{file}:#{line}): a preload names associations")
     in Meta::Expr::Call(_, _, _, _, _, line)
       raise UntranslatableError.new("a preload names associations of the model, as `{ posts }` (#{file}:#{line})")
     in Meta::Expr::Capture(_, name, line)
