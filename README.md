@@ -190,7 +190,15 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `NOT "email" IS NULL AND "email" <> $1` (where `email != e` alone is
   `IS DISTINCT FROM`), and `email.nil? || !(email == e)` translates.
 - `Int#/` floors and `Int#%` takes the divisor's sign, as in Quarz
-  (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`).
+  (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`); `age / 2.0`
+  is a `Float`'s division, and `%` with a `Float` is refused
+  (PostgreSQL has none). An `Int`'s `/` or `%` on what may be an
+  `Int` or a `Float` (`(if b then age else score end) / 2`) is
+  refused: which one SQL does would depend on the row. A `Float`
+  parameter that meets anything but a `Float` column itself is written
+  `$1::double precision`, so that PostgreSQL does not take it for a
+  bigint (`age > 25.5`); against the column it takes the column's
+  type, `real` or `numeric` too.
 - An `include?` list is one parameter per item, and PostgreSQL takes at
   most 65535 in a statement (not checked when the query is built). When
   pg encodes arrays, it becomes `= ANY($1)`.
@@ -205,10 +213,7 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   the query is refused, as above. Outside query blocks `Int? > Int` is
   still a type error, and nil has no arithmetic (`age + 1` is one in a
   block too). (As for any column, SQL compares strings by the
-  database's collation, Quarz by bytes. And a comparison on a nullable
-  receiver is taken for `Rotor::Compare`'s even where a `using` of your
-  own redefines it for the class: Quarz's tree records nil's method
-  only; on a non-null receiver another extension's is refused.)
+  database's collation, Quarz by bytes.)
   `Rotor::SQL.not_nil(age)` is the column as a `T` for the
   explicit cases, where the condition before it says it is not NULL:
   `where { !age.nil? && Rotor::SQL.not_nil(age) + 1 > 18 }`; anywhere

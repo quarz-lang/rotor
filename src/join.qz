@@ -41,7 +41,7 @@ module Joins
   def self.association(t: Translator, e: Meta::Expr, i: Int, source: Source) -> [Association, Symbol]
     line = Translator.line_of(e)
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && t.row_of(recv) == i && source.model <= m.owner
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && t.row_of(recv) == i && source.model <= m.owner
       a = source.table.associations.find { |x| x.name == m.name && x.kind == :has_many } ||
         t.untranslatable("`#{m.owner.name}##{m.name}`, which is not a `has_many` association,", line)
       key = source.table.primary_key || raise SchemaError.new("#{source.model.name} has no primary key, which `#{a.name}` needs")
@@ -73,14 +73,14 @@ module Joins
     end
     n = sources.size
     source = case cur
-             in Meta::Expr::Call(Meta::Expr::Lit(v, _), m, _, block, line) if m.singleton && m.owner == Model
+             in Meta::Expr::Call(Meta::Expr::Lit(v, _), m, _, _, block, line) if m.singleton && m.owner == Model
                model = v.as?(Type[Model]) || t.untranslatable("a `for` source of #{v.inspect}", line)
                steps = [[m.name, block, line]] + steps unless m.name == :query
                Source.new(model.table_info, model, [], nil)
-             in Meta::Expr::Call(Meta::Expr::Call(Meta::Expr => row, g, [], nil, _), m, [], nil, line) if m.owner == HasMany && m.name == :query
+             in Meta::Expr::Call(Meta::Expr::Call(Meta::Expr => row, g, gs, [], nil, _), m, _, [], nil, line) if m.owner == HasMany && m.name == :query
                owner = t.row_of(row)
                t.untranslatable("the association query of something other than an outer row", line) if owner < 0
-               a, pk = association(t, Meta::Expr::Call.new(row, g, [], nil, line), owner, sources[owner])
+               a, pk = association(t, Meta::Expr::Call.new(row, g, gs, [], nil, line), owner, sources[owner])
                Source.new(a.target.table_info, a.target, [key_condition(n, a.foreign_key, owner, pk)], nil)
              else
                t.untranslatable("a `for` source other than a model's query (`Post.where { ... }`) or an association's (`u.posts.query`)", Translator.line_of(cur))
@@ -130,7 +130,7 @@ module Joins
   # its name, block and line, or nil.
   private def self.step_of(e: Meta::Expr) -> [Symbol, Meta::Expr?, Int]?
     case e
-    in Meta::Expr::Call(Meta::Expr => _, m, _, block, line) if !m.singleton && m.owner == Query
+    in Meta::Expr::Call(Meta::Expr => _, m, _, _, block, line) if !m.singleton && m.owner == Query
       [m.name, block, line]
     else
       nil
@@ -139,7 +139,7 @@ module Joins
 
   private def self.receiver_of(e: Meta::Expr) -> Meta::Expr
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, _, _, _, _) then recv
+    in Meta::Expr::Call(Meta::Expr => recv, _, _, _, _, _) then recv
     else e
     end
   end

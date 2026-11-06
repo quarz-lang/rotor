@@ -40,6 +40,15 @@ class Volume < Rotor::Model
   end
 end
 
+# `Float` columns that are not `double precision`.
+class Reading < Rotor::Model
+  table "readings" do
+    column :id, Int, primary: true
+    column :r, Float
+    column :n, Float
+  end
+end
+
 class Remark < Rotor::Model
   table "remarks" do
     column :id, Int, primary: true
@@ -74,7 +83,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -89,7 +98,8 @@ class RepoTest < Test::Case
     CREATE TABLE notes (id bigserial PRIMARY KEY, body text NOT NULL DEFAULT 'empty', seen timestamptz);
     CREATE TABLE authors (id bigserial PRIMARY KEY, name text NOT NULL);
     CREATE TABLE volumes (id bigserial PRIMARY KEY, title text NOT NULL, author_id bigint REFERENCES authors);
-    CREATE TABLE remarks (id bigserial PRIMARY KEY, stars bigint NOT NULL, volume_id bigint NOT NULL REFERENCES volumes)
+    CREATE TABLE remarks (id bigserial PRIMARY KEY, stars bigint NOT NULL, volume_id bigint NOT NULL REFERENCES volumes);
+    CREATE TABLE readings (id bigserial PRIMARY KEY, r real NOT NULL, n numeric NOT NULL)
   SQL
 
   def self.startup
@@ -123,7 +133,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -216,6 +226,22 @@ class RepoTest < Test::Case
       e: String? = nil
       assert_equal(3, repo.count(Member.where { email == e }))
       assert_equal(3, repo.count(Member.where { email != "x" }))
+      # An `Int` column with a `Float`: Quarz's mixed arithmetic, the
+      # parameter a double precision; `Int#/(Int)` floors.
+      assert_equal(2, repo.count(Member.where { age / 8.0 > 3.0 }))
+      assert_equal(1, repo.count(Member.where { age / 8 > 3 }))
+      assert_equal(2, repo.count(Member.where { age * 0.5 > 12.5 }))
+      assert_equal(2, repo.count(Member.where { age > 25.5 }))
+      x = 25.5
+      assert_equal(1, repo.count(Member.where { age - x < 0 }))
+      assert_equal(2, repo.count(Member.where { score + age > 25.0 }))
+      # A `Float` parameter takes the type of the `Float` column it
+      # meets: `real` and `numeric` are not read as double precision.
+      x = 0.30000000000000004
+      repo.insert(Reading.new(r: 0.1, n: x))
+      assert_equal(1, repo.count(Reading.where { r == 0.1 }))
+      assert_equal(1, repo.count(Reading.where { n == x }))
+      assert_equal([x], repo.all(Reading.order { id }.select { n }))
     end
   end
 

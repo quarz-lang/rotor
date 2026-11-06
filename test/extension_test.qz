@@ -6,6 +6,12 @@ module Loose
   extension Int
     def >(other: String) -> Bool = to_s > other
   end
+  # nil's, for a nullable receiver: in a query block, where
+  # `Rotor::Compare`'s is in scope too, this one is taken for an `Int`.
+  extension Nil
+    def >(other: Int) -> Bool = true
+    def ==(other: Int) -> Bool = true
+  end
 end
 
 # A getter of its own, named as a column.
@@ -23,6 +29,7 @@ class Tally < Rotor::Model
     column :id, Int, primary: true
     column :n, Int
     column :m, Int
+    column :k, Int, null: true
   end
 end
 
@@ -31,7 +38,22 @@ class ExtensionTest < Test::Case
     e = assert_raise(Rotor::UntranslatableError) { Tally.where { n > "3" } }
     assert_match(/\A`Int#>` of Loose cannot be translated to SQL/, e.message)
     # (The class's own still is.)
-    assert_equal(["SELECT \"id\", \"n\", \"m\" FROM \"tallies\" WHERE \"m\" > 3", Array[Object?].new], Tally.where { m > 3 }.to_sql)
+    assert_equal(["SELECT \"id\", \"n\", \"m\", \"k\" FROM \"tallies\" WHERE \"m\" > 3", Array[Object?].new], Tally.where { m > 3 }.to_sql)
+  end
+
+  def test_another_extension_on_a_nullable_receiver_is_refused
+    # Each member's method counts: `Int#>` is the class's own, `Nil#>`
+    # Loose's.
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { k > 3 } }
+    assert_match(/\A`Nil#>` of Loose cannot be translated to SQL/, e.message)
+    # Loose's `Int#>` on the `Int` member.
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { k > "3" } }
+    assert_match(/\A`Int#>` of Loose cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Tally.where { k == 3 } }
+    assert_match(/\A`Nil#==` of Loose cannot be translated to SQL/, e.message)
+    # Compare's are still taken where Loose has none.
+    assert_equal(["SELECT \"id\", \"n\", \"m\", \"k\" FROM \"tallies\" WHERE \"k\" < 3", Array[Object?].new], Tally.where { k < 3 }.to_sql)
+    assert_equal(["SELECT \"id\", \"n\", \"m\", \"k\" FROM \"tallies\" WHERE \"k\" IS NULL", Array[Object?].new], Tally.where { k == nil }.to_sql)
   end
 
   def test_an_extension_getter_is_not_the_column

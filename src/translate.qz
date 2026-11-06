@@ -57,6 +57,21 @@ class Translator
   COMPARISONS = {"==": "=", "!=": "<>", "<": "<", "<=": "<=", ">": ">", ">=": ">="}
   ARITHMETIC = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%"}
 
+  # The overloads whose SQL differs from the operator's: `Int#/(Int)`
+  # floors and `Int#%(Int)` takes the divisor's sign; `Int#/(Float)` is
+  # a plain `/`.
+  INT_DIV = Translator.called { |a: Int, b: Int| a / b }
+  INT_MOD = Translator.called { |a: Int, b: Int| a % b }
+  INT_BY_FLOAT = Translator.called { |a: Int, b: Float| a / b }
+
+  # The method `q`'s body calls.
+  def self.called[A, B, R](&q: Quoted[(A, B) -> R]) -> Meta::MethodRef
+    case q.expr
+    in Meta::Expr::Block(_, [Meta::Expr::Call(_, m, _, _, _, _)], _) then m
+    else raise ArgumentError.new("not a call")
+    end
+  end
+
   # What `row_in` gives for what is not a row, and for a `self` that may
   # be any receiver's.
   NONE = -1
@@ -140,7 +155,7 @@ class Translator
     in Meta::Expr::Capture(_, _, l) then l
     in Meta::Expr::Arg(_, _, l) then l
     in Meta::Expr::SelfRef(_, l) then l
-    in Meta::Expr::Call(_, _, _, _, l) then l
+    in Meta::Expr::Call(_, _, _, _, _, l) then l
     in Meta::Expr::And(_, _, l) then l
     in Meta::Expr::Or(_, _, l) then l
     in Meta::Expr::Not(_, l) then l
@@ -181,7 +196,7 @@ class Translator
            end
       nulls = th.nulls || (el ? el.nulls : Translator.show(e))
       Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil))
-    in Meta::Expr::Call(recv, m, args, block, line) then call(recv, m, args, block, line)
+    in Meta::Expr::Call(recv, m, ms, args, block, line) then call(recv, m, ms, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
     in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
     in Meta::Expr::ArrayLit(_, line) then untranslatable("an array literal", line)
@@ -219,7 +234,7 @@ class Translator
   # `self`: a column (not a capture, nor a captured model's value).
   def self.column_named?(e: Meta::Expr, what: String) -> Bool
     case e
-    in Meta::Expr::Call(recv, _, args, _, _)
+    in Meta::Expr::Call(recv, _, _, args, _, _)
       case recv
       in Meta::Expr::SelfRef(_, _) | Meta::Expr::Arg(_, _, _) then return true if args.empty? && show(e) == what
       else nil
@@ -241,7 +256,7 @@ class Translator
     in Meta::Expr::Capture(_, name, _) then name.to_s
     in Meta::Expr::Arg(name, _, _) then name.to_s
     in Meta::Expr::SelfRef(_, _) then "self"
-    in Meta::Expr::Call(recv, m, args, block, _)
+    in Meta::Expr::Call(recv, m, _, args, block, _)
       name = m.name.to_s
       tail = block ? " { ... }" : ""
       if recv && args.size == 1 && (COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name))
@@ -276,7 +291,7 @@ class Translator
     text = show(e)
     case e
     in Meta::Expr::And(_, _, _) | Meta::Expr::Or(_, _, _) | Meta::Expr::If(_, _, _, _) then "(#{text})"
-    in Meta::Expr::Call(Meta::Expr, m, [_], nil, _) if COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name) then "(#{text})"
+    in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) if COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name) then "(#{text})"
     else text
     end
   end
@@ -285,7 +300,7 @@ class Translator
   # nil.
   def column_of(e: Meta::Expr) -> [Int, Column]?
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && m.extension.nil?
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.extension.nil?
       s = row_in(recv, @scopes)
       return nil if s < 0
       src = @sources[s]
@@ -358,7 +373,7 @@ class Translator
   # inside the quoted one is a scope of its own, not known.
   private def collect(e: Meta::Expr, scopes: Array[Scope]) -> Array[[Int, Symbol?]]
     case e
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if !m.singleton && m.extension.nil?
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.extension.nil?
       s = row_in(recv, scopes)
       if s >= 0 && @sources[s].model <= m.owner
         t = @sources[s].table
@@ -378,7 +393,7 @@ class Translator
     in Meta::Expr::Arg(_, _, _) then row_reads(e, scopes)
     in Meta::Expr::Lit(_, _) then none
     in Meta::Expr::Capture(_, _, _) then none
-    in Meta::Expr::Call(recv, _, args, block, _)
+    in Meta::Expr::Call(recv, _, _, args, block, _)
       xs = args
       xs = xs + [recv] if recv
       found = all(xs, scopes)
@@ -494,9 +509,9 @@ class Translator
     in Meta::Expr::Not(x, _) then return facts(x, !truth)
     in Meta::Expr::And(l, r, _) then return truth ? facts(l, true) + facts(r, true) : out
     in Meta::Expr::Or(l, r, _) then return truth ? out : facts(l, false) + facts(r, false)
-    in Meta::Expr::Call(Meta::Expr => recv, m, [], nil, _) if m.name == :nil? && !m.singleton
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if m.name == :nil? && !m.singleton
       return truth ? out : nullable_column(recv)
-    in Meta::Expr::Call(Meta::Expr => recv, m, [arg], nil, _) if (m.name == :== || m.name == :!=) && !m.singleton
+    in Meta::Expr::Call(Meta::Expr => recv, m, _, [arg], nil, _) if (m.name == :== || m.name == :!=) && !m.singleton
       return out unless (m.name == :!=) == truth
       return nullable_column(recv) if nil_literal?(arg)
       return nullable_column(arg) if nil_literal?(recv)
@@ -536,9 +551,9 @@ class Translator
     column = Translator.column_named?(x, what)
     test = column ? "test `#{what}.nil?` explicitly" : Translator.nil_advice(what)
     advice = case x
-             in Meta::Expr::Call(Meta::Expr => l, m, [r], nil, _) if m.name == :== && !m.singleton
+             in Meta::Expr::Call(Meta::Expr => l, m, _, [r], nil, _) if m.name == :== && !m.singleton
                "write `#{Translator.shown_operand(l)} != #{Translator.shown_operand(r)}` (Quarz's meaning, `IS DISTINCT FROM`), or #{test}"
-             in Meta::Expr::Call(Meta::Expr => l, m, [r], nil, _) if m.name == :!= && !m.singleton
+             in Meta::Expr::Call(Meta::Expr => l, m, _, [r], nil, _) if m.name == :!= && !m.singleton
                "write `#{Translator.shown_operand(l)} == #{Translator.shown_operand(r)}`, or #{test}"
              else
                column ? "#{test} (`#{what}.nil? || !#{Translator.shown_operand(x)}`)" : test
@@ -614,14 +629,17 @@ class Translator
 
   private def postfix(x: Sql, op: String, prec: Int) -> Sql = node(wrap(x, prec + 1) + [Piece::Text.new(" #{op}")], prec)
 
-  private def call(recv: Meta::Expr?, m: Meta::MethodRef, args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql
+  # `m` for messages: `` `Int#>` ``, `` `Rotor::SQL.lower` ``.
+  def self.label(m: Meta::MethodRef) -> String = "`#{m.owner.name}#{m.singleton ? "." : "#"}#{m.name}`"
+
+  private def call(recv: Meta::Expr?, m: Meta::MethodRef, ms: Array[Meta::MethodRef], args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql
     name = m.name.to_s
-    label = "`#{m.owner.name}#{m.singleton ? "." : "#"}#{name}`"
+    label = Translator.label(m)
     if recv.nil?
       untranslatable("the function #{label}", line)
     end
     r = recv.as(Meta::Expr)
-    whole = Meta::Expr::Call.new(r, m, args, block, line)
+    whole = Meta::Expr::Call.new(r, m, ms, args, block, line)
     if found = column_of(whole)
       c = found[1]
       if c.null && @non_null.any? { |x| x[0] == found[0] && x[1] == c.name }
@@ -634,13 +652,18 @@ class Translator
     end
     untranslatable("the block given to #{label}", line) if block
     if m.singleton && m.owner == SQL
+      ms.each { |x| untranslatable(Translator.label(x), line) unless x.singleton && x.owner == SQL }
       return function(name, args, label, line)
     end
-    untranslatable(label, line) unless !m.singleton && primitive?(m.owner)
-    # (An extension's method is the translator's to know only when it is
-    # `Rotor::Compare`'s, a comparison taking nil.)
-    if ext = m.extension
-      untranslatable("#{label} of #{ext.name}", line) unless ext == Compare
+    # Every method the call may run, one for each member of a union
+    # receiver (`Int#>` and `Nil#>` for an `Int?`'s `>`), is one the
+    # translator knows: a primitive's own, or `Rotor::Compare`'s, a
+    # comparison taking nil (another extension's is the user's).
+    ([m] + ms).each do |x|
+      untranslatable(Translator.label(x), line) unless !x.singleton && primitive?(x.owner)
+      if ext = x.extension
+        untranslatable("#{Translator.label(x)} of #{ext.name}", line) unless ext == Compare
+      end
     end
     if args.size == 0
       case name
@@ -658,20 +681,33 @@ class Translator
       return like(operand(r), a, name, label, line)
     end
     if sym = COMPARISONS[m.name]?
-      untranslatable(label, line) if m.owner == Array
+      if arr = ms.find { |x| x.owner == Array }
+        untranslatable(Translator.label(arr), line)
+      end
       return compare(r, sym, a)
     end
     if op = ARITHMETIC[m.name]?
       l = operand(r)
       rr = operand(a)
+      l, rr = typed(l, rr), typed(rr, l)
       return with_nulls(binary(l, "||", rr, OTHER, true), [l, rr]) if name == "+" && m.owner == String
       untranslatable(label, line) unless m.owner == Int || m.owner == Float
+      # (On a union receiver, `Int#/(Int)` floors and `Float#/` does not:
+      # the SQL would be one of them for every row. `+`, `-` and `*`, and
+      # `/` by a `Float`, are the same for both.)
+      if other = ms.find { |x| x != m && ((name == "/" && (x == INT_DIV || m == INT_DIV)) || name == "%" || !(x.owner == Int || x.owner == Float)) }
+        untranslatable("#{label} and #{Translator.label(other)} together (on a union receiver)", line)
+      end
+      if m.owner == Int && name == "/" && m != INT_DIV
+        untranslatable(label, line) unless m == INT_BY_FLOAT
+        return with_nulls(binary(l, "/", rr, MUL, true), [l, rr])
+      end
       if m.owner == Int && name == "/"
         # Quarz's `Int#/` floors; PostgreSQL's truncates.
         return with_nulls(node([Piece::Text.new("floor(")] + wrap(l, ATOM) + [Piece::Text.new("::numeric / ")] + wrap(rr, MUL + 1) + [Piece::Text.new(")::bigint")], ATOM), [l, rr])
       end
       if name == "%"
-        untranslatable(label, line) unless m.owner == Int
+        untranslatable(label, line) unless m == INT_MOD
         # Quarz's `Int#%` takes the divisor's sign; PostgreSQL's the
         # dividend's.
         inner = binary(binary(l, "%", rr, MUL, true), "+", rr, ADD, true)
@@ -696,7 +732,7 @@ class Translator
         return nil unless model.class <= m.owner
         return nil unless model.table_info.columns.any? { |c| c.name == m.name }
         b = bound(Bind::Read.new(index, m.name), line)
-        b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, Translator.show(Meta::Expr::Call.new(recv, m, args, block, line))) : b
+        b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, Translator.show(Meta::Expr::Call.new(recv, m, [m], args, block, line))) : b
       else
         nil
       end
@@ -714,6 +750,7 @@ class Translator
     r = operand(re)
     l = coerce(l, r.column)
     r = coerce(r, l.column)
+    l, r = typed(l, r), typed(r, l)
     if op == "=" || op == "<>"
       eq = op == "="
       if l.known && l.value.nil?
@@ -736,6 +773,22 @@ class Translator
   end
 
   # A value compared with a `Float` column, as a `Float`.
+  # A `Float` parameter, where it meets what is not a `Float` column
+  # itself, cast: pg sends parameters untyped, and PostgreSQL types one
+  # by what it meets (`"age" > $1` would read 25.5 as a bigint). Against
+  # the column it takes the column's type, which may be `real` or
+  # `numeric` (`r == 0.1` finds the `real` 0.1); against an expression,
+  # such as one over a `real` column, it is double precision, where
+  # PostgreSQL computes it as Quarz does on the values read
+  # (`r + 0.0 == 0.1` finds none, as in Quarz).
+  private def typed(s: Sql, other: Sql) -> Sql
+    return s unless s.known && s.value.is_a?(Float)
+    if c = other.column
+      return s if c.type == Float
+    end
+    Sql.new(s.pieces + [Piece::Text.new("::double precision")], ATOM, s.column, s.value, s.known, s.bind, s.nulls, s.tri)
+  end
+
   private def coerce(s: Sql, other: Column?) -> Sql
     case [s.value, other]
     in [Int => i, Column => c] if s.known && c.type == Float
@@ -766,6 +819,8 @@ class Translator
     has_nil = items.any? { |s| s.known && s.value.nil? }
     items = items.reject { |s| s.known && s.value.nil? }
     target = operand(x)
+    items = items.map { |s| typed(s, target) }
+    target = typed(target, items[0]) unless items.empty?
     # (A nil target: found where an item is nil.)
     if target.known && target.value.nil?
       return text("TRUE", ATOM) if has_nil
