@@ -276,8 +276,10 @@ class Translator
   # `e` as SQL where it is a value, not a condition: an `update`'s value,
   # an order's key, an operand. A comparison that can be NULL
   # (`Sql#tri`) is refused: NULL is not false there.
-  def operand(e: Meta::Expr) -> Sql
+  def operand(e: Meta::Expr, typed: Bool = true) -> Sql
     s = value(e)
+    # (An `update` checks its value's classes against the column.)
+    valued(true) { one_type(e) } if typed
     if what = s.tri
       raise UntranslatableError.new(Translator.value_error(e, what, @file))
     end
@@ -286,6 +288,24 @@ class Translator
     end
     s
   end
+
+  # Refuses `e` as a value when its classes are more than one SQL type
+  # holds (a `Bool` and another value, a `String` and an `Int`): a
+  # SQL CASE or COALESCE of them is an error in PostgreSQL. `Int`s and
+  # `Float`s meet in double precision; nil and what the translator does
+  # not know the class of (`Object`) meet anything.
+  def one_type(e: Meta::Expr) -> Void
+    ks = classes(e).reject { |k| k == Nil }
+    return if ks.size < 2 || ks.include?(Object) || ks.all? { |k| k == Int || k == Float }
+    what = ks.include?(Bool) ? "a `Bool` or another value" : ks.map { |k| Translator.a(k) }.join(" or ")
+    untranslatable("`#{Translator.show(e)}`, #{what}, as a value", Translator.line_of(e))
+  end
+
+  # `one_type` of `e` as a value (an order key).
+  def valued_check(e: Meta::Expr) -> Void = valued(true) { one_type(e) }
+
+  # "a `String`", "an `Int`".
+  def self.a(k: Type[Object]) -> String = "#{"AEIOU".include?(k.name[0]) ? "an" : "a"} `#{k.name}`"
 
   # `e` translated as a value (`@value`), its refusals left to the
   # caller (`operand`).
@@ -622,16 +642,11 @@ class Translator
   # THEN TRUE ELSE b END` (`nil && x` is nil). A `Bool` and another
   # value mixed is refused: no SQL type holds both.
   private def logical_value(e: Meta::Expr, l: Meta::Expr, op: String, r: Meta::Expr, sa: Sql, known: Array[[Int, Symbol]]) -> Sql
-    ks = classes(e).reject { |k| k == Nil }
-    if ks.include?(Bool) && ks.size > 1
-      untranslatable("`#{Translator.show(e)}`, a `Bool` or another value, as a value", Translator.line_of(e))
-    end
-    # (`Int`s and `Float`s meet in double precision; other classes in no
-    # SQL type.)
-    if ks.size > 1 && !ks.all? { |k| k == Int || k == Float }
-      untranslatable("`#{Translator.show(e)}`, #{ks.map { |k| "#{"AEIOU".include?(k.name[0]) ? "an" : "a"} `#{k.name}`" }.join(" or ")}, as a value", Translator.line_of(e))
-    end
+    one_type(e)
+    one_type(l)
     sb = assuming(known) { sql(r) }
+    # (Under the facts its translation had: `level && (!(level > 1) ? ...)`.)
+    assuming(known) { one_type(r) }
     [[l, sa], [r, sb]].each do |x|
       if what = x[1].tri
         raise UntranslatableError.new(Translator.value_error(x[0], what, @file))
@@ -962,6 +977,20 @@ class Translator
     if op != "=" && op != "<>" && (always_nil?(le) || always_nil?(re))
       raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): compare with a value, or use `nil?`")
     end
+    # (Values of classes that do not meet are never equal in Quarz; in
+    # SQL the comparison is an error, or compares text. Nil aside: a nil
+    # is `IS NULL`.)
+    if op == "=" || op == "<>"
+      ls = valued(true) { classes(le) }.reject { |k| k == Nil }
+      rs = valued(true) { classes(re) }.reject { |k| k == Nil }
+      numeric = ->(ks: Array[Type[Object]]) { ks.any? { |k| k == Int || k == Float } }
+      meet = ls.empty? || rs.empty? || ls.include?(Object) || rs.include?(Object) ||
+        ls.any? { |k| rs.include?(k) } || (numeric.call(ls) && numeric.call(rs))
+      unless meet
+        what = "#{ls.map { |k| Translator.a(k) }.join(" or ")} and #{rs.map { |k| Translator.a(k) }.join(" or ")}"
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always #{op == "=" ? "false" : "true"} (#{@file}:#{line}): #{what} are never equal")
+      end
+    end
     l = coerce(l, r.column)
     r = coerce(r, l.column)
     l, r = typed(l, r), typed(r, l)
@@ -1001,8 +1030,8 @@ class Translator
   # model's column, an `if` without `else`), a comparison's `Bool`,
   # arithmetic's by its operands' (`Int` only from two `Int`s). An `if`
   # gives its branches' (only the one a known condition takes, as `sql`
-  # does). A nullable column gives its class alone: a NULL there is
-  # PostgreSQL's to refuse where the column admits none. For an `update`
+  # does). A column that can be NULL (past the `nil?` facts) gives `Nil`
+  # as well, so an `update` refuses it into a non-null column. For an `update`
   # to check its value against the column, and a condition to be tested
   # for its truthiness: PostgreSQL would convert another class on
   # assignment (round a double precision into a bigint, write a number
@@ -1068,7 +1097,8 @@ class Translator
         v = s.value
         [v.nil? ? Nil : v.class]
       elsif c = s.column
-        [c.type]
+        # (Nil too where it can be NULL, past the `nil?` facts.)
+        s.nulls ? [c.type, Nil] : [c.type]
       else
         [Object]
       end
@@ -1101,8 +1131,9 @@ class Translator
     # (Of `l`, what makes it the value: its falsy classes for `&&`, its
     # truthy ones for `||`.)
     kept = conj ? ls.select { |k| k == Nil || k == Bool } : ls.reject { |k| k == Nil }
-    # (A nullable column's classes do not say it is nil when NULL: its
-    # translation as a value does. One that is not a value has none.)
+    # (Whether it can be NULL is its translation as a value's: a column's
+    # classes say it, an expression's need not. One that is not a value
+    # has none.)
     if conj
       nulls = begin
                 valued(true) { sql(l) }.nulls

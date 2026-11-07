@@ -501,6 +501,9 @@ class Query[T]
     cache = what == "order" ? Cache::ORDERS : Cache::CONDITIONS
     kept = Cache.fetch(cache, Cache.key(site, @sources), captures) do
       t, e = translator(expr, captures, file)
+      if what == "order"
+        t.valued_check(e)
+      end
       [what == "order" ? t.value(e) : t.sql(e), t.guards]
     end
     # (`ORDER BY 1` would be the first column. Checked on what the cache
@@ -575,7 +578,7 @@ class Query[T]
         raise ArgumentError.new("an `update` of `#{name}` twice (#{file}:#{Translator.line_of(key)})")
       end
       seen = seen + [name]
-      v = t.operand(value)
+      v = t.operand(value, false)
       unless v.known
         t.classes(value).each do |k|
           if k == Nil

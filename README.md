@@ -164,16 +164,20 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   captured values. Anything else raises `Rotor::UntranslatableError`
   when the query is built, naming the method and where it is.
 - `==` and `!=` keep Quarz's meaning of nil. Against a value they are
-  decided by the value: `IS NULL` for nil, `=` otherwise (which an
-  index serves), so a query's SQL can differ by what it captured (pg's
+  decided by the value: `IS NULL` for nil, `=` otherwise (which an index
+  serves), so a query's SQL can differ by what it captured (pg's
   statement cache prepares each text once); `!=` of a nullable column
-  and a value is `IS DISTINCT FROM`, which counts nil as different.
-  Between columns or expressions they are `=` and `<>` when neither
-  side can be NULL (`age == (flag ? x : y)` with captured `Int`s is
-  `"age" = CASE ... END`, which an index serves), and `IS [NOT]
-  DISTINCT FROM`, which no index serves, when one can: a column that
-  admits NULL, or a `CASE` with a nil branch, without `else` or with
-  such a column in a branch. `include?` finds nil with `IS NULL`.
+  and a value is `IS DISTINCT FROM`, which counts nil as different. Of
+  values whose classes never meet (`name == true`, `name != 1`; `Int`s
+  and `Float`s meet, nil is `IS NULL`) they are refused when the query
+  is built, as always false (`!=`: always true), where PostgreSQL would
+  refuse them or compare text (#41). Between columns or expressions they
+  are `=` and `<>` when neither side can be NULL (`age == (flag ? x :
+  y)` with captured `Int`s is `"age" = CASE ... END`, which an index
+  serves), and `IS [NOT] DISTINCT FROM`, which no index serves, when one
+  can: a column that admits NULL, or a `CASE` with a nil branch, without
+  `else` or with such a column in a branch. `include?` finds nil with
+  `IS NULL`.
 - Every form rotor translates keeps Quarz's meaning; the shapes it
   cannot are refused when the query is built
   (`Rotor::UntranslatableError`, saying what to write instead). A
@@ -220,23 +224,27 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   (an `if`'s branches, arithmetic by its operands: `{qty: -f}` with a
   `Float`, `{qty: price}` and `{name: qty}` are refused, where
   PostgreSQL would round or write the number as text; an `Int` into a
-  `Float` column is accepted). `a && b` and `a || b` are one of their
-  operands in Quarz. As a condition they test their operands as above
-  (`"email" IS NOT NULL OR "name" IS NOT NULL`); as a value (an
-  `update`'s, an order key, an operand, a branch of an `if` that is not
-  a `Bool`) they are that operand: `email || name` is `COALESCE("email",
-  "name")`, `email && name` is `CASE WHEN "email" IS NOT NULL THEN
-  "name" ELSE NULL END`, and of two `Bool`s, `vip && admin` and `vip ||
-  admin` are `AND` and `OR`, or, when `vip` can be NULL, `CASE WHEN
-  "vip" IS TRUE THEN "admin" ELSE "vip" END` and `CASE WHEN "vip" IS
-  TRUE THEN TRUE ELSE "admin" END` (Quarz's `nil && x` is nil). One that
-  may be a `Bool` or another value (`admin && name`, `email || admin`)
-  is refused as a value, and so is one of other classes that do not meet
-  (`email || age`; `Int`s and `Float`s do): no SQL type holds both
-  (decided 2026-11-07, #36). Arithmetic of two `integer`s, as PostgreSQL
-  types `Int` literals and CASEs of them, casts the left one to a
-  bigint: `2000000000 * 2` is `2000000000::bigint * 2`, where an
-  `integer` would overflow; `age + 1` stays as it is.
+  `Float` column is accepted; a column that can be NULL is nil there, so
+  `{name: email}` into a non-null column is refused, as a nil is: write
+  `email || name`, #42). `a && b` and `a || b` are one of their operands
+  in Quarz. As a condition they test their operands as above (`"email"
+  IS NOT NULL OR "name" IS NOT NULL`); as a value (an `update`'s, an
+  order key, an operand, a branch of an `if` that is not a `Bool`) they
+  are that operand: `email || name` is `COALESCE("email", "name")`,
+  `email && name` is `CASE WHEN "email" IS NOT NULL THEN "name" ELSE
+  NULL END`, and of two `Bool`s, `vip && admin` and `vip || admin` are
+  `AND` and `OR`, or, when `vip` can be NULL, `CASE WHEN "vip" IS TRUE
+  THEN "admin" ELSE "vip" END` and `CASE WHEN "vip" IS TRUE THEN TRUE
+  ELSE "admin" END` (Quarz's `nil && x` is nil). One that may be a
+  `Bool` or another value (`admin && name`, `email || admin`) is refused
+  as a value, and so is one of other classes that do not meet (`email ||
+  age`; `Int`s and `Float`s do), and an `if` of them as a value other
+  than an `update`'s (`on ? level : label` as an order key, #43): no SQL
+  type holds both (decided 2026-11-07, #36). Arithmetic of two
+  `integer`s, as PostgreSQL types `Int` literals and CASEs of them,
+  casts the left one to a bigint: `2000000000 * 2` is
+  `2000000000::bigint * 2`, where an `integer` would overflow; `age + 1`
+  stays as it is.
 - `include?` is `col = ANY($1)` with the array as one parameter (pg's
   array parameters): one statement and one translation for every
   length. A nil item is left out of the array and `OR col IS NULL`
