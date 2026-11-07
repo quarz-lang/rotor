@@ -41,11 +41,12 @@ throwaway cluster; the others need none.
 
 - Open a draft pull request as soon as the branch has its first commit,
   while the local checks run: CI then runs in parallel with `quarz test`.
-- While it is a draft, force-pushing after the subagent review or the
-  local checks changed the commits is fine (amend or rebase as needed).
+- Force-pushing after the subagent review or the local checks changed
+  the commits is fine at any stage (amend or rebase as needed, onto
+  main too): the merge names the head commit it was approved on.
 - Mark it ready for review only when the subagent review of the branch's
-  diff and every local check above have passed; from then on add
-  commits, never force-push, and review each of them before pushing.
+  diff and every local check above have passed; from then on
+  review every change, added or rewritten, before pushing it.
 - The description says what was verified.
 
 ## Issues
