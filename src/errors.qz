@@ -37,3 +37,34 @@ end
 # longer exists: the statement changed no row.
 class StaleError < Error
 end
+
+# A migration step that cannot be undone: rolling back a `change` that
+# drops a table without its columns, removes a column without its type,
+# runs `execute` without `down:`, and the like (`Rotor::Migration`), or
+# that uses `repo`. Raised before any of the rollback runs.
+class IrreversibleMigration < Error
+end
+
+# A migration failed (`Rotor::Migrator`): its version and class name;
+# `cause` is the error it raised (a `PG::ServerError`, a
+# `Rotor::IrreversibleMigration`...), nil when the migrator refused to
+# run it (a version older than one applied). Its transaction was rolled
+# back; the migrations before it stay applied.
+class MigrationError < Error
+  @version: Int
+  @name: String
+
+  # The failure of migration `version` (class `name`): `message`. Raised
+  # while a `rescue` handles the error it wraps, which is its `cause`.
+  def initialize(version: Int, name: String, message: String)
+    @version = version
+    @name = name
+    super("#{version} #{name}: #{message}")
+  end
+
+  # The migration's version.
+  def version -> Int = @version
+
+  # The migration's class name.
+  def name -> String = @name
+end

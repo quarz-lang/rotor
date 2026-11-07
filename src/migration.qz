@@ -1,0 +1,622 @@
+# A column's default in a migration: a literal of the column's type,
+# or SQL written as is (`Rotor::SQL.raw("now()")`).
+type Default = Int | Float | String | Bool | Bytes | SQL::Raw
+
+# `Rotor::Migration::NO_DEFAULT`'s type: what `change_column` takes to
+# drop a column's default.
+data NoDefault = ()
+
+# A default as `change_column` sets it: a value, or none.
+type DefaultChange = Default | NoDefault
+
+# A column a migration declares: its name, SQL type, whether it admits
+# NULL, its default, whether it is the primary key (and an identity
+# column), and what it references.
+data ColumnDef = (name: String, type: String, null: Bool, default: Default?, primary: Bool, identity: Bool, references: Reference?)
+
+# A column's foreign key: the table and column it references, and its
+# `ON DELETE` action (`:cascade`, `:set_null`, `:restrict`,
+# `:no_action`; nil: none written).
+data Reference = (table: String, column: String, on_delete: Symbol?)
+
+# An index: its table, columns, name, whether it is unique, its
+# condition (SQL, for a partial index), and whether it is built
+# CONCURRENTLY.
+data IndexDef = (table: String, columns: Array[String], name: String, unique: Bool, where: String?, concurrently: Bool)
+
+# What a column was, for `change_column` to be reversible: its NULL
+# admission and its default (`Rotor::Migration::NO_DEFAULT` for none); nil for what the
+# change leaves as it is.
+data Was = (null: Bool? = nil, default: DefaultChange? = nil)
+
+# What a migration does, one step: its DSL records these, and
+# `Rotor::Migrator.render` writes their SQL (the one place a dialect is
+# rendered).
+enum Operation
+  variant CreateTable(name: String, columns: Array[ColumnDef], indexes: Array[IndexDef], if_not_exists: Bool)
+  # (`columns` nil: not given, so not reversible.)
+  variant DropTable(name: String, columns: Array[ColumnDef]?, indexes: Array[IndexDef], if_exists: Bool)
+  variant RenameTable(name: String, to: String)
+  variant AddColumn(table: String, column: ColumnDef)
+  # (`column` nil: its type not given, so not reversible.)
+  variant RemoveColumn(table: String, name: String, column: ColumnDef?)
+  variant RenameColumn(table: String, name: String, to: String)
+  variant ChangeColumn(table: String, name: String, null: Bool?, default: DefaultChange?, was: Was?)
+  variant CreateIndex(index: IndexDef)
+  # (`index` nil: named alone, so not reversible.)
+  variant DropIndex(name: String, index: IndexDef?, concurrently: Bool)
+  variant AddForeignKey(table: String, column: String, reference: Reference)
+  variant Execute(sql: String, down: String?)
+
+  # The call that records it, for messages: `create_table :users`.
+  def describe -> String
+    case self
+    in CreateTable(name:) then "create_table :#{name}"
+    in DropTable(name:) then "drop_table :#{name}"
+    in RenameTable(name:, to:) then "rename_table :#{name}, :#{to}"
+    in AddColumn(table:, column:) then "add_column :#{table}, :#{column.name}"
+    in RemoveColumn(table:, name:) then "remove_column :#{table}, :#{name}"
+    in RenameColumn(table:, name:, to:) then "rename_column :#{table}, :#{name}, :#{to}"
+    in ChangeColumn(table:, name:) then "change_column :#{table}, :#{name}"
+    in CreateIndex(index:) then "create_index :#{index.table}, #{index.columns.inspect}"
+    in DropIndex(name:) then "drop_index #{name}"
+    in AddForeignKey(table:, column:) then "a foreign key on #{table}.#{column}"
+    in Execute(sql:) then "execute #{sql.inspect}"
+    end
+  end
+
+  # The operation that undoes this one; raises
+  # `Rotor::IrreversibleMigration` when it cannot be known.
+  def reverse -> Operation
+    case self
+    in CreateTable(name:, columns:, indexes:, if_not_exists:) then DropTable.new(name, columns, indexes, if_not_exists)
+    in DropTable(name:, columns:, indexes:, if_exists:)
+      cols = columns || Operation.irreversible(self, "give its columns in a block")
+      CreateTable.new(name, cols, indexes, if_exists)
+    in RenameTable(name:, to:) then RenameTable.new(to, name)
+    in AddColumn(table:, column:) then RemoveColumn.new(table, column.name, column)
+    in RemoveColumn(table:, column:)
+      c = column || Operation.irreversible(self, "give its type")
+      AddColumn.new(table, c)
+    in RenameColumn(table:, name:, to:) then RenameColumn.new(table, to, name)
+    in ChangeColumn(table:, name:, null:, default:, was:)
+      w = was || Operation.irreversible(self, "give `from:`")
+      if (!null.nil? && w.null.nil?) || (!default.nil? && w.default.nil?)
+        Operation.irreversible(self, "give in `from:` what it was for each setting it changes")
+      end
+      ChangeColumn.new(table, name, null.nil? ? nil : w.null, default.nil? ? nil : w.default, Was.new(null, default))
+    in CreateIndex(index:) then DropIndex.new(index.name, index, index.concurrently)
+    in DropIndex(index:)
+      i = index || Operation.irreversible(self, "give its columns")
+      CreateIndex.new(i)
+    in AddForeignKey then Operation.irreversible(self, "")
+    in Execute(sql:, down:)
+      d = down || Operation.irreversible(self, "give `down:`")
+      Execute.new(d, sql)
+    end
+  end
+
+  # (`op` cannot be reversed; `hint` says what would make it so.)
+  def self.irreversible(op: Operation, hint: String) -> Nothing
+    raise IrreversibleMigration.new("#{op.describe} cannot be reversed#{hint.empty? ? "" : ": #{hint}"}")
+  end
+end
+
+# The columns of a table that `create_table` (or a reversible
+# `drop_table`) declares: the block's `t`.
+class TableBuilder
+  @table: String
+  var @columns: Array[ColumnDef] = []
+  var @indexes: Array[IndexDef] = []
+
+  # (For `table`.)
+  def initialize(@table: String)
+  end
+
+  # The columns declared so far.
+  def columns -> Array[ColumnDef] = @columns
+
+  # The indexes declared so far.
+  def indexes -> Array[IndexDef] = @indexes
+
+  # An `Int` column (`bigint`). `null:` admits NULL, `default:` is its
+  # default, `primary:` makes it the primary key (no `id` is added then).
+  def column(name: Symbol, type: Type[Int], *, null: Bool = false, default: Int | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "bigint", null, default, primary))
+  end
+
+  # A `Float` column (`double precision`).
+  def column(name: Symbol, type: Type[Float], *, null: Bool = false, default: Float | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "double precision", null, default, primary))
+  end
+
+  # A `String` column (`text`).
+  def column(name: Symbol, type: Type[String], *, null: Bool = false, default: String | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "text", null, default, primary))
+  end
+
+  # A `Bool` column (`boolean`).
+  def column(name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "boolean", null, default, primary))
+  end
+
+  # A `Time` column (`timestamptz`): its default only as SQL
+  # (`Rotor::SQL.raw("now()")`).
+  def column(name: Symbol, type: Type[Time], *, null: Bool = false, default: SQL::Raw? = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "timestamptz", null, default, primary))
+  end
+
+  # A `Bytes` column (`bytea`).
+  def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "bytea", null, default, primary))
+  end
+
+  # A column of an SQL type rotor has no class for (`sql:
+  # "numeric(12,2)"`), which a model reads as a `String`, as pg gives it.
+  def column(name: Symbol, *, sql: String, null: Bool = false, default: String | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, Columns.type_name(sql), null, default, primary))
+  end
+
+  # `created_at` and `updated_at`, `timestamptz` and not NULL, which
+  # `Rotor::Repo` sets.
+  def timestamps -> Void
+    add(Columns.make(:created_at, "timestamptz", false, nil, false))
+    add(Columns.make(:updated_at, "timestamptz", false, nil, false))
+  end
+
+  # `<name>_id`, a `bigint` that references `to_table` (by default
+  # `name` plural: `users`) by its `id`, with `ON DELETE on_delete`, and
+  # an index unless `index: false`.
+  def references(name: Symbol, *, to_table: Symbol? = nil, on_delete: Symbol? = nil, null: Bool = false, index: Bool = true) -> Void
+    c = Columns.reference(name, to_table, on_delete, null)
+    add(c)
+    @indexes = @indexes + [Columns.index(@table, [c.name], nil, false, nil, false)] if index
+  end
+
+  # An index of the table on `columns`.
+  def index(columns: Array[Symbol], *, unique: Bool = false, name: Symbol? = nil, where: String? = nil) -> Void
+    @indexes = @indexes + [Columns.index(@table, columns.map { |c| Columns.ident(c.to_s) }, name, unique, where, false)]
+  end
+
+  private def add(c: ColumnDef) -> Void
+    raise ArgumentError.new("the table #{@table} declares the column #{c.name} twice") if @columns.any? { |d| d.name == c.name }
+    if c.primary && @columns.any? { |d| d.primary }
+      raise ArgumentError.new("the table #{@table} declares a second primary key, #{c.name}")
+    end
+    @columns = @columns + [c]
+  end
+end
+
+# :nodoc:
+# What the DSL's calls share: names checked, columns and indexes made.
+module Columns
+  # `name`, which must be a PostgreSQL identifier: not empty, no NUL,
+  # under 64 bytes (longer ones the server would cut).
+  def self.ident(name: String) -> String
+    if name.empty? || name.include?("\0") || name.bytesize >= 64
+      raise ArgumentError.new("#{name.inspect} is not a valid SQL name (empty, a NUL, or 64 bytes or more)")
+    end
+    name
+  end
+
+  # An SQL type as written in `sql:`: not empty, no NUL, no `;`.
+  def self.type_name(sql: String) -> String
+    if sql.strip.empty? || sql.include?("\0") || sql.include?(";")
+      raise ArgumentError.new("#{sql.inspect} is not an SQL type")
+    end
+    sql
+  end
+
+  def self.make(name: Symbol, type: String, null: Bool, default: Default?, primary: Bool) -> ColumnDef
+    raise ArgumentError.new("the primary key #{name} cannot be NULL") if primary && null
+    ColumnDef.new(ident(name.to_s), type, null, default, primary, false, nil)
+  end
+
+  # The SQL type of a column of class `type` (`Int` and the others), for
+  # `remove_column`.
+  def self.sql_type(type: Type[Object]) -> String
+    if type == Int
+      "bigint"
+    elsif type == Float
+      "double precision"
+    elsif type == String
+      "text"
+    elsif type == Bool
+      "boolean"
+    elsif type == Time
+      "timestamptz"
+    elsif type == Bytes
+      "bytea"
+    else
+      raise ArgumentError.new("no column type #{type.name}: give `sql:`")
+    end
+  end
+
+  ON_DELETE = [:cascade, :set_null, :restrict, :no_action]
+
+  def self.reference(name: Symbol, to_table: Symbol?, on_delete: Symbol?, null: Bool) -> ColumnDef
+    if (d = on_delete) && !ON_DELETE.include?(d)
+      raise ArgumentError.new("on_delete: #{d.inspect} is not one of #{ON_DELETE.map { |s| s.inspect }.join(", ")}")
+    end
+    target = ident((to_table || Inflector.pluralize(name.to_s).to_sym).to_s)
+    ColumnDef.new(ident("#{name}_id"), "bigint", null, nil, false, false, Reference.new(target, "id", on_delete))
+  end
+
+  # An index, named `<table>_<columns>_index` unless `name` is given.
+  def self.index(table: String, columns: Array[String], name: Symbol?, unique: Bool, where: String?, concurrently: Bool) -> IndexDef
+    raise ArgumentError.new("an index of #{table} on no column") if columns.empty?
+    n = if given = name
+          ident(given.to_s)
+        else
+          auto = "#{table}_#{columns.join("_")}_index"
+          if auto.bytesize >= 64
+            raise ArgumentError.new("the index name #{auto} would be 64 bytes or more: give `name:`")
+          end
+          auto
+        end
+    IndexDef.new(table, columns, n, unique, where, concurrently)
+  end
+end
+
+# A change of a database's schema, with its version: a subclass says
+# `version` (an `Int`, unique among the migrations; the generator will
+# use the UTC time, `20261107120000`) and either `change`, which
+# rolling back reverses, or `up` and `down`.
+#
+# ```quarz no_run
+# class CreateUsers < Rotor::Migration
+#   version 20261107120000
+#
+#   def change
+#     create_table :users do |t|
+#       t.column :email, String
+#       t.column :age, Int, default: 0
+#       t.timestamps
+#     end
+#     create_index :users, [:email], unique: true
+#   end
+# end
+# ```
+#
+# Forward, each call of `change` runs as it is made, in the migration's
+# transaction, so that `repo` (the migrator's repository, bound to that
+# transaction) sees what the calls above it did. Backward, `change` is
+# run again to record its calls, without running them, and their
+# reverses run in the reverse order: a call that cannot be reversed
+# (`drop_table` without its columns, `remove_column` without its type,
+# `change_column` without `from:`, `drop_index` by name alone, `execute`
+# without `down:`), or `repo` used in `change`, raises
+# `Rotor::IrreversibleMigration` before any runs. Use `up` and `down`
+# for those.
+class Migration
+  # What `change_column` takes to drop a column's default.
+  NO_DEFAULT = NoDefault.new
+
+  var @repo: Repo? = nil
+  var @recording: Bool = false
+  var @recorded: Array[Operation] = []
+
+  # (Made by `make`.)
+  def initialize
+  end
+
+  # The migration's version, which its `version` statement sets (0
+  # without one).
+  def self.migration_version -> Int = 0
+
+  # Whether the migration runs in a transaction: true unless its class
+  # says `disable_transaction!`.
+  def self.transaction? -> Bool = true
+
+  # :nodoc:
+  def self.make -> Migration = new
+
+  # Declares the migration's version, and checks that the class defines
+  # `change`, or `up` and `down`, not both: an error where the class is
+  # compiled.
+  static def self.version(v: Int) -> Void
+    raise ArgumentError.new("#{self.name}'s version must be positive, not #{v}") if v <= 0
+    has_change = method?(:change)
+    has_up = method?(:up)
+    has_down = method?(:down)
+    if has_change && (has_up || has_down)
+      raise ArgumentError.new("#{self.name} defines `change` and `up`/`down`: either `change`, or `up` and `down`")
+    end
+    if !has_change && !(has_up && has_down)
+      raise ArgumentError.new("#{self.name} defines neither `change` nor `up` and `down`")
+    end
+    doc "The migration's version: #{v}."
+    def_class_method(:migration_version) { v }
+    if has_change
+      c = method_ref[() -> Void](:change)
+      def_method(:forward, visibility: :protected) { c.bind(self).call }
+    else
+      u = method_ref[() -> Void](:up)
+      d = method_ref[() -> Void](:down)
+      def_method(:forward, visibility: :protected) { u.bind(self).call }
+      def_method(:backward, visibility: :protected) { d.bind(self).call }
+      def_method(:explicit_down?, visibility: :protected) { true }
+    end
+  end
+
+  # Runs the migration outside a transaction (for `create_index ...,
+  # concurrently: true`, which PostgreSQL refuses in one): its version
+  # is recorded after it succeeds, and a failure leaves what it did.
+  static def self.disable_transaction! -> Void
+    def_class_method(:transaction?) { false }
+  end
+
+  # The migrator's repository, in the migration's transaction: for data
+  # migrations (`repo.exec`, `repo.query`). In `change` it makes the
+  # migration irreversible: rolling back raises
+  # `Rotor::IrreversibleMigration` (write `up` and `down`).
+  def repo -> Repo
+    if @recording
+      raise IrreversibleMigration.new("#{self.class.name} uses `repo`, which cannot be recorded (to reverse `change`, or for `plan`): write `up` and `down`")
+    end
+    @repo || raise ArgumentError.new("#{self.class.name}'s `repo` is used outside a migrator's run")
+  end
+
+  # Creates the table `name`, its columns declared by the block, with an
+  # `id` (`bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY`) first
+  # unless `primary_key: false`, another name for it (`primary_key:
+  # :uid`), or a column declared `primary: true`. With `if_not_exists:
+  # true` it reverses to `drop_table ..., if_exists: true` (as in Ecto:
+  # rolling back drops the table even if it existed before).
+  def create_table(name: Symbol, *, primary_key: Bool | Symbol = true, if_not_exists: Bool = false, &: (TableBuilder) -> Void) -> Void
+    table = Columns.ident(name.to_s)
+    t = TableBuilder.new(table)
+    yield t
+    cols = t.columns
+    has_primary = cols.any? { |c| c.primary }
+    case primary_key
+    in Symbol => key
+      raise ArgumentError.new("the table #{table} names its key #{key} and declares a primary column") if has_primary
+      cols = [Migration.identity(key)] + cols
+    in Bool => wanted
+      cols = [Migration.identity(:id)] + cols if wanted && !has_primary
+    end
+    run(Operation::CreateTable.new(table, cols, t.indexes, if_not_exists))
+  end
+
+  # Drops the table `name`: not reversible, unless its columns are given
+  # in a block as `create_table`'s (its `id` included as there).
+  def drop_table(name: Symbol, *, if_exists: Bool = false) -> Void
+    run(Operation::DropTable.new(Columns.ident(name.to_s), nil, [], if_exists))
+  end
+
+  # :ditto:
+  def drop_table(name: Symbol, *, primary_key: Bool | Symbol = true, if_exists: Bool = false, &: (TableBuilder) -> Void) -> Void
+    table = Columns.ident(name.to_s)
+    t = TableBuilder.new(table)
+    yield t
+    cols = t.columns
+    has_primary = cols.any? { |c| c.primary }
+    case primary_key
+    in Symbol => key
+      raise ArgumentError.new("the table #{table} names its key #{key} and declares a primary column") if has_primary
+      cols = [Migration.identity(key)] + cols
+    in Bool => wanted
+      cols = [Migration.identity(:id)] + cols if wanted && !has_primary
+    end
+    run(Operation::DropTable.new(table, cols, t.indexes, if_exists))
+  end
+
+  # Renames the table `name` to `to`. Its indexes keep their names
+  # (`<name>_<columns>_index`): `drop_index` by columns on the new name
+  # does not find them; name them with `name:`.
+  def rename_table(name: Symbol, to: Symbol) -> Void
+    run(Operation::RenameTable.new(Columns.ident(name.to_s), Columns.ident(to.to_s)))
+  end
+
+  # Adds a column to `table`, as `create_table`'s `t.column` declares
+  # one.
+  def add_column(table: Symbol, name: Symbol, type: Type[Int], *, null: Bool = false, default: Int | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, "bigint", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[Float], *, null: Bool = false, default: Float | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, "double precision", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[String], *, null: Bool = false, default: String | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, "text", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, "boolean", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[Time], *, null: Bool = false, default: SQL::Raw? = nil) -> Void
+    add(table, Columns.make(name, "timestamptz", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, "bytea", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, *, sql: String, null: Bool = false, default: String | SQL::Raw | Nil = nil) -> Void
+    add(table, Columns.make(name, Columns.type_name(sql), null, default, false))
+  end
+
+  # Removes the column `name` of `table`: not reversible.
+  def remove_column(table: Symbol, name: Symbol) -> Void
+    run(Operation::RemoveColumn.new(Columns.ident(table.to_s), Columns.ident(name.to_s), nil))
+  end
+
+  # Removes the column `name` of `table`, reversibly: its class (`Int`
+  # and the others) and settings as `add_column` takes them.
+  def remove_column(table: Symbol, name: Symbol, type: Type[Object], *, null: Bool = false, default: Default? = nil) -> Void
+    c = Columns.make(name, Columns.sql_type(type), null, default, false)
+    run(Operation::RemoveColumn.new(Columns.ident(table.to_s), c.name, c))
+  end
+
+  # :ditto:
+  def remove_column(table: Symbol, name: Symbol, *, sql: String, null: Bool = false, default: Default? = nil) -> Void
+    c = Columns.make(name, Columns.type_name(sql), null, default, false)
+    run(Operation::RemoveColumn.new(Columns.ident(table.to_s), c.name, c))
+  end
+
+  # Renames the column `name` of `table` to `to`.
+  def rename_column(table: Symbol, name: Symbol, to: Symbol) -> Void
+    run(Operation::RenameColumn.new(Columns.ident(table.to_s), Columns.ident(name.to_s), Columns.ident(to.to_s)))
+  end
+
+  # Changes the column `name` of `table`: whether it admits NULL
+  # (`null:`), its default (`default:`, `NO_DEFAULT` to drop it); nil
+  # leaves a setting as it is. Reversible with `from:`, what each
+  # setting changed was (`from: Rotor::Was.new(null: true, default:
+  # Rotor::Migration::NO_DEFAULT)`). A change of type goes through
+  # `execute`.
+  def change_column(table: Symbol, name: Symbol, *, null: Bool? = nil, default: DefaultChange? = nil, from: Was? = nil) -> Void
+    raise ArgumentError.new("change_column :#{table}, :#{name} changes nothing: give `null:` or `default:`") if null.nil? && default.nil?
+    run(Operation::ChangeColumn.new(Columns.ident(table.to_s), Columns.ident(name.to_s), null, default, from))
+  end
+
+  # Adds `<name>_id` to `table`, a `bigint` that references `to_table`
+  # (by default `name` plural) by its `id`, and an index on it unless
+  # `index: false`.
+  def add_reference(table: Symbol, name: Symbol, *, to_table: Symbol? = nil, on_delete: Symbol? = nil, null: Bool = false, index: Bool = true) -> Void
+    t = Columns.ident(table.to_s)
+    c = Columns.reference(name, to_table, on_delete, null)
+    run(Operation::AddColumn.new(t, c))
+    run(Operation::CreateIndex.new(Columns.index(t, [c.name], nil, false, nil, false))) if index
+  end
+
+  # Removes what `add_reference` added with the same arguments
+  # (reversibly).
+  def remove_reference(table: Symbol, name: Symbol, *, to_table: Symbol? = nil, on_delete: Symbol? = nil, null: Bool = false, index: Bool = true) -> Void
+    t = Columns.ident(table.to_s)
+    c = Columns.reference(name, to_table, on_delete, null)
+    if index
+      i = Columns.index(t, [c.name], nil, false, nil, false)
+      run(Operation::DropIndex.new(i.name, i, false))
+    end
+    run(Operation::RemoveColumn.new(t, c.name, c))
+  end
+
+  # Creates an index of `table` on `columns`, named
+  # `<table>_<columns>_index` unless `name:` is given; `where:` (SQL)
+  # makes it partial; `concurrently: true` builds it without locking
+  # writes, which needs `disable_transaction!`.
+  def create_index(table: Symbol, columns: Array[Symbol], *, unique: Bool = false, name: Symbol? = nil, where: String? = nil, concurrently: Bool = false) -> Void
+    t = Columns.ident(table.to_s)
+    run(Operation::CreateIndex.new(Columns.index(t, columns.map { |c| Columns.ident(c.to_s) }, name, unique, where, concurrently)))
+  end
+
+  # Drops an index of `table`: the one `create_index` made on `columns`
+  # (with `name:` when it was given one), reversibly; or by `name:`
+  # alone, not reversibly.
+  def drop_index(table: Symbol, *, columns: Array[Symbol]? = nil, name: Symbol? = nil, unique: Bool = false, where: String? = nil, concurrently: Bool = false) -> Void
+    t = Columns.ident(table.to_s)
+    if cols = columns
+      i = Columns.index(t, cols.map { |c| Columns.ident(c.to_s) }, name, unique, where, concurrently)
+      run(Operation::DropIndex.new(i.name, i, concurrently))
+    elsif n = name
+      run(Operation::DropIndex.new(Columns.ident(n.to_s), nil, concurrently))
+    else
+      raise ArgumentError.new("drop_index :#{table} needs `columns:` or `name:`")
+    end
+  end
+
+  # Runs `sql`, one statement (PostgreSQL takes one per call here: write
+  # several `execute`s); reversible when `down:` gives the SQL that
+  # undoes it.
+  def execute(sql: String, *, down: String? = nil) -> Void
+    run(Operation::Execute.new(sql, down))
+  end
+
+  # The operations the migration runs `direction` (`:up` or `:down`),
+  # recorded without running anything: `change`'s reversed for `:down`.
+  # Raises `Rotor::IrreversibleMigration` as a rollback would, and when
+  # the migration uses `repo` (which a recording cannot run).
+  #
+  # ```
+  # class DocAddViews < Rotor::Migration
+  #   version 20261107120000
+  #
+  #   def change
+  #     add_column :posts, :views, Int, default: 0
+  #   end
+  # end
+  #
+  # DocAddViews.plan(:up).map { |op| Rotor::Migrator.render(op) }    # => [["ALTER TABLE \"posts\" ADD COLUMN \"views\" bigint NOT NULL DEFAULT 0"]]
+  # DocAddViews.plan(:down).map { |op| Rotor::Migrator.render(op) }  # => [["ALTER TABLE \"posts\" DROP COLUMN \"views\""]]
+  # ```
+  def self.plan(direction: Symbol) -> Array[Operation] = make.recorded(direction)
+
+  # :nodoc:
+  def recorded(direction: Symbol) -> Array[Operation]
+    up = direction == :up
+    @recording = true
+    @recorded = []
+    begin
+      if up || !explicit_down?
+        forward
+      else
+        backward
+      end
+    ensure
+      @recording = false
+    end
+    ops = @recorded
+    @recorded = []
+    up || explicit_down? ? ops : ops.reverse.map { |op| op.reverse }
+  end
+
+  # :nodoc:
+  # Runs the migration up or down (`direction` `:up` or `:down`) with
+  # `repo`.
+  def run_with(repo: Repo, direction: Symbol) -> Void
+    @repo = repo
+    begin
+      if direction == :up
+        forward
+      elsif explicit_down?
+        backward
+      else
+        recorded(:down).each { |op| perform(op) }
+      end
+    ensure
+      @repo = nil
+    end
+  end
+
+  # (Generated by `version`.)
+  protected def forward -> Void = raise MigrationError.new(0, self.class.name, "it has no `version`")
+
+  # (Generated by `version` for `up` and `down`.)
+  protected def backward -> Void = forward
+
+  # (Generated by `version`: whether the class has `down`.)
+  protected def explicit_down? -> Bool = false
+
+  private def add(table: Symbol, c: ColumnDef) -> Void
+    run(Operation::AddColumn.new(Columns.ident(table.to_s), c))
+  end
+
+  # Records `op` (rolling back `change`) or runs it.
+  private def run(op: Operation) -> Void
+    if @recording
+      @recorded = @recorded + [op]
+    else
+      perform(op)
+    end
+  end
+
+  private def perform(op: Operation) -> Void
+    r = @repo || raise ArgumentError.new("#{self.class.name}: #{op.describe} outside a migrator's run")
+    Migrator.render(op).each { |sql| r.exec(sql) }
+  end
+
+  # An identity primary key named `name`.
+  def self.identity(name: Symbol) -> ColumnDef
+    ColumnDef.new(Columns.ident(name.to_s), "bigint", false, nil, true, true, nil)
+  end
+end

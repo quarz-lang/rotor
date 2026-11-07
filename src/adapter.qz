@@ -7,6 +7,19 @@ abstract class Adapter
   # Runs the block in a transaction, given an adapter bound to it:
   # committed when the block returns, rolled back when it raises.
   abstract def transaction(&: (Adapter) -> Object?) -> Object?
+
+  # Runs the block with an adapter whose statements all go through one
+  # connection (a session's state, an advisory lock, stays theirs):
+  # this one when it has a single connection.
+  def hold(&: (Adapter) -> Object?) -> Object? = yield self
+
+  # Whether a transaction is open on the connection this adapter holds
+  # (false when it holds none, over a pool).
+  def in_transaction? -> Bool = false
+
+  # Whether the adapter takes its connections from a pool, so that one
+  # `hold` gives back is its to reset.
+  def pooled? -> Bool = false
 end
 
 # The rows a statement gave, and how many it changed.
@@ -98,6 +111,21 @@ module Adapters
                  @pool.as(::PG::Pool).query(sql, params)
                end
       PGRows.new(result)
+    end
+
+    def in_transaction? -> Bool
+      c = @conn
+      !c.nil? && c.transaction_status != :idle
+    end
+
+    def pooled? -> Bool = !@pool.nil?
+
+    def hold(&: (Adapter) -> Object?) -> Object?
+      if @conn
+        yield self
+      else
+        @pool.as(::PG::Pool).with { |c| yield PG.new(connection: c) }
+      end
     end
 
     def transaction(&: (Adapter) -> Object?) -> Object?
