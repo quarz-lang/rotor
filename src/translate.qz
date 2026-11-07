@@ -234,6 +234,10 @@ class Translator
       # (Its branches are values when it is one, or when it is not a
       # `Bool`: a condition tests the `CASE` for NULL then.)
       branches = @value || classes(e).any? { |k| k != Bool && k != Nil }
+      # (As a condition, one that is not a `Bool` is its branches' truth,
+      # each tested (`if_truth`): no value of it is needed, nor a type its
+      # branches have in common.)
+      return if_truth(c, t, f) if branches && !@value
       # (A condition its guards decide (`decided`): the branch it takes.)
       unless (dd = decided(cond)).nil?
         d = dd.as(Bool)
@@ -995,9 +999,15 @@ class Translator
     # SQL the comparison is an error, or compares text. Nil aside: a nil
     # is `IS NULL`.)
     if op == "=" || op == "<>"
-      ls = valued(true) { classes(le) }.reject { |k| k == Nil }
-      rs = valued(true) { classes(re) }.reject { |k| k == Nil }
+      lk = valued(true) { classes(le) }
+      rk = valued(true) { classes(re) }
+      ls = lk.reject { |k| k == Nil }
+      rs = rk.reject { |k| k == Nil }
       unless Translator.meet?(ls, rs)
+        # (Both nil, they are equal: say so, with what to write.)
+        if lk.include?(Nil) && rk.include?(Nil)
+          raise UntranslatableError.new("`#{Translator.show(whole)}` holds only where both are nil (#{@file}:#{line}): #{Translator.never_equal(ls, rs)} otherwise; write `#{Translator.shown_operand(le)}.nil? && #{Translator.shown_operand(re)}.nil?`")
+        end
         raise UntranslatableError.new("`#{Translator.show(whole)}` is always #{op == "=" ? "false" : "true"} (#{@file}:#{line}): #{Translator.never_equal(ls, rs)}")
       end
     end
@@ -1338,9 +1348,11 @@ class Translator
       end
       # (Items of a class the target's never equal: found nowhere, as
       # `==` is #41.)
-      ts = valued(true) { classes(x) }.reject { |c| c == Nil }
-      unless Translator.meet?(ts, [k])
-        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts, [k])}")
+      ts = valued(true) { classes(x) }
+      unless Translator.meet?(ts.reject { |c| c == Nil }, [k])
+        # (With a nil among the items: found where the target is nil.)
+        return is_null(operand(x), "IS NULL") if nils
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts.reject { |c| c == Nil }, [k])}")
       end
     end
     target = operand(x)
@@ -1381,14 +1393,21 @@ class Translator
          end
     # (Items of a class the target's never equal, as `==` is #41: none
     # that can be, always false; some, the others named.)
-    ts = valued(true) { classes(x) }.reject { |c| c == Nil }
+    tk = valued(true) { classes(x) }
+    ts = tk.reject { |c| c == Nil }
+    # (An item of a class the target's never equals, which is not nil
+    # where the target is: equal where both are nil, not otherwise.)
     apart = es.reject { |e| Translator.meet?(ts, valued(true) { classes(e) }.reject { |c| c == Nil }) }
     unless apart.empty?
-      if apart.size == es.size
-        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts, valued(true) { classes(es[0]) }.reject { |c| c == Nil })}")
-      end
       e = apart[0]
-      raise UntranslatableError.new("`#{Translator.show(e)}` in `#{Translator.show(whole)}` is never equal to `#{Translator.show(x)}` (#{@file}:#{line}): #{Translator.never_equal(valued(true) { classes(e) }.reject { |c| c == Nil }, ts)}")
+      ek = valued(true) { classes(e) }
+      both = tk.include?(Nil) && ek.include?(Nil) ? " but where both are nil" : ""
+      if apart.size == es.size && both.empty?
+        ks: Array[Type[Object]] = []
+        es.each { |i| ks = Translator.union(ks, valued(true) { classes(i) }.reject { |c| c == Nil }) }
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts, ks)}")
+      end
+      raise UntranslatableError.new("`#{Translator.show(e)}` in `#{Translator.show(whole)}` is never equal to `#{Translator.show(x)}`#{both} (#{@file}:#{line}): #{Translator.never_equal(ek.reject { |c| c == Nil }, ts)}")
     end
     items = es.map { |e| operand(e) }
     # (A nil among them is `IS NULL`: `IN` never finds a NULL.)

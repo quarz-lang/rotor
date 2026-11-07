@@ -572,6 +572,15 @@ class QueryTest < Test::Case
     assert_match(/\A`\[sym\].include\?\(name\)` is always false \(.*\): a `String` and a `Symbol` are never equal\z/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Person.where { [name, age].include?(email) } }
     assert_match(/\A`age` in `\[name, age\].include\?\(email\)` is never equal to `email` \(.*\): an `Int` and a `String` are never equal\z/, e.message)
+    # With a nil among them: found where the target is nil.
+    check(Gauge.where { [nil, 1].include?(label) }, "#{GS} WHERE \"label\" IS NULL", [])
+    ns: Array[Int?] = [nil, 1]
+    check(Gauge.where { ns.include?(label) }, "#{GS} WHERE \"label\" IS NULL", [])
+    # Both can be nil: equal there only.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level == label } }
+    assert_match(/\A`level == label` holds only where both are nil \(.*\): an `Int` and a `String` are never equal otherwise; write `level.nil\? && label.nil\?`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { [label].include?(level) } }
+    assert_match(/\A`label` in `\[label\].include\?\(level\)` is never equal to `level` but where both are nil/, e.message)
     # Items that can be equal.
     check(Person.where { [1, 2].include?(age) }, "#{COLS} WHERE \"age\" = ANY($1)", [[1, 2]])
     check(Person.where { [1.5].include?(age) }, "#{COLS} WHERE \"age\" = ANY($1::double precision[])", [[1.5]])
@@ -589,6 +598,9 @@ class QueryTest < Test::Case
     check(Gauge.where { ((on ? label : nil) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"label\" IS NOT NULL ELSE FALSE END THEN 1 ELSE 0 END = 1", [])
     check(Gauge.where { ((on ? on : label) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"on\" ELSE \"label\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
     check(Person.where { ((admin ? email : name) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL ELSE \"name\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    # Branches that are no value as a condition: each tested.
+    check(Gauge.where { ((if on then (level > 1 && label) else label end) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"level\" > 1 AND \"label\" IS NOT NULL ELSE \"label\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    check(Gauge.where { !(if on then (!level.nil? && level > 1 && label) else label end) }, "#{GS} WHERE NOT CASE WHEN \"on\" THEN NOT \"level\" IS NULL AND \"level\" > 1 AND \"label\" IS NOT NULL ELSE \"label\" IS NOT NULL END", [])
     # A nullable `Bool` branch: NULL there, so `!` is refused as before.
     e = assert_raise(Rotor::UntranslatableError) { Flagged.where { !(id > 1 ? vip : "x") } }
     assert_match(/three-valued in SQL when `vip` can be NULL/, e.message)

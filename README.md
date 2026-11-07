@@ -171,13 +171,14 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   values whose classes never meet (`name == true`, `name != 1`; `Int`s
   and `Float`s meet, nil is `IS NULL`) they are refused when the query
   is built, as always false (`!=`: always true), where PostgreSQL would
-  refuse them or compare text (#41). Between columns or expressions they
-  are `=` and `<>` when neither side can be NULL (`age == (flag ? x :
-  y)` with captured `Int`s is `"age" = CASE ... END`, which an index
-  serves), and `IS [NOT] DISTINCT FROM`, which no index serves, when one
-  can: a column that admits NULL, or a `CASE` with a nil branch, without
-  `else` or with such a column in a branch. `include?` finds nil with
-  `IS NULL`.
+  refuse them or compare text (#41); where both can be nil, equal only
+  then, the message says to write `x.nil? && y.nil?`. Between columns or
+  expressions they are `=` and `<>` when neither side can be NULL (`age
+  == (flag ? x : y)` with captured `Int`s is `"age" = CASE ... END`,
+  which an index serves), and `IS [NOT] DISTINCT FROM`, which no index
+  serves, when one can: a column that admits NULL, or a `CASE` with a
+  nil branch, without `else` or with such a column in a branch.
+  `include?` finds nil with `IS NULL`.
 - Every form rotor translates keeps Quarz's meaning; the shapes it
   cannot are refused when the query is built
   (`Rotor::UntranslatableError`, saying what to write instead). A
