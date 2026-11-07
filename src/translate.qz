@@ -1006,7 +1006,12 @@ class Translator
       unless Translator.meet?(ls, rs)
         # (Both nil, they are equal: say so, with what to write.)
         if lk.include?(Nil) && rk.include?(Nil)
-          raise UntranslatableError.new("`#{Translator.show(whole)}` holds only where both are nil (#{@file}:#{line}): #{Translator.never_equal(ls, rs)} otherwise; write `#{Translator.shown_operand(le)}.nil? && #{Translator.shown_operand(re)}.nil?`")
+          a = Translator.shown_operand(le)
+          b = Translator.shown_operand(re)
+          if op == "="
+            raise UntranslatableError.new("`#{Translator.show(whole)}` holds only where both are nil (#{@file}:#{line}): #{Translator.never_equal(ls, rs)} otherwise; write `#{a}.nil? && #{b}.nil?`")
+          end
+          raise UntranslatableError.new("`#{Translator.show(whole)}` holds but where both are nil (#{@file}:#{line}): #{Translator.never_equal(ls, rs)} otherwise; write `!#{a}.nil? || !#{b}.nil?`")
         end
         raise UntranslatableError.new("`#{Translator.show(whole)}` is always #{op == "=" ? "false" : "true"} (#{@file}:#{line}): #{Translator.never_equal(ls, rs)}")
       end
@@ -1399,9 +1404,11 @@ class Translator
     # where the target is: equal where both are nil, not otherwise.)
     apart = es.reject { |e| Translator.meet?(ts, valued(true) { classes(e) }.reject { |c| c == Nil }) }
     unless apart.empty?
-      e = apart[0]
+      # (One that can be nil where the target can, if any: equal there.)
+      nilable = tk.include?(Nil) ? apart.find { |i| valued(true) { classes(i) }.include?(Nil) } : nil
+      e = nilable || apart[0]
       ek = valued(true) { classes(e) }
-      both = tk.include?(Nil) && ek.include?(Nil) ? " but where both are nil" : ""
+      both = nilable ? " but where both are nil" : ""
       if apart.size == es.size && both.empty?
         ks: Array[Type[Object]] = []
         es.each { |i| ks = Translator.union(ks, valued(true) { classes(i) }.reject { |c| c == Nil }) }

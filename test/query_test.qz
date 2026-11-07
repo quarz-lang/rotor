@@ -579,6 +579,10 @@ class QueryTest < Test::Case
     # Both can be nil: equal there only.
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level == label } }
     assert_match(/\A`level == label` holds only where both are nil \(.*\): an `Int` and a `String` are never equal otherwise; write `level.nil\? && label.nil\?`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level != label } }
+    assert_match(/\A`level != label` holds but where both are nil \(.*\): an `Int` and a `String` are never equal otherwise; write `!level.nil\? \|\| !label.nil\?`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { [on, label].include?(level) } }
+    assert_match(/\A`label` in `\[on, label\].include\?\(level\)` is never equal to `level` but where both are nil/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { [label].include?(level) } }
     assert_match(/\A`label` in `\[label\].include\?\(level\)` is never equal to `level` but where both are nil/, e.message)
     # Items that can be equal.
