@@ -124,7 +124,14 @@ class StatementTest < Test::Case
     check(Item.query.update { {price: qty} }, "UPDATE \"items\" SET \"price\" = \"qty\"", [])
     check(Item.query.update { {qty: qty / 2 - 1} }, "UPDATE \"items\" SET \"qty\" = floor(\"qty\"::numeric / 2)::bigint - 1", [])
     check(Item.query.update { {name: Rotor::SQL.lower(name + "x")} }, "UPDATE \"items\" SET \"name\" = lower(\"name\" || $1)", ["x"])
-    check(Item.query.update { {name: qty > 0 ? note : name} }, "UPDATE \"items\" SET \"name\" = CASE WHEN \"qty\" > 0 THEN \"note\" ELSE \"name\" END", [])
+    check(Item.query.update { {note: qty > 0 ? note : name} }, "UPDATE \"items\" SET \"note\" = CASE WHEN \"qty\" > 0 THEN \"note\" ELSE \"name\" END", [])
+    # A nullable column into a non-null one (rotor#42), as a nil.
+    e = assert_raise(ArgumentError) { Item.query.update { {name: qty > 0 ? note : name} } }
+    assert_match(/\AItem#name cannot be nil/, e.message)
+    e = assert_raise(ArgumentError) { Item.query.update { {name: note} } }
+    assert_match(/\AItem#name cannot be nil \(.*statement_test\.qz:\d+\)\z/, e.message)
+    check(Item.query.update { {name: note || "x"} }, "UPDATE \"items\" SET \"name\" = COALESCE(\"note\", $1::text)", ["x"])
+    check(Item.query.update { {name: note.nil? ? name : Rotor::SQL.not_nil(note)} }, "UPDATE \"items\" SET \"name\" = CASE WHEN \"note\" IS NULL THEN \"name\" ELSE \"note\" END", [])
     # `&&` and `||` as a value are one of their operands, as in Quarz;
     # a `Bool` and another value mixed are refused (no SQL type holds
     # both).

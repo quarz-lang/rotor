@@ -464,6 +464,22 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#41, #42, #43: what the server would refuse is refused when the
+  # query is built; the neighbours run.
+  def test_classes_that_do_not_meet
+    with_repo do |repo|
+      repo.insert(member("ann", 30).with(email: "a@x"))
+      repo.insert(member("bob", 40))
+      assert_raise(Rotor::UntranslatableError) { repo.all(Member.where { name == true }) }
+      assert_equal(1, repo.count(Member.where { age == 30.0 }))
+      assert_raise(ArgumentError) { repo.update_all(Member.query) { {name: email} } }
+      assert_equal(2, repo.update_all(Member.query) { {name: email || name} })
+      assert_equal(["a@x", "bob"], repo.all(Member.order { id }).map { |m| m.name })
+      assert_raise(Rotor::UntranslatableError) { repo.all(Member.order { admin ? age : name }) }
+      assert_equal(["a@x", "bob"], repo.all(Member.order { admin ? age : score }.order { id }).map { |m| m.name })
+    end
+  end
+
   # Rows with NULLs: what `!=` (`IS DISTINCT FROM`) and the explicit
   # form (`!email.nil? && email != e`, `<>`) each find.
   def test_null_semantics

@@ -526,6 +526,37 @@ class QueryTest < Test::Case
     check(Person.where { (email || n) == "x" }, "#{COLS} WHERE \"email\" = $1", ["x"])
   end
 
+  # rotor#41, #43: values of classes that do not meet.
+  def test_classes_that_do_not_meet
+    # `==`/`!=` of classes never equal: always false, always true.
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name == true } }
+    assert_match(/\A`name == true` is always false \(.*query_test\.qz:\d+\): a `String` and a `Bool` are never equal\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name != 1 } }
+    assert_match(/\A`name != 1` is always true \(.*\): a `String` and an `Int` are never equal\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { email == true } }
+    assert_match(/\A`email == true` is always false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (email || name) == true } }
+    assert_match(/\A`\(email \|\| name\) == true` is always false/, e.message)
+    b = true
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { name == b } }
+    assert_match(/\A`name == b` is always false/, e.message)
+    # Classes that meet: `Int` and `Float`, nil (`IS NULL`).
+    check(Person.where { age == 1.5 }, "#{COLS} WHERE \"age\" = $1::double precision", [1.5])
+    s = "a"
+    check(Person.where { name == s }, "#{COLS} WHERE \"name\" = $1", ["a"])
+    xn: Int? = nil
+    check(Person.where { email == xn }, "#{COLS} WHERE \"email\" IS NULL", [])
+    # An `if` of classes no SQL type holds together, as a value.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { (if on then level else label end) == nil } }
+    assert_match(/\A`on \? level : label`, an `Int` or a `String`, as a value cannot be translated to SQL \(.*query_test\.qz:\d+\)\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { on ? level : label } }
+    assert_match(/\A`on \? level : label`, an `Int` or a `String`, as a value/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { ((on ? level : label) || label) == "x" } }
+    assert_match(/\A`\(on \? level : label\) \|\| label`, an `Int` or a `String`, as a value/, e.message)
+    check(Gauge.where { (if on then level else ratio end) > 1.0 }, "#{GS} WHERE CASE WHEN \"on\" THEN \"level\" ELSE \"ratio\" END > $1::double precision", [1.5 - 0.5])
+    check(Gauge.order { on ? level : ratio }, "#{GS} ORDER BY CASE WHEN \"on\" THEN \"level\" ELSE \"ratio\" END", [])
+  end
+
   def test_order_limit_offset
     check(Person.order { name }, "#{COLS} ORDER BY \"name\"", [])
     check(Person.order { name }.desc.order { |p| p.id }, "#{COLS} ORDER BY \"name\" DESC, \"id\"", [])
