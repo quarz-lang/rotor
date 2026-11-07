@@ -385,7 +385,14 @@ class RepoTest < Test::Case
       assert_equal(20, repo.count(branch))
       assert_equal(20, repo.count(any))
       assert_equal(0, repo.count(Legacy.where { n > (flag ? big : y) }))
-      [eq, branch, any].each do |q|
+      # `==` with a CASE that cannot be NULL is `=`: the same rows, and
+      # an index serves it (rotor#38).
+      same = Legacy.where { n == (flag ? x : y) }
+      assert_equal("SELECT \"id\", \"n\" FROM \"legacy\" WHERE \"n\" = CASE WHEN $1::boolean THEN $2::bigint ELSE $3::bigint END", same.to_sql[0])
+      ids = repo.all(eq.order { id }).map { |l| l.id }
+      assert_equal(10, ids.size)
+      assert_equal(ids, repo.all(same.order { id }).map { |l| l.id })
+      [eq, branch, any, same].each do |q|
         sql, params = q.to_sql
         plan = repo.query("EXPLAIN " + sql, params) { |r| r.string(0) }.join("\n")
         # (An Index Scan, or a Bitmap Index Scan, whose condition is
