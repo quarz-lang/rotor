@@ -740,13 +740,7 @@ class Translator
       if arr = ms.find { |x| x.owner == Array }
         untranslatable(Translator.label(arr), line)
       end
-      # (`Rotor::Compare` gives nil an order, false either way: with a
-      # literal nil the comparison is always false, which is not what
-      # was meant. `== nil` is `IS NULL`.)
-      if name != "==" && name != "!=" && (nil_literal?(r) || nil_literal?(a))
-        raise UntranslatableError.new("`#{Translator.show(r)} #{name} #{Translator.show(a)}` is always false (#{@file}:#{line}): compare with a value, or use `nil?`")
-      end
-      return compare(r, sym, a)
+      return compare(r, sym, a, whole, line)
     end
     if op = ARITHMETIC[m.name]?
       l = operand(r)
@@ -814,9 +808,16 @@ class Translator
   # `IS NULL` for nil, `=` otherwise (which an index serves); between
   # columns or expressions, one of which admits NULL, `IS NOT DISTINCT
   # FROM`, as Quarz's `==` takes nil for equal to nil.
-  private def compare(le: Meta::Expr, op: String, re: Meta::Expr) -> Sql
+  private def compare(le: Meta::Expr, op: String, re: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     l = operand(le)
     r = operand(re)
+    # (`Rotor::Compare` gives nil an order, false either way: against a
+    # nil literal, or an `if` that is nil either way, the comparison is
+    # always false, which is not what was meant. A captured nil is an
+    # unset value, and `== nil` is `IS NULL`.)
+    if op != "=" && op != "<>" && (l.pieces == [Piece::Text.new("NULL")] || r.pieces == [Piece::Text.new("NULL")])
+      raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): compare with a value, or use `nil?`")
+    end
     l = coerce(l, r.column)
     r = coerce(r, l.column)
     l, r = typed(l, r), typed(r, l)

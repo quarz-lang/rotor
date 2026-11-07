@@ -240,8 +240,8 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `<=`, `>` and `>=` with a nil (`Int` and `Float` mixed either way):
   nil compares false (Quarz's meaning in
   these blocks), which is what SQL's NULL does in a condition. With a
-  literal nil (`level > nil`) such a comparison is always false, and
-  refused: compare with a value, or use `nil?` (`level == nil` and
+  literal nil (`level > nil`, or an `if` that is nil either way) such a
+  comparison is always false, and refused: compare with a value, or use `nil?` (`level == nil` and
   `level != nil` are `IS NULL` and `IS NOT NULL`). Where the
   two would differ (`!(age > 18)`, an `order` key, an `update` value),
   the query is refused, as above. Outside query blocks `Int? > Int` is
@@ -293,9 +293,9 @@ that type would not be Quarz's. What follows from it:
    condition, under a unary minus (`age > -x`), beside another
    parameter (`lo < hi`, compared as text otherwise) and under `IS
    NULL` (a nil there as `::text`). In arithmetic a `Float` parameter is double precision
-   and an `Int` one a bigint against any column but an `Int`'s, so
-   that `r + 0.1` on a `real` column is computed as Quarz does on the
-   value read. An array is one parameter: pg sends an array of `Int`s
+   against any column, and an `Int` one a bigint against any column
+   but an `Int`'s, so that `r + 0.1` on a `real` column is computed as
+   Quarz does on the value read. An array is one parameter: pg sends an array of `Int`s
    as a `bigint[]` (of `Bool`s, `boolean[]`; of `Bytes`, `bytea[]`),
    the column decides the others' type (`Float`s beside a column that
    is not a `Float`'s are cast, `$1::double precision[]`).

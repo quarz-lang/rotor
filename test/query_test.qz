@@ -240,6 +240,11 @@ class QueryTest < Test::Case
     assert_match(/\A`g.ratio >= nil` is always false/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { nil <= label } }
     assert_match(/\A`nil <= label` is always false/, e.message)
+    flag = true
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { (flag ? level : cap) > (if flag then nil end) } }
+    assert_match(/\A`\(flag \? level : cap\) > \(if flag then nil end\)` is always false/, e.message)
+    # A captured nil is an unset value, as above.
+    check(Gauge.where { level > none }, "#{GS} WHERE \"level\" > $1", [nil])
     check(Gauge.where { level == nil }, "#{GS} WHERE \"level\" IS NULL", [])
     check(Gauge.where { level != nil }, "#{GS} WHERE \"level\" IS NOT NULL", [])
   end
