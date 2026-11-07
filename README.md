@@ -204,25 +204,37 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   [Parameter types](#parameter-types)).
 - Parameters are typed by what they meet, and cast by their value's
   class where PostgreSQL would take another type than Quarz's (see
-  [Parameter types](#parameter-types)). An `if` that is nil either way is
-  `NULL`; one whose condition is a captured value other than a `Bool`
-  is the branch Quarz's truthiness takes; any other condition that is
-  not a `Bool` (a column, an expression; of an `if`, `&&`, `||` or
-  `!`) is tested as Quarz does, true unless nil: `email ? 1 : 0` is
-  `CASE WHEN "email" IS NOT NULL THEN 1 ELSE 0 END` (one that may be a
-  `Bool` or another value is refused). An `update` checks against the
-  column the class of its value, as Quarz gives it: a known value's, a
-  column's, an expression's (an `if`'s branches, arithmetic by its
-  operands: `{qty: -f}` with a `Float`, `{qty: price}` and `{name: qty}`
-  are refused, where PostgreSQL would round or write the number as
-  text; an `Int` into a `Float` column is accepted). `a && b` and
-  `a || b` are a `Bool` in SQL and one of their operands in Quarz: as
-  a value (an `update`'s, an order key, an operand) they are refused
-  unless both operands are `Bool`s; as a condition they test their
-  operands as above. Arithmetic of two `integer`s, as PostgreSQL types `Int`
-  literals and CASEs of them, casts the left one to a bigint:
-  `2000000000 * 2` is `2000000000::bigint * 2`, where an `integer`
-  would overflow; `age + 1` stays as it is.
+  [Parameter types](#parameter-types)). An `if` that is nil either way
+  is `NULL`; one whose condition is a captured value other than a `Bool`
+  is the branch Quarz's truthiness takes, and so is an `&&` or `||`
+  whose left operand is one (`s && admin` is `admin` for a non-nil `s`,
+  `s` for a nil one), and `!` of one is `TRUE` or `FALSE`; any other
+  condition that is not a `Bool` (a column, an expression; of an `if`,
+  `&&`, `||` or `!`) is tested as Quarz does, true unless nil: `email ?
+  1 : 0` is `CASE WHEN "email" IS NOT NULL THEN 1 ELSE 0 END` (one that
+  may be a `Bool` or another value is refused). A column so tested on
+  the left of `&&` is not NULL on its right: `!(email && email == x)` is
+  `NOT ("email" IS NOT NULL AND "email" = $1)`. An `update` checks
+  against the column the class of its value, as Quarz gives it: a known
+  value's, a column's, an expression's (an `if`'s branches, arithmetic
+  by its operands: `{qty: -f}` with a `Float`, `{qty: price}` and
+  `{name: qty}` are refused, where PostgreSQL would round or write the
+  number as text; an `Int` into a `Float` column is accepted). `a && b`
+  and `a || b` are one of their operands in Quarz. As a condition they
+  test their operands as above (`"email" IS NOT NULL OR "name" IS NOT
+  NULL`); as a value (an `update`'s, an order key, an operand, a branch
+  of an `if` that is not a `Bool`) they are that operand: `email ||
+  name` is `COALESCE("email", "name")`, `email && name` is `CASE WHEN
+  "email" IS NOT NULL THEN "name" ELSE NULL END`, and of two `Bool`s,
+  `vip && admin` and `vip || admin` are `AND` and `OR`, or, when `vip`
+  can be NULL, `CASE WHEN "vip" IS TRUE THEN "admin" ELSE "vip" END` and
+  `CASE WHEN "vip" IS TRUE THEN TRUE ELSE "admin" END` (Quarz's `nil &&
+  x` is nil). One that may be a `Bool` or another value (`admin &&
+  name`, `email || admin`) is refused as a value: no SQL type holds both
+  (decided 2026-11-07, #36). Arithmetic of two `integer`s, as PostgreSQL
+  types `Int` literals and CASEs of them, casts the left one to a
+  bigint: `2000000000 * 2` is `2000000000::bigint * 2`, where an
+  `integer` would overflow; `age + 1` stays as it is.
 - `include?` is `col = ANY($1)` with the array as one parameter (pg's
   array parameters): one statement and one translation for every
   length. A nil item is left out of the array and `OR col IS NULL`

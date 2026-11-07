@@ -232,6 +232,7 @@ module Cache
   # The entries a key keeps at most.
   LIMIT = 8
   CONDITIONS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
+  ORDERS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
   PLANS = Atom.new(Hash[CacheKey, Array[Cached[InnerPlan]]].new)
   READS = Atom.new(Hash[CacheKey, Array[Cached[Array[Array[Column]?]]]].new)
   ASSOCIATIONS = Atom.new(Hash[CacheKey, Array[Cached[[Association, Symbol]]]].new)
