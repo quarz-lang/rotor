@@ -581,6 +581,16 @@ class Translator
     out
   end
 
+  # Whether `e` is nil whatever it captured: a nil literal, or an `if`
+  # whose branches are (a missing `else` being nil).
+  private def always_nil?(e: Meta::Expr) -> Bool
+    case e
+    in Meta::Expr::Lit(nil, _) then true
+    in Meta::Expr::If(_, t, f, _) then always_nil?(t) && (f.nil? || always_nil?(f.as(Meta::Expr)))
+    else false
+    end
+  end
+
   private def nil_literal?(e: Meta::Expr) -> Bool
     case e
     in Meta::Expr::Lit(nil, _) then true
@@ -812,10 +822,12 @@ class Translator
     l = operand(le)
     r = operand(re)
     # (`Rotor::Compare` gives nil an order, false either way: against a
-    # nil literal, or an `if` that is nil either way, the comparison is
-    # always false, which is not what was meant. A captured nil is an
-    # unset value, and `== nil` is `IS NULL`.)
-    if op != "=" && op != "<>" && (l.pieces == [Piece::Text.new("NULL")] || r.pieces == [Piece::Text.new("NULL")])
+    # nil literal, or an `if` whose branches are, the comparison is
+    # always false, which is not what was meant. Decided by the source,
+    # never by a captured value: a captured nil is an unset value, and
+    # the same query must build whatever it captured. `== nil` is `IS
+    # NULL`.)
+    if op != "=" && op != "<>" && (always_nil?(le) || always_nil?(re))
       raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): compare with a value, or use `nil?`")
     end
     l = coerce(l, r.column)
