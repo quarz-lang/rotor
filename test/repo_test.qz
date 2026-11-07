@@ -424,7 +424,10 @@ class RepoTest < Test::Case
       # As a value, one of the operands.
       assert_equal(["bob"], names.call(Member.where { (email || name) == "bob" }))
       assert_equal(["cy"], names.call(Member.where { (email && name) == "cy" }))
-      assert_equal(["ann", "bob", "cy"], repo.all(Member.order { email || name }).map { |m| m.name })
+      # (Descending: by `email || name`, not by `name` or `id` alone.)
+      repo.exec("UPDATE members SET email = 'z@x' WHERE name = 'ann'")
+      assert_equal(["ann", "cy", "bob"], repo.all(Member.order { email || name }.desc).map { |m| m.name })
+      repo.exec("UPDATE members SET email = 'a@x' WHERE name = 'ann'")
       assert_equal(["ann", "bob", "cy"], names.call(Member.where { (admin ? (email || name) : "x") ? true : false }))
       # An `if` its capture decides, of such a value: tested as one.
       sy: String? = "y"
@@ -446,6 +449,11 @@ class RepoTest < Test::Case
       repo.update_all(Member.query) { {vip: vip && f} }
       vs: Array[Bool?] = [false, nil, false]
       assert_equal(vs, repo.all(Member.order { id }).map { |m| m.vip })
+      repo.exec("UPDATE members SET vip = NULL WHERE name = 'bob'")
+      # (`nil || false` is false in Quarz, `NULL OR FALSE` NULL.)
+      repo.update_all(Member.query) { {vip: vip || f} }
+      fs: Array[Bool?] = [false, false, false]
+      assert_equal(fs, repo.all(Member.order { id }).map { |m| m.vip })
       repo.exec("UPDATE members SET vip = NULL WHERE name = 'bob'")
       repo.update_all(Member.query) { {vip: vip || t} }
       ts: Array[Bool?] = [true, true, true]

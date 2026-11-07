@@ -1060,8 +1060,14 @@ class Translator
   # an operand may be.
   private def logical_classes(l: Meta::Expr, r: Meta::Expr, conj: Bool, known: Array[[Int, Symbol]]) -> Array[Type[Object]]
     ls = classes(l)
-    # (Folded as `logical` does.)
-    unless (dd = decided(valued(false) { sql(l) })).nil?
+    # (Folded as `logical` does as a value, where more is decided: `sx
+    # && sy` is `sy`. One that is not a value, as a condition.)
+    left = begin
+             valued(true) { sql(l) }
+           rescue UntranslatableError
+             valued(false) { sql(l) }
+           end
+    unless (dd = decided(left)).nil?
       d = dd.as(Bool)
       return ls if d == !conj
       return assuming(known) { classes(r) }
@@ -1310,7 +1316,7 @@ class Translator
 
   # `s.include?(v)`, `start_with?`, `end_with?`: `LIKE` with `v` escaped.
   private def like(s: Sql, arg: Meta::Expr, name: String, label: String, line: Int) -> Sql
-    a = sql(arg)
+    a = value(arg)
     v = a.value
     unless a.known && v.is_a?(String)
       untranslatable("#{label} of something other than a string value", line)

@@ -512,6 +512,8 @@ class QueryTest < Test::Case
     e = assert_raise(Rotor::UntranslatableError) { Person.where { (email || age) == "x" } }
     assert_match(/\A`email \|\| age`, a `String` or an `Int`, as a value cannot be translated/, e.message)
     check(Gauge.where { (level || ratio) == 1.5 }, "#{GS} WHERE COALESCE(\"level\", \"ratio\") = $1::double precision", [1.5])
+    # A pattern is a value.
+    check(Person.where { name.start_with?(sx || "a") }, "#{COLS} WHERE \"name\" LIKE $1", ["x%"])
     # A nil right operand.
     n: Int? = nil
     check(Person.where { (email && n) == 5 }, "#{COLS} WHERE NULL = 5", [])
