@@ -480,9 +480,9 @@ class QueryTest < Test::Case
     e = assert_raise(ArgumentError) { Person.query.update { {admin: email && admin} } }
     assert_match(/\APerson#admin cannot be nil/, e.message)
     # A known left operand decides, as an `if`'s known condition does.
-    check(Person.where { (sn && admin) ? true : false }, "#{COLS} WHERE CASE WHEN FALSE THEN TRUE ELSE FALSE END", [])
+    check(Person.where { (sn && admin) ? true : false }, "#{COLS} WHERE FALSE", [])
     check(Person.where { (sx && admin) ? true : false }, "#{COLS} WHERE CASE WHEN \"admin\" THEN TRUE ELSE FALSE END", [])
-    check(Person.where { (sx || admin) ? true : false }, "#{COLS} WHERE CASE WHEN TRUE THEN TRUE ELSE FALSE END", [])
+    check(Person.where { (sx || admin) ? true : false }, "#{COLS} WHERE TRUE", [])
     check(Person.where { (sn || admin) ? true : false }, "#{COLS} WHERE CASE WHEN \"admin\" THEN TRUE ELSE FALSE END", [])
     assert_equal(["UPDATE \"people\" SET \"admin\" = \"admin\"", Array[Object?].new], Person.query.update { {admin: sx && admin} }.to_sql)
     assert_equal(["UPDATE \"people\" SET \"name\" = $1", Array[Object?].new + ["x"]], Person.query.update { {name: sx || name} }.to_sql)
@@ -494,6 +494,28 @@ class QueryTest < Test::Case
     check(Person.where { |_p| !sx }, "#{COLS} WHERE FALSE", [])
     check(Person.where { |_p| !xb }, "#{COLS} WHERE NOT $1", [true])
     check(Person.where { admin && !sn }, "#{COLS} WHERE \"admin\" AND TRUE", [])
+    # (A constant is no order key.)
+    e = assert_raise(Rotor::UntranslatableError) { Person.order { |_p| !sn } }
+    assert_match(/\Aan order by a constant/, e.message)
+    # An `if` whose condition is decided, of an `&&` or `||` of values:
+    # the branch tested as a value is.
+    check(Person.where { ((sx ? (email || name) : nil) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN COALESCE(\"email\", \"name\") IS NOT NULL THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { !(sx ? (email && name) : nil) }, "#{COLS} WHERE NOT CASE WHEN \"email\" IS NOT NULL THEN \"name\" ELSE NULL END IS NOT NULL", [])
+    check(Person.where { ((if sx || admin then name else age end) || email) == "ann" }, "#{COLS} WHERE COALESCE(\"name\", \"email\") = $1", ["ann"])
+    # The condition of an `if` stays one inside a value.
+    check(Person.where { (!(if admin && email then age end)) == true }, "#{COLS} WHERE (NOT CASE WHEN \"admin\" AND \"email\" IS NOT NULL THEN \"age\" END IS NOT NULL) = TRUE", [])
+    check(Person.where { ((if admin && name then email end) || name) == "x" }, "#{COLS} WHERE COALESCE(CASE WHEN \"admin\" AND \"name\" IS NOT NULL THEN \"email\" END, \"name\") = $1", ["x"])
+    # `&&` whose left can be NULL: nil, into a non-null column refused.
+    e = assert_raise(ArgumentError) { Gauge.query.update { {on: (level || cap) && on} } }
+    assert_match(/\AGauge#on cannot be nil/, e.message)
+    # Classes no SQL type holds together (`Int`s and `Float`s meet).
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { (email || age) == "x" } }
+    assert_match(/\A`email \|\| age`, a `String` or an `Int`, as a value cannot be translated/, e.message)
+    check(Gauge.where { (level || ratio) == 1.5 }, "#{GS} WHERE COALESCE(\"level\", \"ratio\") = $1::double precision", [1.5])
+    # A nil right operand.
+    n: Int? = nil
+    check(Person.where { (email && n) == 5 }, "#{COLS} WHERE NULL = 5", [])
+    check(Person.where { (email || n) == "x" }, "#{COLS} WHERE \"email\" = $1", ["x"])
   end
 
   def test_order_limit_offset

@@ -213,24 +213,26 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `&&`, `||` or `!`) is tested as Quarz does, true unless nil: `email ?
   1 : 0` is `CASE WHEN "email" IS NOT NULL THEN 1 ELSE 0 END` (one that
   may be a `Bool` or another value is refused). A column so tested on
-  the left of `&&` is not NULL on its right: `!(email && email == x)` is
-  `NOT ("email" IS NOT NULL AND "email" = $1)`. An `update` checks
-  against the column the class of its value, as Quarz gives it: a known
-  value's, a column's, an expression's (an `if`'s branches, arithmetic
-  by its operands: `{qty: -f}` with a `Float`, `{qty: price}` and
-  `{name: qty}` are refused, where PostgreSQL would round or write the
-  number as text; an `Int` into a `Float` column is accepted). `a && b`
-  and `a || b` are one of their operands in Quarz. As a condition they
-  test their operands as above (`"email" IS NOT NULL OR "name" IS NOT
-  NULL`); as a value (an `update`'s, an order key, an operand, a branch
-  of an `if` that is not a `Bool`) they are that operand: `email ||
-  name` is `COALESCE("email", "name")`, `email && name` is `CASE WHEN
-  "email" IS NOT NULL THEN "name" ELSE NULL END`, and of two `Bool`s,
-  `vip && admin` and `vip || admin` are `AND` and `OR`, or, when `vip`
-  can be NULL, `CASE WHEN "vip" IS TRUE THEN "admin" ELSE "vip" END` and
-  `CASE WHEN "vip" IS TRUE THEN TRUE ELSE "admin" END` (Quarz's `nil &&
-  x` is nil). One that may be a `Bool` or another value (`admin &&
-  name`, `email || admin`) is refused as a value: no SQL type holds both
+  the left of `&&` (or under `!` on the left of `||`) is not NULL on its
+  right: `!(email && email == x)` is `NOT ("email" IS NOT NULL AND
+  "email" = $1)`. An `update` checks against the column the class of its
+  value, as Quarz gives it: a known value's, a column's, an expression's
+  (an `if`'s branches, arithmetic by its operands: `{qty: -f}` with a
+  `Float`, `{qty: price}` and `{name: qty}` are refused, where
+  PostgreSQL would round or write the number as text; an `Int` into a
+  `Float` column is accepted). `a && b` and `a || b` are one of their
+  operands in Quarz. As a condition they test their operands as above
+  (`"email" IS NOT NULL OR "name" IS NOT NULL`); as a value (an
+  `update`'s, an order key, an operand, a branch of an `if` that is not
+  a `Bool`) they are that operand: `email || name` is `COALESCE("email",
+  "name")`, `email && name` is `CASE WHEN "email" IS NOT NULL THEN
+  "name" ELSE NULL END`, and of two `Bool`s, `vip && admin` and `vip ||
+  admin` are `AND` and `OR`, or, when `vip` can be NULL, `CASE WHEN
+  "vip" IS TRUE THEN "admin" ELSE "vip" END` and `CASE WHEN "vip" IS
+  TRUE THEN TRUE ELSE "admin" END` (Quarz's `nil && x` is nil). One that
+  may be a `Bool` or another value (`admin && name`, `email || admin`)
+  is refused as a value, and so is one of other classes that do not meet
+  (`email || age`; `Int`s and `Float`s do): no SQL type holds both
   (decided 2026-11-07, #36). Arithmetic of two `integer`s, as PostgreSQL
   types `Int` literals and CASEs of them, casts the left one to a
   bigint: `2000000000 * 2` is `2000000000::bigint * 2`, where an

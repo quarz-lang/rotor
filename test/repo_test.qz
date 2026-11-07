@@ -426,6 +426,9 @@ class RepoTest < Test::Case
       assert_equal(["cy"], names.call(Member.where { (email && name) == "cy" }))
       assert_equal(["ann", "bob", "cy"], repo.all(Member.order { email || name }).map { |m| m.name })
       assert_equal(["ann", "bob", "cy"], names.call(Member.where { (admin ? (email || name) : "x") ? true : false }))
+      # An `if` its capture decides, of such a value: tested as one.
+      sy: String? = "y"
+      assert_equal(["ann", "cy"], names.call(Member.where { ((sy ? (email && name) : nil) ? 1 : 0) == 1 }))
       # A known left operand, and `!` of a known value.
       s: String? = "s"
       sn: String? = nil
