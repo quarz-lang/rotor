@@ -1,0 +1,355 @@
+# Runs migrations (`Rotor::Migration` classes) against a database and
+# records which ran in a table (`schema_migrations` unless `table:`
+# says otherwise: `version bigint PRIMARY KEY`, `inserted_at`), which
+# `migrate` and `rollback` create when it is missing.
+#
+# ```quarz no_run
+# class MigCreateUsers < Rotor::Migration
+#   version 20261107120000
+#
+#   def change
+#     create_table :users do |t|
+#       t.column :name, String
+#     end
+#   end
+# end
+#
+# class MigAddAge < Rotor::Migration
+#   version 20261108090000
+#
+#   def change
+#     add_column :users, :age, Int, default: 0
+#   end
+# end
+#
+# PG::Pool.open("postgres://app@localhost/shop") do |pool|
+#   migrator = Rotor::Migrator.new(Rotor::Repo.new(pool: pool), [MigCreateUsers, MigAddAge], log: ->(line: String) { puts line })
+#   migrator.migrate     # [20261107120000, 20261108090000]
+#   migrator.status      # [[20261107120000, "MigCreateUsers", :up], [20261108090000, "MigAddAge", :up]]
+#   migrator.rollback    # [20261108090000]
+# end
+# ```
+#
+# - Each migration runs in a transaction of its own, its version's row
+#   written in it (PostgreSQL's DDL is transactional): one that fails
+#   is rolled back whole, raising `Rotor::MigrationError`, and those
+#   before it stay applied. One whose class says `disable_transaction!`
+#   runs outside one, its row written after it succeeds.
+# - `migrate` and `rollback` take one connection of the repository's
+#   for their whole run (`Rotor::Adapter#hold`), take a session-level
+#   `pg_advisory_lock` on it (its key derived from the table's name),
+#   and run every migration there: two processes migrating at once run
+#   one after the other, the second finding nothing pending.
+#   `lock_timeout:` bounds the wait (PostgreSQL's `lock_timeout`, during
+#   the lock alone); without it the wait has no bound.
+# - Versions are unique among the migrations given. `migrate` refuses
+#   a pending version lower than the highest one applied
+#   (`Rotor::MigrationError`, before running anything), unless
+#   `allow_out_of_order: true`: versions are timestamps, and an older
+#   one appearing late is usually a merge that went wrong, to look at
+#   before it runs. Applied versions without a migration in the list
+#   are shown by `status` as `:unknown`; `rollback` refuses them.
+# - The repository must not be inside a transaction: each migration
+#   opens its own (`ArgumentError` otherwise). When the run ends, a
+#   transaction a migration left open is rolled back and the lock
+#   released; a connection taken from a pool has its settings reset
+#   (`RESET ALL`), so that a migration's SET does not reach the pool,
+#   while a repository over one connection keeps its session as the
+#   migrations left it (theirs and the program's settings alike). A
+#   migration without a transaction that leaves one open fails.
+class Migrator
+  @repo: Repo
+  @migrations: Array[Type[Migration]]
+  @table: String
+  @allow_out_of_order: Bool
+  @lock_timeout: Duration?
+  @log: (shareable (String) -> Void)?
+
+  # A migrator of `migrations` (in any order) over `repo`. `log` gets a
+  # line as each migration starts and ends. Raises `ArgumentError` for a
+  # migration without a version, or two with one version.
+  def initialize(@repo: Repo, migrations: Array[Type[Migration]], *, table: String = "schema_migrations",
+                 @allow_out_of_order: Bool = false, @lock_timeout: Duration? = nil, @log: (shareable (String) -> Void)? = nil)
+    @table = Columns.ident(table)
+    if (t = @lock_timeout) && (t.to_ms < 1 || t.to_ms > 2147483647)
+      raise ArgumentError.new("lock_timeout: #{t.inspect}: from a millisecond (PostgreSQL's 0 is no bound) to 2147483647 ms")
+    end
+    migrations.each do |m|
+      raise ArgumentError.new("#{m.name} has no `version`") if m.migration_version <= 0
+    end
+    @migrations = migrations.sort_by { |m| m.migration_version }
+    @migrations.each_cons(2) do |pair|
+      if pair[0].migration_version == pair[1].migration_version
+        raise ArgumentError.new("#{pair[0].name} and #{pair[1].name} have the same version, #{pair[0].migration_version}")
+      end
+    end
+  end
+
+  # The versions applied, ascending (none when the table is missing).
+  def applied -> Array[Int] = applied_with(@repo)
+
+  # The versions of the migrations given that are not applied,
+  # ascending.
+  def pending -> Array[Int]
+    done = applied
+    @migrations.map { |m| m.migration_version }.reject { |v| done.include?(v) }
+  end
+
+  # Each version, ascending: the migration's class name and `:up`
+  # (applied) or `:pending`; an applied version none of the migrations
+  # has is `:unknown`, with an empty name.
+  def status -> Array[[Int, String, Symbol]]
+    done = applied
+    known: Array[[Int, String, Symbol]] = @migrations.map do |m|
+      v = m.migration_version
+      [v, m.name, done.include?(v) ? :up : :pending]
+    end
+    unknown: Array[[Int, String, Symbol]] = done.reject { |v| @migrations.any? { |m| m.migration_version == v } }.map { |v| [v, "", :unknown] }
+    (known + unknown).sort_by { |s| s[0] }
+  end
+
+  # Runs the pending migrations, ascending, up to and including `to`
+  # when it is given: the versions run.
+  def migrate(*, to: Int? = nil) -> Array[Int]
+    locked do |r|
+      done = applied_with(r)
+      todo = @migrations.reject { |m| done.include?(m.migration_version) }
+      if limit = to
+        todo = todo.select { |m| m.migration_version <= limit }
+      end
+      if (top = done.last?) && !@allow_out_of_order
+        if late = todo.find { |m| m.migration_version < top }
+          raise MigrationError.new(late.migration_version, late.name, "older than #{top}, which is applied: a migration that appeared late (pass `allow_out_of_order: true` to run it)")
+        end
+      end
+      todo.each { |m| run_one(r, m, :up) }
+      todo.map { |m| m.migration_version }
+    end
+  end
+
+  # Rolls back the `steps` highest versions applied, highest first (as
+  # Ecto: by version, not by when they were applied, which differ only
+  # after `allow_out_of_order:`): the versions rolled back.
+  def rollback(*, steps: Int = 1) -> Array[Int]
+    raise ArgumentError.new("rollback of #{steps} steps") if steps < 0
+    locked { |r| undo(r, applied_with(r).reverse.first(steps)) }
+  end
+
+  # Rolls back the versions applied above `to` (which stays applied),
+  # highest first: the versions rolled back.
+  def rollback(*, to: Int) -> Array[Int]
+    locked { |r| undo(r, applied_with(r).reverse.select { |v| v > to }) }
+  end
+
+  private def undo(r: Repo, versions: Array[Int]) -> Array[Int]
+    found = versions.map do |v|
+      @migrations.find { |m| m.migration_version == v } || raise MigrationError.new(v, "", "applied, but none of the migrations given has this version")
+    end
+    found.each { |m| run_one(r, m, :down) }
+    versions
+  end
+
+  # The block's value, with a repository on one connection that holds
+  # the advisory lock, the table made. Afterwards, whatever the block
+  # did: a transaction a migration left open rolled back, the lock
+  # released, and a connection taken from a pool reset (`RESET ALL`);
+  # an error doing so is raised only when the block raised none.
+  # Refuses a repository inside a transaction.
+  private def locked[R](&: (Repo) -> R) -> R
+    if @repo.adapter.in_transaction?
+      raise ArgumentError.new("a migrator's repository must not be inside a transaction: each migration opens its own")
+    end
+    results: Array[R] = []
+    pooled = @repo.adapter.pooled?
+    @repo.adapter.hold do |a|
+      r = Repo.new(a)
+      key = Migrator.lock_key(@table)
+      cleanup: StandardError? = nil
+      begin
+        if t = @lock_timeout
+          # (The session's own value restored after, not the default.)
+          before = r.query("SELECT current_setting('lock_timeout')") { |row| row.string(0) }[0]
+          r.exec("SET lock_timeout = #{t.to_ms}")
+          begin
+            r.exec("SELECT pg_advisory_lock($1)", [key])
+          ensure
+            r.exec("SELECT set_config('lock_timeout', $1, false)", [before])
+          end
+        else
+          r.exec("SELECT pg_advisory_lock($1)", [key])
+        end
+        r.exec("CREATE TABLE IF NOT EXISTS #{Dialect.quote(@table)} (version bigint PRIMARY KEY, inserted_at timestamptz NOT NULL DEFAULT now())")
+        results = [yield r]
+      ensure
+        cleanup = Migrator.release(r, key, pooled)
+      end
+      if c = cleanup
+        raise c
+      end
+      nil
+    end
+    results[0]
+  end
+
+  # Leaves the connection of `r` as the migrator found it: no
+  # transaction, the lock `key` released (a warning when this session
+  # does not hold it), and the settings reset when `reset`. The error
+  # that stopped it, or nil.
+  def self.release(r: Repo, key: Int, reset: Bool) -> StandardError?
+    # (Each step tried even when one before failed: the first error.)
+    errors = [
+      Migrator.attempt { r.exec("ROLLBACK") if r.adapter.in_transaction? },
+      Migrator.attempt { r.exec("SELECT pg_advisory_unlock($1)", [key]) },
+      Migrator.attempt { r.exec("RESET ALL") if reset },
+    ]
+    errors.compact.first?
+  end
+
+  # The error the block raised, or nil.
+  def self.attempt(&: () -> Object?) -> StandardError?
+    yield
+    nil
+  rescue StandardError => e
+    e
+  end
+
+  private def applied_with(r: Repo) -> Array[Int]
+    exists = r.query("SELECT to_regclass($1) IS NOT NULL", [Dialect.quote(@table)]) { |row| row.bool(0) }
+    return [] unless exists[0]? == true
+    r.query("SELECT version FROM #{Dialect.quote(@table)} ORDER BY version") { |row| row.int(0) }
+  end
+
+  private def run_one(r: Repo, m: Type[Migration], direction: Symbol) -> Void
+    v = m.migration_version
+    up = direction == :up
+    say("== #{v} #{m.name}: #{up ? "migrating" : "reverting"}")
+    started = Time.monotonic
+    record = up ? "INSERT INTO #{Dialect.quote(@table)} (version) VALUES ($1)" : "DELETE FROM #{Dialect.quote(@table)} WHERE version = $1"
+    begin
+      if m.transaction?
+        r.transaction do |tx|
+          m.make.run_with(tx, direction)
+          tx.exec(record, [v])
+        end
+      else
+        m.make.run_with(r, direction)
+        if r.adapter.in_transaction?
+          raise MigrationError.new(v, m.name, "it left a transaction open (outside the migrator's, with `disable_transaction!`): commit it in the migration")
+        end
+        r.exec(record, [v])
+      end
+    rescue MigrationError => e
+      raise e
+    rescue StandardError => e
+      raise MigrationError.new(v, m.name, "#{e.class.name}: #{e.message}")
+    end
+    took = (Time.monotonic - started).to_ms / 1000.0
+    say("== #{v} #{m.name}: #{up ? "migrated" : "reverted"} (#{(took * 100).round / 100.0}s)")
+  end
+
+  private def say(line: String) -> Void
+    if l = @log
+      l.call(line)
+    end
+  end
+
+  # The advisory lock's key for the table `table`: the first 60 bits of
+  # SHA-256 of `rotor.migrations.<table>`, so that two programs agree.
+  def self.lock_key(table: String) -> Int = Digest::SHA256.hexdigest("rotor.migrations.#{table}")[0, 15].to_i(16)
+
+  # The SQL statements that do `op`, in order.
+  #
+  # ```
+  # op = Rotor::Operation::RenameColumn.new("posts", "body", "content")
+  # Rotor::Migrator.render(op)  # => ["ALTER TABLE \"posts\" RENAME COLUMN \"body\" TO \"content\""]
+  # ```
+  def self.render(op: Operation) -> Array[String]
+    q = ->(s: String) { Dialect.quote(s) }
+    case op
+    in Operation::CreateTable(name:, columns:, indexes:, if_not_exists:)
+      ["CREATE TABLE #{if_not_exists ? "IF NOT EXISTS " : ""}#{q.call(name)} (#{columns.map { |c| column(c) }.join(", ")})"] +
+        indexes.map { |i| index(i, if_not_exists) }
+    in Operation::DropTable(name:, if_exists:) then ["DROP TABLE #{if_exists ? "IF EXISTS " : ""}#{q.call(name)}"]
+    in Operation::RenameTable(name:, to:) then ["ALTER TABLE #{q.call(name)} RENAME TO #{q.call(to)}"]
+    in Operation::AddColumn(table:, column:) then ["ALTER TABLE #{q.call(table)} ADD COLUMN #{column(column)}"]
+    in Operation::RemoveColumn(table:, name:) then ["ALTER TABLE #{q.call(table)} DROP COLUMN #{q.call(name)}"]
+    in Operation::RenameColumn(table:, name:, to:) then ["ALTER TABLE #{q.call(table)} RENAME COLUMN #{q.call(name)} TO #{q.call(to)}"]
+    in Operation::ChangeColumn(table:, name:, null:, default:)
+      parts: Array[String] = []
+      unless null.nil?
+        parts = parts + ["ALTER COLUMN #{q.call(name)} #{null ? "DROP" : "SET"} NOT NULL"]
+      end
+      d = default
+      unless d.nil?
+        parts = parts + [d.is_a?(NoDefault) ? "ALTER COLUMN #{q.call(name)} DROP DEFAULT" : "ALTER COLUMN #{q.call(name)} SET DEFAULT #{literal(d.as(Default))}"]
+      end
+      ["ALTER TABLE #{q.call(table)} #{parts.join(", ")}"]
+    in Operation::CreateIndex(index:) then [index(index, false)]
+    in Operation::DropIndex(name:, concurrently:) then ["DROP INDEX #{concurrently ? "CONCURRENTLY " : ""}#{q.call(name)}"]
+    in Operation::AddForeignKey(table:, column:, reference:)
+      ["ALTER TABLE #{q.call(table)} ADD FOREIGN KEY (#{q.call(column)}) #{references(reference)}"]
+    in Operation::Execute(sql:) then [sql]
+    end
+  end
+
+  # A column's definition in `CREATE TABLE` and `ADD COLUMN`.
+  def self.column(c: ColumnDef) -> String
+    s = "#{Dialect.quote(c.name)} #{c.type}"
+    s = "#{s} GENERATED BY DEFAULT AS IDENTITY" if c.identity
+    s = c.primary ? "#{s} PRIMARY KEY" : (c.null ? s : "#{s} NOT NULL")
+    d = c.default
+    s = "#{s} DEFAULT #{literal(d)}" unless d.nil?
+    if r = c.references
+      s = "#{s} #{references(r)}"
+    end
+    s
+  end
+
+  # `REFERENCES "t" ("id")`, with its `ON DELETE`.
+  def self.references(r: Reference) -> String
+    action = case r.on_delete
+             in :cascade then " ON DELETE CASCADE"
+             in :set_null then " ON DELETE SET NULL"
+             in :restrict then " ON DELETE RESTRICT"
+             in :no_action then " ON DELETE NO ACTION"
+             else ""
+             end
+    "REFERENCES #{Dialect.quote(r.table)} (#{Dialect.quote(r.column)})#{action}"
+  end
+
+  # `CREATE [UNIQUE] INDEX ...`.
+  def self.index(i: IndexDef, if_not_exists: Bool) -> String
+    s = "CREATE #{i.unique ? "UNIQUE " : ""}INDEX #{i.concurrently ? "CONCURRENTLY " : ""}#{if_not_exists ? "IF NOT EXISTS " : ""}#{Dialect.quote(i.name)} ON #{Dialect.quote(i.table)} (#{i.columns.map { |c| Dialect.quote(c) }.join(", ")})"
+    if w = i.where
+      s = "#{s} WHERE #{w}"
+    end
+    s
+  end
+
+  # A default as SQL: a literal of its value, or the SQL given.
+  #
+  # ```
+  # Rotor::Migrator.literal("it's")              # => "'it''s'"
+  # Rotor::Migrator.literal(1.5)                 # => "1.5"
+  # Rotor::Migrator.literal(Rotor::SQL.raw("now()"))  # => "now()"
+  # ```
+  def self.literal(v: Default) -> String
+    case v
+    in Int then v.to_s
+    in Float
+      if v.nan?
+        "'NaN'::double precision"
+      elsif v.infinite?
+        v > 0 ? "'Infinity'::double precision" : "'-Infinity'::double precision"
+      else
+        v.to_s
+      end
+    in String
+      raise ArgumentError.new("a default with a NUL") if v.include?("\0")
+      "'#{v.gsub("'", "''")}'"
+    in Bool then v ? "TRUE" : "FALSE"
+    in Bytes then "'\\x#{v.hex}'::bytea"
+    in SQL::Raw then v.sql
+    end
+  end
+end

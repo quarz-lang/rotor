@@ -1,0 +1,36 @@
+class Both < Rotor::Migration
+  version 1
+
+  def change
+  end
+
+  def up
+  end
+end
+
+class UpAlone < Rotor::Migration
+  version 2
+
+  def up
+  end
+end
+
+class Zero < Rotor::Migration
+  version 0
+
+  def change
+  end
+end
+
+class Fine < Rotor::Migration
+  version 3
+  disable_transaction!
+
+  def up
+  end
+
+  def down
+  end
+end
+
+p Fine.transaction?

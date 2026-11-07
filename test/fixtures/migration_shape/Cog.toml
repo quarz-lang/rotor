@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/migration_test.qz): a migration
+# defines `change`, or `up` and `down`, and has a positive version. It is
+# checked against this checkout of rotor.
+[cog]
+name = "migration_shape"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

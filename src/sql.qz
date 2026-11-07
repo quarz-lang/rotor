@@ -30,6 +30,17 @@ module SQL
     c
   end
 
+  # SQL written as is where a migration takes a value: a column's
+  # default that is not a literal (`Rotor::SQL.raw("now()")`).
+  data Raw = (sql: String)
+
+  # `sql` as is: a `Rotor::SQL::Raw`.
+  #
+  # ```
+  # Rotor::SQL.raw("now()").sql  # => "now()"
+  # ```
+  def self.raw(sql: String) -> Raw = Raw.new(sql)
+
   # `s` in lower case: SQL's `lower`.
   def self.lower(s: String) -> String = s.downcase
 
