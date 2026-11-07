@@ -496,9 +496,12 @@ class Query[T]
   # The translation of a condition's block, kept by its site
   # (`Rotor::Cache`), with this build's parameters.
   private def condition(expr: Meta::Expr, captures: Array[Object], file: String, site: Int, what: String) -> Sql
-    kept = Cache.fetch(Cache::CONDITIONS, Cache.key(site, @sources), captures) do
+    # (An order key is a value, a condition is not: `email || name` is
+    # one of them as a key, a `Bool` as a condition. Kept apart.)
+    cache = what == "order" ? Cache::ORDERS : Cache::CONDITIONS
+    kept = Cache.fetch(cache, Cache.key(site, @sources), captures) do
       t, e = translator(expr, captures, file)
-      [t.sql(e), t.guards]
+      [what == "order" ? t.value(e) : t.sql(e), t.guards]
     end
     # (`ORDER BY 1` would be the first column. Checked on what the cache
     # gives too: one block may be given to `where` and to `order`.)

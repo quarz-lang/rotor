@@ -11,6 +11,7 @@ class Member < Rotor::Model
     column :score, Float, default: 0.0
     column :admin, Bool, default: false
     column :avatar, Bytes, null: true
+    column :vip, Bool, null: true
     timestamps
   end
 end
@@ -125,6 +126,7 @@ class RepoTest < Test::Case
       score double precision NOT NULL DEFAULT 0,
       admin boolean NOT NULL DEFAULT false,
       avatar bytea,
+      vip boolean,
       created_at timestamptz NOT NULL,
       updated_at timestamptz NOT NULL
     );
@@ -407,6 +409,61 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#36: `&&`, `||` and `!` of other values than `Bool`s, with
+  # NULL and non-NULL rows, and nil captures in each position.
+  def test_truthiness_forms
+    with_repo do |repo|
+      repo.insert(member("ann").with(email: "a@x", admin: true, vip: true))
+      repo.insert(member("bob"))
+      repo.insert(member("cy").with(email: "c@x"))
+      repo.exec("UPDATE members SET vip = false WHERE name = 'cy'")
+      names = ->(q: Rotor::Query[Member]) { repo.all(q.order { id }).map { |m| m.name } }
+      # A truthy column on the left of `&&`: not NULL on its right.
+      x = "a@x"
+      assert_equal(["bob", "cy"], names.call(Member.where { !(email && email == x) }))
+      # As a value, one of the operands.
+      assert_equal(["bob"], names.call(Member.where { (email || name) == "bob" }))
+      assert_equal(["cy"], names.call(Member.where { (email && name) == "cy" }))
+      # (Descending: by `email || name`, not by `name` or `id` alone.)
+      repo.exec("UPDATE members SET email = 'z@x' WHERE name = 'ann'")
+      assert_equal(["ann", "cy", "bob"], repo.all(Member.order { email || name }.desc).map { |m| m.name })
+      repo.exec("UPDATE members SET email = 'a@x' WHERE name = 'ann'")
+      assert_equal(["ann", "bob", "cy"], names.call(Member.where { (admin ? (email || name) : "x") ? true : false }))
+      # An `if` its capture decides, of such a value: tested as one.
+      sy: String? = "y"
+      assert_equal(["ann", "cy"], names.call(Member.where { ((sy ? (email && name) : nil) ? 1 : 0) == 1 }))
+      # A known left operand, and `!` of a known value.
+      s: String? = "s"
+      sn: String? = nil
+      assert_equal(1, repo.update_all(Member.where { name == "ann" }) { {admin: s && admin} })
+      assert_equal(["ann"], names.call(Member.where { admin }))
+      assert_equal(Array[String].new, names.call(Member.where { (sn && admin) ? true : false }))
+      assert_equal(["ann"], names.call(Member.where { (sn || admin) ? true : false }))
+      assert_equal(Array[String].new, names.call(Member.where { admin && sn ? true : false }))
+      assert_equal(["ann", "bob", "cy"], names.call(Member.where { |_m| !sn }))
+      assert_equal(Array[String].new, names.call(Member.where { |_m| !s }))
+      assert_equal(["ann"], names.call(Member.where { (email || sn) == "a@x" }))
+      # Two `Bool`s, one of them NULL: Quarz's nil kept.
+      f = false
+      t = true
+      repo.update_all(Member.query) { {vip: vip && f} }
+      vs: Array[Bool?] = [false, nil, false]
+      assert_equal(vs, repo.all(Member.order { id }).map { |m| m.vip })
+      repo.exec("UPDATE members SET vip = NULL WHERE name = 'bob'")
+      # (`nil || false` is false in Quarz, `NULL OR FALSE` NULL.)
+      repo.update_all(Member.query) { {vip: vip || f} }
+      fs: Array[Bool?] = [false, false, false]
+      assert_equal(fs, repo.all(Member.order { id }).map { |m| m.vip })
+      repo.exec("UPDATE members SET vip = NULL WHERE name = 'bob'")
+      repo.update_all(Member.query) { {vip: vip || t} }
+      ts: Array[Bool?] = [true, true, true]
+      assert_equal(ts, repo.all(Member.order { id }).map { |m| m.vip })
+      # Two other values: `COALESCE`.
+      repo.update_all(Member.query) { {name: email || name} }
+      assert_equal(["a@x", "bob", "c@x"], repo.all(Member.order { id }).map { |m| m.name })
+    end
+  end
+
   # Rows with NULLs: what `!=` (`IS DISTINCT FROM`) and the explicit
   # form (`!email.nil? && email != e`, `<>`) each find.
   def test_null_semantics
@@ -507,7 +564,8 @@ class RepoTest < Test::Case
       # as "31", round 1.5 into 2); an `Int` into a `Float` is a `Float`.
       assert_raise(ArgumentError) { repo.update_all(Member.query) { {name: age} } }
       assert_raise(ArgumentError) { repo.update_all(Member.query) { {age: score + 1.5} } }
-      assert_raise(Rotor::UntranslatableError) { repo.update_all(Member.query) { {name: email || name} } }
+      # (A `Bool` or a `String`: no SQL type holds both.)
+      assert_raise(Rotor::UntranslatableError) { repo.update_all(Member.query) { {name: admin && name} } }
       assert_equal(3, repo.update_all(Member.query) { {score: age} })
       assert_equal([31.0, 31.0, 30.0], repo.all(Member.order { id }.select { score }))
       m = repo.get(Member, 1).as(Member)

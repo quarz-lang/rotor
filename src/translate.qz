@@ -103,6 +103,17 @@ class Translator
   # (`!email.nil? && ...`), of a `||` (`email.nil? || ...`), or by an
   # `if`'s condition.
   var @non_null: Array[[Int, Symbol]]
+  # Whether the expression being translated is a value (an operand, an
+  # `update`'s value, an order key, a non-`Bool` `if`'s branch), not a
+  # condition: `&&` and `||` of other values than `Bool`s are one of
+  # their operands there (`COALESCE`), a `Bool` in a condition.
+  var @value: Bool = false
+  # The translations and classes made so far, by expression, mode and
+  # the columns known not to be NULL: `classes` translates operands
+  # again, which chains of `&&` and `||` would make exponential. (Keyed
+  # by how the expression is shown too: `Lit(1)` is `==` to `Lit(1.0)`.)
+  var @sqls: Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Sql] = Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Sql].new
+  var @kinds: Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Array[Type[Object]]] = Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Array[Type[Object]]].new
 
   def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope], @guards: Guards = Guards.new, @non_null: Array[[Int, Symbol]] = [])
   end
@@ -179,8 +190,18 @@ class Translator
     end
   end
 
-  # `e` as SQL.
+  # `e` as SQL (made once for each mode and facts: `@sqls`).
   def sql(e: Meta::Expr) -> Sql
+    key = [e, Translator.show(e), @value, @non_null]
+    if s = @sqls[key]?
+      return s
+    end
+    s = translate(e)
+    @sqls = @sqls.put(key, s)
+    s
+  end
+
+  private def translate(e: Meta::Expr) -> Sql
     case e
     in Meta::Expr::Lit(value, line) then literal(value, line)
     in Meta::Expr::Capture(index, name, line)
@@ -196,7 +217,12 @@ class Translator
         ext = m.extension
         untranslatable(ext ? "#{Translator.label(m)} of #{ext.name}" : Translator.label(m), line)
       end
-      o = truth(x, sql(x))
+      sx = valued(false) { sql(x) }
+      # (A value its guard decides: a constant.)
+      unless (dd = decided(sx)).nil?
+        return constant(!dd.as(Bool))
+      end
+      o = valued(false) { truth(x, sx) }
       if what = o.tri || o.nulls
         raise UntranslatableError.new(negation_error(x, what, line))
       end
@@ -204,22 +230,25 @@ class Translator
     in Meta::Expr::If(c, t, f, line)
       # (Its parameters cast, a bare one in the condition and those of
       # the branches: PostgreSQL types a `CASE` of untyped ones as text.)
-      cond = sql(c)
-      # (A known condition other than a `Bool` is truthy unless nil, which
-      # its guard keeps: the branch it takes.)
-      if cond.known && !cond.value.is_a?(Bool)
-        return assuming(facts(c, true)) { sql(t) } unless cond.value.nil?
-        return assuming(facts(c, false)) { sql(f.as(Meta::Expr)) } if f
+      cond = valued(false) { sql(c) }
+      # (Its branches are values when it is one, or when it is not a
+      # `Bool`: a condition tests the `CASE` for NULL then.)
+      branches = @value || classes(e).any? { |k| k != Bool && k != Nil }
+      # (A condition its guards decide (`decided`): the branch it takes.)
+      unless (dd = decided(cond)).nil?
+        d = dd.as(Bool)
+        return valued(branches) { assuming(facts(c, true)) { sql(t) } } if d
+        return valued(branches) { assuming(facts(c, false)) { sql(f.as(Meta::Expr)) } } if f
         return Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, false, nil, Translator.show(e))
       end
-      cond = cast(truth(c, cond))
+      cond = cast(valued(false) { truth(c, cond) })
       # (A branch that is NULL where Quarz has false makes the `if` so,
       # as an operand of `&&` does: kept as a condition, refused as a
       # value.)
-      th = cast(assuming(facts(c, true)) { sql(t) })
+      th = cast(valued(branches) { assuming(facts(c, true)) { sql(t) } })
       pieces = [Piece::Text.new("CASE WHEN ")] + cond.pieces + [Piece::Text.new(" THEN ")] + th.pieces
       el = if f
-             x = cast(assuming(facts(c, false)) { sql(f) })
+             x = cast(valued(branches) { assuming(facts(c, false)) { sql(f) } })
              pieces = pieces + [Piece::Text.new(" ELSE ")] + x.pieces
              x
            end
@@ -248,7 +277,7 @@ class Translator
   # an order's key, an operand. A comparison that can be NULL
   # (`Sql#tri`) is refused: NULL is not false there.
   def operand(e: Meta::Expr) -> Sql
-    s = sql(e)
+    s = value(e)
     if what = s.tri
       raise UntranslatableError.new(Translator.value_error(e, what, @file))
     end
@@ -256,6 +285,22 @@ class Translator
       raise UntranslatableError.new(Translator.test_error(e, what, @file))
     end
     s
+  end
+
+  # `e` translated as a value (`@value`), its refusals left to the
+  # caller (`operand`).
+  def value(e: Meta::Expr) -> Sql = valued(true) { sql(e) }
+
+  # The block's value, translated as a value (`@value`) when `v`, else
+  # as a condition.
+  private def valued[R](v: Bool, &f: () -> R) -> R
+    saved = @value
+    @value = v
+    begin
+      f.call
+    ensure
+      @value = saved
+    end
   end
 
   # The error for `e`, where `what` (an `&&` or `||` of an operand other
@@ -530,12 +575,93 @@ class Translator
   # nil, falsy in Quarz, as well).
   private def logical(e: Meta::Expr, l: Meta::Expr, op: String, r: Meta::Expr, prec: Int, known: Array[[Int, Symbol]]) -> Sql
     sa = sql(l)
+    # (A left operand its guards decide (`decided`) decides which
+    # operand is the value, as an `if`'s condition does its branch:
+    # `s && admin` is `admin` for a non-nil `s`.)
+    unless (dd = decided(sa)).nil?
+      d = dd.as(Bool)
+      return @value ? sa : constant(d) if d == (op == "OR")
+      return assuming(known) { @value ? sql(r) : logical_truth(e, r, sql(r)) }
+    end
+    return logical_value(e, l, op, r, sa, known) if @value
     sb = assuming(known) { sql(r) }
     a = truth(l, sa)
     b = assuming(known) { truth(r, sb) }
     out = three(binary(a, op, b, prec, true), a.tri || b.tri || a.nulls || b.nulls)
     tested = a.pieces != sa.pieces || b.pieces != sb.pieces ? Translator.show(e) : a.test || b.test
     Sql.new(out.pieces, out.prec, out.column, out.value, out.known, out.bind, out.nulls, out.tri, false, tested)
+  end
+
+  # The truthiness of `s` when the translation decides it, which the
+  # guards of its captures keep: a known value other than a `Bool` (nil
+  # or not), or a constant `Bool` (a literal, a fold); nil otherwise (a
+  # captured `Bool` is a parameter, whose value the guards do not keep).
+  private def decided(s: Sql) -> Bool?
+    return nil unless s.known
+    v = s.value
+    return !v.nil? unless v.is_a?(Bool)
+    param?(s) ? nil : v.as(Bool)
+  end
+
+  # The constant `v` (`TRUE`, `FALSE`), known.
+  private def constant(v: Bool) -> Sql = Sql.new([Piece::Text.new(v ? "TRUE" : "FALSE")], ATOM, nil, v, true)
+
+  # `s`, translated from `r`, tested for its truthiness as an operand of
+  # `e` (`&&` or `||`) is.
+  private def logical_truth(e: Meta::Expr, r: Meta::Expr, s: Sql) -> Sql
+    t = truth(r, s)
+    tested = t.pieces != s.pieces ? Translator.show(e) : t.test
+    Sql.new(t.pieces, t.prec, t.column, t.value, t.known, t.bind, t.nulls, t.tri, false, tested)
+  end
+
+  # `l && r` or `l || r` as a value (`@value`), `a` the left operand's
+  # translation: one of the operands, as in Quarz. Of other values than
+  # `Bool`s, `COALESCE(a, b)` and `CASE WHEN a IS NOT NULL THEN b ELSE
+  # NULL END`; of `Bool`s, `AND` and `OR`, or, when `a` can be NULL,
+  # `CASE WHEN a IS TRUE THEN b ELSE a END` and `CASE WHEN a IS TRUE
+  # THEN TRUE ELSE b END` (`nil && x` is nil). A `Bool` and another
+  # value mixed is refused: no SQL type holds both.
+  private def logical_value(e: Meta::Expr, l: Meta::Expr, op: String, r: Meta::Expr, sa: Sql, known: Array[[Int, Symbol]]) -> Sql
+    ks = classes(e).reject { |k| k == Nil }
+    if ks.include?(Bool) && ks.size > 1
+      untranslatable("`#{Translator.show(e)}`, a `Bool` or another value, as a value", Translator.line_of(e))
+    end
+    # (`Int`s and `Float`s meet in double precision; other classes in no
+    # SQL type.)
+    if ks.size > 1 && !ks.all? { |k| k == Int || k == Float }
+      untranslatable("`#{Translator.show(e)}`, #{ks.map { |k| "#{"AEIOU".include?(k.name[0]) ? "an" : "a"} `#{k.name}`" }.join(" or ")}, as a value", Translator.line_of(e))
+    end
+    sb = assuming(known) { sql(r) }
+    [[l, sa], [r, sb]].each do |x|
+      if what = x[1].tri
+        raise UntranslatableError.new(Translator.value_error(x[0], what, @file))
+      end
+    end
+    a = cast(sa)
+    b = cast(sb)
+    if classes(l).include?(Bool)
+      if a.nulls.nil?
+        out = binary(a, op, b, op == "AND" ? AND : OR, true)
+        return Sql.new(out.pieces, out.prec, nil, nil, false, nil, b.nulls)
+      end
+      test = postfix(a, "IS TRUE", IS)
+      rest = op == "AND" ? [Piece::Text.new(" THEN ")] + b.pieces + [Piece::Text.new(" ELSE ")] + a.pieces : [Piece::Text.new(" THEN TRUE ELSE ")] + b.pieces
+      nulls = op == "AND" ? a.nulls || b.nulls : b.nulls
+      return Sql.new([Piece::Text.new("CASE WHEN ")] + test.pieces + rest + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls)
+    end
+    # (A nil `b`: `a && nil` is nil, `a || nil` is `a`; untyped, it
+    # would be text in a `CASE` or `COALESCE`.)
+    if Translator.null?(b)
+      return op == "OR" ? a : Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, false, nil, Translator.show(e))
+    end
+    narrow = (a.narrow || Translator.null?(a)) && (b.narrow || Translator.null?(b))
+    if op == "OR"
+      pieces = [Piece::Text.new("COALESCE(")] + a.pieces + [Piece::Text.new(", ")] + b.pieces + [Piece::Text.new(")")]
+      return Sql.new(pieces, ATOM, nil, nil, false, nil, a.nulls ? b.nulls : nil, nil, narrow)
+    end
+    test = is_null(a, "IS NOT NULL")
+    pieces = [Piece::Text.new("CASE WHEN ")] + test.pieces + [Piece::Text.new(" THEN ")] + b.pieces + [Piece::Text.new(" ELSE NULL END")]
+    Sql.new(pieces, ATOM, nil, nil, false, nil, a.nulls || b.nulls, nil, narrow)
   end
 
   # The block's value, translated with the columns of `known` taken for
@@ -568,6 +694,11 @@ class Translator
       return nullable_column(arg) if nil_literal?(recv)
       out
     else
+      # (A column other than a `Bool` tested for its truthiness, true:
+      # not nil. A `Bool?` column's test is `IS TRUE`.)
+      if truth && (found = column_of(e)) && found[1].type != Bool
+        return nullable_column(e)
+      end
       out
     end
   end
@@ -878,18 +1009,28 @@ class Translator
   # as text) and refuses one as a condition. (Read as a translation
   # does, guarded.)
   #
-  # `l && r` and `l || r` are a `Bool` in SQL (as a value, one of other
-  # operands is refused: `Sql#test`).
+  # `l && r` and `l || r` are Quarz's: the classes of what makes the
+  # left operand the value (its falsy ones for `&&`, its truthy ones for
+  # `||`) and the right operand's.
   def classes(e: Meta::Expr) -> Array[Type[Object]]
+    key = [e, Translator.show(e), @value, @non_null]
+    if ks = @kinds[key]?
+      return ks
+    end
+    ks = classes_of(e)
+    @kinds = @kinds.put(key, ks)
+    ks
+  end
+
+  private def classes_of(e: Meta::Expr) -> Array[Type[Object]]
     out: Array[Type[Object]] = []
     case e
     in Meta::Expr::If(c, t, f, _)
-      cond = sql(c)
-      folded = cond.known && !cond.value.is_a?(Bool)
-      if !folded || !cond.value.nil?
+      d = decided(valued(false) { sql(c) })
+      if d.nil? || d
         out = Translator.union(out, assuming(facts(c, true)) { classes(t) })
       end
-      if !folded || cond.value.nil?
+      if d.nil? || !d
         if x = f
           out = Translator.union(out, assuming(facts(c, false)) { classes(x) })
         else
@@ -897,8 +1038,8 @@ class Translator
         end
       end
       out
-    in Meta::Expr::And(l, r, _) then logical_classes(l, r, facts(l, true))
-    in Meta::Expr::Or(l, r, _) then logical_classes(l, r, facts(l, false))
+    in Meta::Expr::And(l, r, _) then logical_classes(l, r, true, facts(l, true))
+    in Meta::Expr::Or(l, r, _) then logical_classes(l, r, false, facts(l, false))
     in Meta::Expr::Not(_, _, _) then [Bool]
     in Meta::Expr::Call(_, m, _, [a], nil, _) if m.singleton && m.owner == SQL && m.name == :not_nil
       classes(a).reject { |k| k == Nil }
@@ -943,9 +1084,34 @@ class Translator
 
   # The classes of `l && r` (`l || r`) in SQL: a `Bool`, and nil where
   # an operand may be.
-  private def logical_classes(l: Meta::Expr, r: Meta::Expr, known: Array[[Int, Symbol]]) -> Array[Type[Object]]
-    ks = Translator.union(classes(l), assuming(known) { classes(r) })
-    ks.include?(Nil) ? [Bool, Nil] : [Bool]
+  private def logical_classes(l: Meta::Expr, r: Meta::Expr, conj: Bool, known: Array[[Int, Symbol]]) -> Array[Type[Object]]
+    ls = classes(l)
+    # (Folded as `logical` does as a value, where more is decided: `sx
+    # && sy` is `sy`. One that is not a value, as a condition.)
+    left = begin
+             valued(true) { sql(l) }
+           rescue UntranslatableError
+             valued(false) { sql(l) }
+           end
+    unless (dd = decided(left)).nil?
+      d = dd.as(Bool)
+      return ls if d == !conj
+      return assuming(known) { classes(r) }
+    end
+    # (Of `l`, what makes it the value: its falsy classes for `&&`, its
+    # truthy ones for `||`.)
+    kept = conj ? ls.select { |k| k == Nil || k == Bool } : ls.reject { |k| k == Nil }
+    # (A nullable column's classes do not say it is nil when NULL: its
+    # translation as a value does. One that is not a value has none.)
+    if conj
+      nulls = begin
+                valued(true) { sql(l) }.nulls
+              rescue UntranslatableError
+                nil
+              end
+      kept = Translator.union(kept, [Nil]) if nulls
+    end
+    Translator.union(kept, assuming(known) { classes(r) })
   end
 
   # The condition `s`, translated from `e`, tested for its truthiness
@@ -1176,7 +1342,7 @@ class Translator
 
   # `s.include?(v)`, `start_with?`, `end_with?`: `LIKE` with `v` escaped.
   private def like(s: Sql, arg: Meta::Expr, name: String, label: String, line: Int) -> Sql
-    a = sql(arg)
+    a = value(arg)
     v = a.value
     unless a.known && v.is_a?(String)
       untranslatable("#{label} of something other than a string value", line)
