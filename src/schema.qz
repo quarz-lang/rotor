@@ -7,6 +7,8 @@
 # - `default:`: the value a model made with `new` starts with (not for
 #   `Time`).
 # - `primary: true`: the primary key (at most one; never NULL).
+# - `redact: true`: the value is hidden from `inspect` (the model's and
+#   a changeset's), for a password or a token.
 class Schema
   @model: String
   var @columns: Array[Column] = []
@@ -28,34 +30,34 @@ class Schema
   def timestamp_columns -> [Symbol?, Symbol?] = [@created_at, @updated_at]
 
   # An `Int` column (`bigint`).
-  def column(name: Symbol, type: Type[Int], *, null: Bool = false, default: Int? = nil, primary: Bool = false) -> Void
-    add(name, "bigint", Int, null, default, primary)
+  def column(name: Symbol, type: Type[Int], *, null: Bool = false, default: Int? = nil, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "bigint", Int, null, default, primary, redact)
   end
 
   # A `Float` column (`double precision`).
-  def column(name: Symbol, type: Type[Float], *, null: Bool = false, default: Float? = nil, primary: Bool = false) -> Void
-    add(name, "double precision", Float, null, default, primary)
+  def column(name: Symbol, type: Type[Float], *, null: Bool = false, default: Float? = nil, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "double precision", Float, null, default, primary, redact)
   end
 
   # A `String` column (`text`).
-  def column(name: Symbol, type: Type[String], *, null: Bool = false, default: String? = nil, primary: Bool = false) -> Void
-    add(name, "text", String, null, default, primary)
+  def column(name: Symbol, type: Type[String], *, null: Bool = false, default: String? = nil, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "text", String, null, default, primary, redact)
   end
 
   # A `Bool` column (`boolean`).
-  def column(name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool? = nil, primary: Bool = false) -> Void
-    add(name, "boolean", Bool, null, default, primary)
+  def column(name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool? = nil, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "boolean", Bool, null, default, primary, redact)
   end
 
   # A `Time` column (`timestamptz`). It takes no default: a time is not
   # a value the compiler can bake into the program.
-  def column(name: Symbol, type: Type[Time], *, null: Bool = false, primary: Bool = false) -> Void
-    add(name, "timestamptz", Time, null, nil, primary)
+  def column(name: Symbol, type: Type[Time], *, null: Bool = false, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "timestamptz", Time, null, nil, primary, redact)
   end
 
   # A `Bytes` column (`bytea`).
-  def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false) -> Void
-    add(name, "bytea", Bytes, null, default, primary)
+  def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "bytea", Bytes, null, default, primary, redact)
   end
 
   # `created_at` and `updated_at`, `Time` columns (`timestamptz`) that
@@ -281,7 +283,7 @@ class Schema
   # The methods of `Rotor::Model` that a column's getter would replace.
   RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?]
 
-  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool) -> Void
+  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false) -> Void
     if RESERVED.include?(name)
       raise ArgumentError.new("#{@model}'s column `#{name}` would replace the model's own `#{name}`")
     end
@@ -297,6 +299,6 @@ class Schema
     if primary && @columns.any? { |c| c.primary }
       raise ArgumentError.new("#{@model} declares a second primary key, `#{name}`")
     end
-    @columns = @columns + [Column.new(name, sql, type, null, primary, default)]
+    @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact)]
   end
 end

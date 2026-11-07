@@ -177,6 +177,10 @@ class Model
   # A model of this class made of `point`.
   def restore(point: Checkpoint) -> Self = Self.new(point)
 
+  # A new model of this class: `new`, the columns' defaults set
+  # (`Rotor::Changeset.cast` of a class).
+  def self.blank -> Self = new
+
   # Every row, as a query (`Rotor::Query`), to refine.
   def self.query -> Query[Self]
     Query[Self].new([Source.new(table_info, self, [], nil)], [], [], false, nil, nil, Query::Shape::Rows,
@@ -344,8 +348,11 @@ class Model
     end
   end
 
+  # `#<User id: 1, name: "Ann", password: **redacted**>`: a column
+  # declared `redact: true` hidden.
   def inspect -> String
-    "#<#{self.class.name} #{@attrs.map { |k, v| "#{k}: #{v.inspect}" }.join(", ")}>"
+    hidden = table_info.columns.select { |c| c.redact }.map { |c| c.name }
+    "#<#{self.class.name} #{@attrs.map { |k, v| "#{k}: #{hidden.include?(k) ? "**redacted**" : v.inspect}" }.join(", ")}>"
   end
 
   def to_s -> String = inspect

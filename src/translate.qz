@@ -869,7 +869,7 @@ class Translator
     if found = column_of(whole)
       c = found[1]
       if c.null && @non_null.any? { |x| x[0] == found[0] && x[1] == c.name }
-        c = Column.new(c.name, c.sql, c.type, false, c.primary, c.default)
+        c = Column.new(c.name, c.sql, c.type, false, c.primary, c.default, c.redact)
       end
       return Sql.new([Piece::Column.new(found[0], c.name)], ATOM, c, nil, false, nil, c.null ? Translator.show(whole) : nil)
     end

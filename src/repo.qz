@@ -125,6 +125,118 @@ class Repo
     stamped.loaded(Repo.values(row, t.columns))
   end
 
+  # Inserts the changeset's model (`Rotor::Changeset#apply`, with its
+  # timestamps as `insert` sets them) and its `put_assoc` sets: `Rotor::Outcome::Ok`
+  # with the model as saved, or `Rotor::Outcome::Invalid` with the changeset when it has
+  # errors or the database refused the row by a constraint it declares
+  # (`unique_constraint`...), which becomes an error on its field. Any
+  # other error raises. Inside a transaction the save runs under a
+  # savepoint, so that an `Rotor::Outcome::Invalid` leaves the transaction usable.
+  def insert[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :insert)
+
+  # As `insert`, with `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  def insert![M <: Model](changeset: Changeset[M]) -> M = Repo.unwrap(insert(changeset))
+
+  # Updates the row of the changeset's model with its changes (no
+  # statement when there are none) and replaces its `put_assoc` sets, as
+  # `insert` does.
+  def update[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :update)
+
+  # As `update`, with `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  def update![M <: Model](changeset: Changeset[M]) -> M = Repo.unwrap(update(changeset))
+
+  # Deletes the row of the changeset's model, as `delete(model)`: `Rotor::Outcome::Ok`
+  # with it, or `Rotor::Outcome::Invalid` for errors or a declared constraint
+  # (`no_assoc_constraint`: rows of another table still refer to it).
+  def delete[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :delete)
+
+  private def save[M <: Model](changeset: Changeset[M], action: Symbol) -> Outcome[M]
+    cs = changeset.with_action(action)
+    return Outcome::Invalid.new(cs) unless cs.valid?
+    model = cs.applied
+    begin
+      saved = guarded do |r|
+        done = case action
+               in :insert then r.insert(model)
+               in :update then r.update(model)
+               else r.delete(cs.data)
+               end
+        unless action == :delete
+          cs.assocs.each_pair { |name, targets| r.replace_through(done, name, targets) }
+          done = done.with_preloaded(cs.assocs) unless cs.assocs.empty?
+        end
+        done
+      end
+      Outcome::Ok.new(saved)
+    rescue ::PG::ServerError => e
+      found = cs.constraint_error(e) || raise e
+      Outcome::Invalid.new(cs.with(errors: cs.errors + [found]))
+    end
+  end
+
+  # The block's value, run in a transaction, or under a savepoint when
+  # the repository is in one already.
+  private def guarded[R](&: (Repo) -> R) -> R
+    unless @adapter.in_transaction?
+      return transaction { |tx| yield tx }
+    end
+    exec("SAVEPOINT rotor_save")
+    settled = false
+    begin
+      result = yield self
+      exec("RELEASE SAVEPOINT rotor_save")
+      settled = true
+      result
+    ensure
+      # (Whatever stopped the block, a cancellation too; a failure here
+      # leaves the block's error to propagate.)
+      unless settled
+        begin
+          exec("ROLLBACK TO SAVEPOINT rotor_save")
+          exec("RELEASE SAVEPOINT rotor_save")
+        rescue StandardError
+          nil
+        end
+      end
+    end
+  end
+
+  # :nodoc:
+  # Makes the `has_many ..., through:` association `name` of the saved
+  # `owner` exactly `targets`: the join rows pairing it with others
+  # deleted, the missing ones inserted.
+  def replace_through(owner: Model, name: Symbol, targets: Array[Model]) -> Void
+    info = owner.table_info
+    a = info.associations.find { |x| x.name == name } || raise SchemaError.new("#{owner.class.name} has no association `#{name}`")
+    k = Through.keys(owner.class, a)
+    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{name}` needs")
+    id = owner.to_h[pk]? || raise MissingAttributeError.new("#{owner.class.name}##{pk} is not set")
+    ids: Array[Value] = targets.map do |t|
+      t.to_h[k.target_pk]? || raise ArgumentError.new("`put_assoc` of a #{t.class.name} without its #{k.target_pk}: save it first")
+    end
+    join = k.join.table_name
+    q = ->(n: Symbol) { Dialect.quote(n.to_s) }
+    key_type = k.join.table_info.columns.find { |c| c.name == k.target_key }.as(Column).type
+    have = query("SELECT #{q.call(k.target_key)} FROM #{Dialect.quote(join)} WHERE #{q.call(k.owner_key)} = $1", [id]) { |r| r.value(0, key_type) }
+    have.uniq.each do |t|
+      next if ids.include?(t.as(Value))
+      exec("DELETE FROM #{Dialect.quote(join)} WHERE #{q.call(k.owner_key)} = $1 AND #{q.call(k.target_key)} = $2", [id, t])
+    end
+    ids.uniq.each do |t|
+      next if have.include?(t)
+      values: Hash[Symbol, Object?] = {k.owner_key => id, k.target_key => t}
+      insert(k.join.load(values))
+    end
+  end
+
+  # The value of `Rotor::Outcome::Ok`; `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  def self.unwrap[M <: Model](outcome: Outcome[M]) -> M
+    case outcome
+    in Outcome::Ok(value) then value
+    in Outcome::Invalid(cs) then raise InvalidChangeset.new(cs, cs.errors, cs.summary)
+    end
+  end
+
   # Updates `model`'s row with the columns assigned since it was loaded
   # (and its update time), and gives the model as saved, unchanged; does
   # nothing when none were.

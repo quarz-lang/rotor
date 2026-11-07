@@ -15,7 +15,10 @@ data Column = (
   # Whether it is the primary key.
   primary: Bool,
   # The value a model made with `new` starts with, or nil for none.
-  default: Value?
+  default: Value?,
+  # Whether its value is hidden from `inspect` (a password, a token):
+  # `**redacted**` shows instead.
+  redact: Bool = false
 )
 
 # An association of a model, as its `table` block declares it: what the

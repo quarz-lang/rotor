@@ -1,0 +1,489 @@
+require "test"
+
+class KUser < Rotor::Model
+  table "cs_users" do
+    column :id, Int, primary: true
+    column :email, String
+    column :name, String
+    column :age, Int, null: true
+    column :score, Float, null: true
+    column :admin, Bool, default: false
+    column :born, Time, null: true
+    column :avatar, Bytes, null: true
+    column :role, String, default: "user"
+    column :password, String, null: true, redact: true
+    timestamps
+    has_many KPost, foreign_key: :user_id
+  end
+
+  def self.registration(params: Hash[String, Object?]) -> Rotor::Changeset[KUser]
+    Rotor::Changeset.cast(KUser, params, [:email, :name, :age, :role, :password])
+      .validate_required([:email, :name])
+      .validate_length(:name, min: 1, max: 10)
+      .validate_format(:email, /\A[^@\s]+@[^@\s]+\z/)
+      .validate_number(:age, min: 0, max: 150)
+      .validate_inclusion(:role, ["admin", "user"])
+      .validate(:email) { |u| u.email.end_with?("@reserved.test") ? "is reserved" : nil }
+      .unique_constraint(:email)
+  end
+end
+
+class KPost < Rotor::Model
+  table "cs_posts" do
+    column :id, Int, primary: true
+    column :title, String
+    belongs_to KUser, name: :user, foreign_key: :user_id
+    has_many KTag, through: KPostTag
+  end
+end
+
+class KPostTag < Rotor::Model
+  table "cs_post_tags" do
+    column :id, Int, primary: true
+    belongs_to KPost, name: :post, foreign_key: :post_id
+    belongs_to KTag, name: :tag, foreign_key: :tag_id
+  end
+end
+
+class KTag < Rotor::Model
+  table "cs_tags" do
+    column :id, Int, primary: true
+    column :name, String
+  end
+end
+
+# `expected == actual`, of types the checker would not unify.
+module Eq
+  def self.ok?(expected: Object?, actual: Object?) -> Bool = expected == actual
+
+  # No parameters.
+  def self.none -> Hash[String, Object?] = {}
+end
+
+
+class CastTest < Test::Case
+  def cast(params: Hash[String, Object?], fields: Array[Symbol]) -> Rotor::Changeset[KUser] = Rotor::Changeset.cast(KUser, params, fields)
+
+  def test_every_type_from_strings
+    cs = cast({"age" => " 42 ", "score" => "1.5e1", "admin" => "on", "born" => "2026-11-07T12:00:00+09:00", "name" => "Ann"}, [:age, :score, :admin, :born, :name])
+    assert(cs.valid?)
+    assert(Eq.ok?(42, cs.get_change(:age)))
+    assert(Eq.ok?(15.0, cs.get_change(:score)))
+    assert(Eq.ok?(true, cs.get_change(:admin)))
+    assert(Eq.ok?(Time.utc(2026, 11, 7, 3, 0, 0), cs.get_change(:born)))
+    assert(Eq.ok?("Ann", cs.get_change(:name)))
+    ["true", "1", "on", "TRUE"].each { |s| assert(Eq.ok?(true, cast({"admin" => s}, [:admin]).get_change(:admin))) }
+    # (false is the default: no change.)
+    ["false", "0", "off"].each { |s| assert(!cast({"admin" => s}, [:admin]).changes.key?(:admin)) }
+  end
+
+  def test_edges
+    # A time Time cannot hold, non-ASCII digits, Infinity: invalid.
+    assert_equal(["is invalid"], cast({"born" => "3000-01-01T00:00:00Z"}, [:born]).errors_on(:born))
+    assert_equal(["is invalid"], cast({"age" => "١٢"}, [:age]).errors_on(:age))
+    assert_equal(["is invalid"], cast({"score" => "1e400"}, [:score]).errors_on(:score))
+    assert_equal(["is invalid"], Rotor::Changeset.cast(KUser, {score: 1.0 / 0.0}, [:score]).errors_on(:score))
+    # 64 bits exactly.
+    assert(Eq.ok?(9223372036854775807, cast({"age" => "9223372036854775807"}, [:age]).get_change(:age)))
+    assert(Eq.ok?(-9223372036854775808, cast({"age" => "-9223372036854775808"}, [:age]).get_change(:age)))
+    assert_equal(["is invalid"], cast({"age" => "9223372036854775808"}, [:age]).errors_on(:age))
+    # A time without an offset is UTC; a space for the T.
+    assert(Eq.ok?(Time.utc(2026, 11, 7, 10, 0, 0), cast({"born" => "2026-11-07T10:00"}, [:born]).get_change(:born)))
+    assert(Eq.ok?(Time.utc(2026, 11, 7, 10, 0, 5), cast({"born" => "2026-11-07 10:00:05"}, [:born]).get_change(:born)))
+    # Only spaces: nil for a nullable column.
+    blank = cast({"age" => "  ", "password" => " "}, [:age, :password])
+    assert(blank.valid?)
+    assert(blank.changes.empty?)
+    # Leading zeros do not count.
+    assert(Eq.ok?(9223372036854775807, cast({"age" => "+0009223372036854775807"}, [:age]).get_change(:age)))
+    assert(Eq.ok?(1, cast({"age" => "00000000000000000001"}, [:age]).get_change(:age)))
+  end
+
+  def test_typed_values
+    cs = Rotor::Changeset.cast(KUser, {age: 3, score: 2, avatar: Bytes[1, 2], born: Time.utc(2026, 1, 1)}, [:age, :score, :avatar, :born])
+    assert(cs.valid?)
+    assert(Eq.ok?(2.0, cs.get_change(:score)))
+    assert(Eq.ok?(Bytes[1, 2], cs.get_change(:avatar)))
+  end
+
+  def test_what_does_not_cast
+    cs = cast({"age" => "4x", "score" => "nan", "admin" => "yes", "born" => "yesterday", "avatar" => "abc", "name" => 3}, [:age, :score, :admin, :born, :avatar, :name])
+    [:age, :score, :admin, :born, :avatar, :name].each do |f|
+      assert_equal(["is invalid"], cs.errors_on(f))
+    end
+    assert(cs.changes.empty?)
+    assert_equal(:cast, cs.errors[0].validation)
+    assert(Eq.ok?("Int", cs.errors[0].meta[:type]?))
+    big = cast({"age" => "99999999999999999999"}, [:age])
+    assert_equal(["is invalid"], big.errors_on(:age))
+    nested = cast({"name" => [1, 2], "age" => {"a" => 1}}, [:name, :age])
+    assert_equal(["is invalid"], nested.errors_on(:name))
+    assert_equal(["is invalid"], nested.errors_on(:age))
+    assert(!nested.params.key?("name"))
+  end
+
+  def test_empty_and_nil
+    cs = cast({"age" => "", "name" => "", "email" => nil}, [:age, :name, :email])
+    # A nullable column's "" is nil (no change: the blank model's age is nil).
+    assert(!cs.changes.key?(:age))
+    # A String that admits no NULL keeps "".
+    assert(Eq.ok?("", cs.get_change(:name)))
+    assert_equal(["can't be blank"], cs.errors_on(:email))
+    assert_equal(:required, cs.errors_on(:email).empty? ? :none : cs.errors.find { |e| e.field == :email }.as(Rotor::FieldError).validation)
+    assert_equal(["can't be blank"], cs.validate_required([:name]).errors_on(:name))
+    # On an existing model, nil for a nullable column is a change.
+    u = KUser.load({id: 1, email: "a@b.c", name: "A", age: 5})
+    assert(Eq.ok?({age: nil}, Rotor::Changeset.cast(u, {"age" => ""}, [:age]).changes))
+  end
+
+  def test_permitted_only_and_unknown
+    cs = cast({"name" => "Ann", "admin" => "true", "role" => "admin"}, [:name])
+    assert(Eq.ok?({name: "Ann"}, cs.changes))
+    e = assert_raise(Rotor::SchemaError) { cast(Eq.none, [:nope]) }
+    assert_match(/no column `nope`/, e.message)
+  end
+
+  def test_no_change_when_equal
+    u = KUser.load({id: 1, email: "a@b.c", name: "Ann", age: 5})
+    cs = Rotor::Changeset.cast(u, {"name" => "Ann", "age" => "5", "email" => "x@y.z"}, [:name, :age, :email])
+    assert(Eq.ok?({email: "x@y.z"}, cs.changes))
+    assert(Eq.ok?("Ann", cs.get_field(:name)))
+    assert(Eq.ok?(5, cs.get_field(:age)))
+  end
+end
+
+class ValidationTest < Test::Case
+  def new_user(params: Hash[String, Object?]) -> Rotor::Changeset[KUser] = Rotor::Changeset.cast(KUser, params, [:email, :name, :age, :score, :role])
+
+  def test_required
+    cs = new_user({"name" => "  "}).validate_required([:email, :name])
+    assert_equal(["can't be blank"], cs.errors_on(:email))
+    assert_equal(["can't be blank"], cs.errors_on(:name))
+    # A field with an error already is skipped; a value of the data counts.
+    assert_equal(["is invalid"], new_user({"age" => "x"}).validate_required([:age]).errors_on(:age))
+    u = KUser.load({id: 1, email: "a@b.c", name: "Ann"})
+    assert(Rotor::Changeset.cast(u, Eq.none, [:name]).validate_required([:name, :email]).valid?)
+  end
+
+  def test_length
+    long = new_user({"name" => "Ännchen-Müller"}).validate_length(:name, max: 10)
+    e = long.errors[0]
+    assert_equal(["should be at most 10 character(s)"], long.errors_on(:name))
+    assert_equal(:length, e.validation)
+    assert_equal("should be at most %{count} character(s)", e.message)
+    assert(Eq.ok?({count: 10, kind: :max}, e.meta))
+    assert(new_user({"name" => "Ännchen"}).validate_length(:name, max: 7).valid?)
+    assert_equal(["should be at least 2 character(s)"], new_user({"name" => "A"}).validate_length(:name, min: 2).errors_on(:name))
+    assert_equal(["should be 3 character(s)"], new_user({"name" => "Anne"}).validate_length(:name, is: 3).errors_on(:name))
+    # No change, no check.
+    assert(new_user(Eq.none).validate_length(:name, min: 2).valid?)
+  end
+
+  def test_length_counts_graphemes
+    assert(new_user({"name" => "👍🏽é"}).validate_length(:name, is: 2).valid?)
+  end
+
+  def test_format
+    assert_equal(["has invalid format"], new_user({"email" => "nope"}).validate_format(:email, /@/).errors_on(:email))
+    assert(new_user({"email" => "a@b"}).validate_format(:email, /@/).valid?)
+    assert_equal(:format, new_user({"email" => "nope"}).validate_format(:email, /@/).errors[0].validation)
+  end
+
+  def test_number
+    assert_equal(["must be greater than or equal to 0"], new_user({"age" => "-1"}).validate_number(:age, min: 0).errors_on(:age))
+    assert_equal(["must be less than or equal to 150"], new_user({"age" => "151"}).validate_number(:age, max: 150).errors_on(:age))
+    assert_equal(["must be greater than 1.5"], new_user({"score" => "1.5"}).validate_number(:score, greater_than: 1.5).errors_on(:score))
+    cs = new_user({"score" => "2"}).validate_number(:score, less_than: 2)
+    assert_equal(["must be less than 2"], cs.errors_on(:score))
+    assert(Eq.ok?({kind: :less_than, number: 2}, cs.errors[0].meta))
+    assert(new_user({"age" => "150"}).validate_number(:age, min: 0, max: 150).valid?)
+    # Ints compared exactly.
+    assert_equal(["must be less than or equal to 9007199254740992"], new_user({"age" => "9007199254740993"}).validate_number(:age, max: 9007199254740992).errors_on(:age))
+    # One error for a field, the first bound it fails.
+    assert_equal(1, new_user({"age" => "-1"}).validate_number(:age, min: 0, greater_than: 5).errors.size)
+  end
+
+  def test_inclusion_and_exclusion
+    cs = new_user({"role" => "root"}).validate_inclusion(:role, ["admin", "user"])
+    assert_equal(["is invalid"], cs.errors_on(:role))
+    assert_equal(:inclusion, cs.errors[0].validation)
+    assert_equal("is invalid", Rotor::FieldError.new(:role, "is %{enum}", :inclusion, {enum: ["admin", "user"]}).text.sub("admin, user", "invalid"))
+    assert(new_user({"role" => "admin"}).validate_inclusion(:role, ["admin", "user"]).valid?)
+    assert_equal(["is reserved"], new_user({"name" => "root"}).validate_exclusion(:name, ["root"]).errors_on(:name))
+    assert(new_user({"name" => "ann"}).validate_exclusion(:name, ["root"]).valid?)
+  end
+
+  def test_acceptance_and_confirmation
+    assert(new_user({"terms" => "on"}).validate_acceptance(:terms).valid?)
+    assert(new_user({"terms" => true}).validate_acceptance(:terms).valid?)
+    assert_equal(["must be accepted"], new_user({"terms" => "no"}).validate_acceptance(:terms).errors_on(:terms))
+    assert_equal(["must be accepted"], new_user({"name" => "Ann"}).validate_acceptance(:terms).errors_on(:terms))
+    # Input without the checkbox, or only what cast drops, still needs it.
+    assert_equal(["must be accepted"], new_user(Eq.none).validate_acceptance(:terms).errors_on(:terms))
+    assert_equal(["must be accepted"], new_user({"tags" => ["a"]}).validate_acceptance(:terms).errors_on(:terms))
+    p = ->(params: Hash[String, Object?]) { Rotor::Changeset.cast(KUser, params, [:password]) }
+    assert(p.call({"password" => "s3cret", "password_confirmation" => "s3cret"}).validate_confirmation(:password).valid?)
+    bad = p.call({"password" => "s3cret", "password_confirmation" => "other"}).validate_confirmation(:password)
+    assert_equal(["does not match confirmation"], bad.errors_on(:password_confirmation))
+    assert(p.call({"password" => "s3cret"}).validate_confirmation(:password).valid?)
+    assert_equal(["can't be blank"], p.call({"password" => "s3cret"}).validate_confirmation(:password, required: true).errors_on(:password_confirmation))
+    # Cast as the field is.
+    assert(new_user({"age" => "5", "age_confirmation" => "5"}).validate_confirmation(:age).valid?)
+    assert(!new_user({"age" => "5", "age_confirmation" => "6"}).validate_confirmation(:age).valid?)
+    # No parameters: no acceptance to check.
+    assert(Rotor::Changeset.change(KUser.blank).validate_acceptance(:terms).valid?)
+  end
+
+  def test_custom_and_cross_field
+    cs = KUser.registration({"email" => "x@reserved.test", "name" => "Ann"})
+    assert_equal(["is reserved"], cs.errors_on(:email))
+    assert_equal(:custom, cs.errors[0].validation)
+    named = new_user({"name" => "bob"}).validate_change(:name, :capitalized) { |u| u.name[0, 1] == u.name[0, 1].upcase ? nil : "must be capitalized" }
+    assert_equal(:capitalized, named.errors[0].validation)
+    # Not run without a change, nor after a cast error.
+    assert(new_user(Eq.none).validate(:name) { |_| "never" }.valid?)
+    assert_equal(["is invalid"], new_user({"age" => "x"}).validate(:age) { |_| "never" }.errors_on(:age))
+    whole = new_user({"name" => "Ann", "email" => "ann@x"}).validate do |c|
+      c.get_field(:name) == "Ann" && c.get_field(:email) == "ann@x" ? c.add_error(:base, "too obvious") : c
+    end
+    assert_equal(["too obvious"], whole.errors_on(:base))
+  end
+
+  def test_apply_and_changes
+    cs = KUser.registration({"email" => "ann@example.com", "name" => "Ann", "age" => "41"})
+    assert(cs.valid?)
+    u = cs.apply.as(KUser)
+    assert_equal("Ann", u.name)
+    assert_equal(41, u.age)
+    assert_equal("user", u.role)
+    assert_equal([:email, :name, :age], u.changed)
+    assert_equal(u.name, cs.apply!.name)
+    bad = KUser.registration({"name" => ""})
+    assert(bad.apply.nil?)
+    e = assert_raise(Rotor::InvalidChangeset) { bad.apply! }.as(Rotor::InvalidChangeset)
+    assert_equal("KUser is invalid: email can't be blank; name can't be blank", e.message)
+    assert(Eq.ok?(bad, e.changeset))
+    assert_equal(["email", "name"], e.errors.map { |x| x.field.to_s })
+  end
+
+  def test_put_change_and_add_error
+    cs = Rotor::Changeset.change(KUser.load({id: 1, email: "a@b.c", name: "Ann"}))
+    assert(Eq.ok?({name: "Bob"}, cs.put_change(:name, "Bob").changes))
+    assert(cs.put_change(:name, "Bob").put_change(:name, "Ann").changes.empty?)
+    assert_raise(ArgumentError) { cs.put_change(:name, 3) }
+    # Code may store what PostgreSQL holds.
+    assert(cs.put_change(:score, 1.0 / 0.0).valid?)
+    assert_raise(ArgumentError) { cs.put_change(:name, nil) }
+    assert_raise(Rotor::SchemaError) { cs.put_change(:nope, 3) }
+    e = cs.add_error(:age, "needs %{n}", validation: :mine, meta: {n: 3})
+    assert_equal(["needs 3"], e.errors_on(:age))
+    assert(!e.valid?)
+  end
+
+  def test_redact
+    u = KUser.load({id: 1, email: "a@b.c", name: "Ann", password: "s3cret"})
+    assert_match(/password: \*\*redacted\*\*/, u.inspect)
+    assert(!u.inspect.include?("s3cret"))
+    assert(Eq.ok?("s3cret", u.to_h[:password]?))
+    cs = Rotor::Changeset.cast(u, {"password" => "n3w"}, [:password])
+    assert(!cs.inspect.include?("n3w"))
+    assert(!cs.to_h.values.any? { |v| v.include?("n3w") })
+    assert_match(/password: \*\*redacted\*\*/, cs.inspect)
+  end
+
+  def test_shareable
+    cs = KUser.registration({"email" => "ann@example.com", "name" => "Ann"})
+    t = Task.spawn { cs.valid? }
+    assert(t.await)
+  end
+end
+
+class ChangesetRepoTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  SCHEMA = <<~SQL
+    DROP TABLE IF EXISTS cs_post_tags, cs_posts, cs_tags, cs_users;
+    CREATE TABLE cs_users (
+      id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      email text NOT NULL, name text NOT NULL, age bigint, score double precision,
+      admin boolean NOT NULL DEFAULT false, born timestamptz, avatar bytea,
+      role text NOT NULL DEFAULT 'user', password text,
+      created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+      CONSTRAINT cs_users_age_check CHECK (age IS NULL OR age < 120)
+    );
+    CREATE UNIQUE INDEX cs_users_email_index ON cs_users (email);
+    CREATE UNIQUE INDEX cs_users_name_lower ON cs_users (lower(name));
+    CREATE TABLE cs_posts (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, title text NOT NULL, user_id bigint NOT NULL REFERENCES cs_users);
+    CREATE TABLE cs_tags (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name text NOT NULL);
+    CREATE TABLE cs_post_tags (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, post_id bigint NOT NULL REFERENCES cs_posts, tag_id bigint NOT NULL REFERENCES cs_tags)
+  SQL
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        c.exec_all(SCHEMA)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def with_repo(&: (Rotor::Repo) -> Void) -> Void
+    c = PG.connect(url)
+    begin
+      c.exec("TRUNCATE cs_post_tags, cs_posts, cs_tags, cs_users RESTART IDENTITY")
+      yield Rotor::Repo.new(connection: c)
+    ensure
+      c.close
+    end
+  end
+
+  def ok[M](outcome: Rotor::Outcome[M]) -> M
+    case outcome
+    in Rotor::Outcome::Ok(v) then v
+    in Rotor::Outcome::Invalid(cs) then flunk("invalid: #{cs.summary}")
+    end
+  end
+
+  def invalid[M <: Rotor::Model](outcome: Rotor::Outcome[M]) -> Rotor::Changeset[M]
+    case outcome
+    in Rotor::Outcome::Ok(v) then flunk("saved: #{v.inspect}")
+    in Rotor::Outcome::Invalid(cs) then cs
+    end
+  end
+
+  def test_insert_and_update
+    with_repo do |repo|
+      u = ok(repo.insert(KUser.registration({"email" => "ann@example.com", "name" => "Ann", "age" => "41"})))
+      assert_equal(1, u.id)
+      assert(!u.created_at.nil?)
+      assert(!u.changed?)
+      bad = invalid(repo.insert(KUser.registration({"name" => ""})))
+      assert_equal(:insert, bad.action)
+      assert_equal(1, repo.count(KUser.query))
+      v = ok(repo.update(Rotor::Changeset.cast(u, {"name" => "Anne"}, [:name])))
+      assert_equal("Anne", v.name)
+      assert(v.updated_at >= u.updated_at)
+      assert_equal(["Anne"], repo.all(KUser.query).map { |x| x.name })
+      # Nothing changed: no statement, the model back.
+      assert_equal(v.name, ok(repo.update(Rotor::Changeset.cast(v, {"name" => "Anne"}, [:name]))).name)
+      assert_equal("Bob", repo.insert!(KUser.registration({"email" => "bob@example.com", "name" => "Bob"})).name)
+      e = assert_raise(Rotor::InvalidChangeset) { repo.update!(Rotor::Changeset.cast(v, {"age" => "x"}, [:age])) }
+      assert_match(/age is invalid/, e.message)
+    end
+  end
+
+  def test_constraints
+    with_repo do |repo|
+      repo.insert!(KUser.registration({"email" => "ann@example.com", "name" => "Ann"}))
+      dup = invalid(repo.insert(KUser.registration({"email" => "ann@example.com", "name" => "Other"})))
+      assert_equal(["has already been taken"], dup.errors_on(:email))
+      assert_equal(:unique, dup.errors[0].validation)
+      assert(Eq.ok?("cs_users_email_index", dup.errors[0].meta[:constraint]?))
+      # Named; a check constraint.
+      named = KUser.registration({"email" => "x@example.com", "name" => "ANN"}).unique_constraint(:name, name: "cs_users_name_lower")
+      assert_equal(["has already been taken"], invalid(repo.insert(named)).errors_on(:name))
+      old = KUser.registration({"email" => "y@example.com", "name" => "Old", "age" => "130"}).check_constraint(:age, name: "cs_users_age_check", message: "is too old")
+      assert_equal(["is too old"], invalid(repo.insert(old)).errors_on(:age))
+      # Undeclared: an exception.
+      assert_raise(PG::ServerError) { repo.insert(Rotor::Changeset.cast(KUser, {"email" => "ann@example.com", "name" => "Z"}, [:email, :name])) }
+      # A foreign key.
+      post = Rotor::Changeset.cast(KPost, {"title" => "t", "user_id" => "99"}, [:title, :user_id])
+      assert_raise(PG::ServerError) { repo.insert(post) }
+      assert_equal(["does not exist"], invalid(repo.insert(post.foreign_key_constraint(:user_id))).errors_on(:user_id))
+      # No association: a delete.
+      u = repo.one!(KUser.query)
+      repo.insert!(Rotor::Changeset.cast(KPost, {"title" => "t", "user_id" => u.id}, [:title, :user_id]))
+      gone = invalid(repo.delete(Rotor::Changeset.change(u).no_assoc_constraint(:k_posts)))
+      assert_equal(["are still associated with this entry"], gone.errors_on(:k_posts))
+      assert_equal(1, repo.count(KUser.query))
+    end
+  end
+
+  def test_inside_a_transaction_a_savepoint
+    with_repo do |repo|
+      repo.insert!(KUser.registration({"email" => "ann@example.com", "name" => "Ann"}))
+      repo.transaction do |tx|
+        bad = invalid(tx.insert(KUser.registration({"email" => "ann@example.com", "name" => "Other"})))
+        assert_equal(["has already been taken"], bad.errors_on(:email))
+        # The transaction is still usable.
+        tx.insert!(KUser.registration({"email" => "cy@example.com", "name" => "Cy"}))
+        nil
+      end
+      assert_equal(["Ann", "Cy"], repo.all(KUser.order { name }).map { |u| u.name })
+    end
+  end
+
+  def test_over_a_pool
+    url
+    PG::Pool.open(url, size: 2) do |pool|
+      repo = Rotor::Repo.new(pool: pool)
+      repo.exec("TRUNCATE cs_post_tags, cs_posts, cs_tags, cs_users RESTART IDENTITY")
+      repo.insert!(KUser.registration({"email" => "ann@example.com", "name" => "Ann"}))
+      assert_equal(["has already been taken"], invalid(repo.insert(KUser.registration({"email" => "ann@example.com", "name" => "B"}))).errors_on(:email))
+      repo.transaction do |tx|
+        assert(!invalid(tx.insert(KUser.registration({"email" => "ann@example.com", "name" => "B"}))).valid?)
+        tx.insert!(KUser.registration({"email" => "cy@example.com", "name" => "Cy"}))
+        nil
+      end
+      assert_equal(2, repo.count(KUser.query))
+    end
+  end
+
+  def test_unsafe_validate_unique
+    with_repo do |repo|
+      u = repo.insert!(KUser.registration({"email" => "ann@example.com", "name" => "Ann"}))
+      cs = KUser.registration({"email" => "ann@example.com", "name" => "Other"}).unsafe_validate_unique([:email], repo)
+      assert_equal(["has already been taken"], cs.errors_on(:email))
+      assert_equal(:unsafe_unique, cs.errors[0].validation)
+      # Its own row does not count.
+      assert(Rotor::Changeset.cast(u, {"email" => "ann@example.com", "name" => "Anne"}, [:email, :name]).unsafe_validate_unique([:email, :name], repo).valid?)
+      assert(Rotor::Changeset.cast(u, {"name" => "Anne"}, [:name]).unsafe_validate_unique([:email], repo).valid?)
+      # Through a query.
+      assert(KUser.registration({"email" => "ann@example.com", "name" => "Other"}).unsafe_validate_unique([:email], repo, query: KUser.where { role == "admin" }).valid?)
+      assert(!KUser.registration({"email" => "ann@example.com", "name" => "Other"}).unsafe_validate_unique([:email], repo, query: KUser.query).valid?)
+    end
+  end
+
+  def test_put_assoc
+    with_repo do |repo|
+      u = repo.insert!(KUser.registration({"email" => "ann@example.com", "name" => "Ann"}))
+      tags = ["a", "b", "c"].map { |n| repo.insert(KTag.new(name: n)) }
+      post = repo.insert!(Rotor::Changeset.cast(KPost, {"title" => "t", "user_id" => u.id}, [:title, :user_id]).put_assoc(:k_tags, [tags[0], tags[1]]))
+      names = ->() { repo.preload(repo.get(KPost, post.id).as(KPost)) { k_tags }.k_tags.map { |t| t.name }.sort }
+      assert_equal(["a", "b"], names.call)
+      assert_equal(["a", "b"], post.k_tags.map { |t| t.name })
+      loaded = repo.preload(post) { k_tags }
+      saved = repo.update!(Rotor::Changeset.change(loaded).put_assoc(:k_tags, [tags[1], tags[2]]))
+      assert_equal(["b", "c"], names.call)
+      assert_equal(["b", "c"], saved.k_tags.map { |t| t.name })
+      assert_equal(2, repo.count(KPostTag.query))
+      repo.update!(Rotor::Changeset.change(post).put_assoc(:k_tags, []))
+      assert_equal(0, repo.count(KPostTag.query))
+      assert_raise(ArgumentError) { Rotor::Changeset.change(post).put_assoc(:user, [u]) }
+      assert_raise(ArgumentError) { Rotor::Changeset.change(post).put_assoc(:k_tags, [u]) }
+      assert_raise(ArgumentError) { repo.update(Rotor::Changeset.change(post).put_assoc(:k_tags, [KTag.new(name: "unsaved")])) }
+      # A failed put_assoc on insert leaves no post.
+      before = repo.count(KPost.query)
+      assert_raise(ArgumentError) { repo.insert(Rotor::Changeset.cast(KPost, {"title" => "u", "user_id" => u.id}, [:title, :user_id]).put_assoc(:k_tags, [KTag.new(name: "unsaved")])) }
+      assert_equal(before, repo.count(KPost.query))
+    end
+  end
+end

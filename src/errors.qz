@@ -68,3 +68,26 @@ class MigrationError < Error
   # The migration's class name.
   def name -> String = @name
 end
+
+# `Rotor::Changeset#apply!`, `Rotor::Repo#insert!` or `Rotor::Repo#update!` of a
+# changeset with errors: its `errors`, and the changeset itself as a
+# `Shareable` (its model's type is not known where it is rescued: for
+# the typed changeset, use `insert` and its `Rotor::Outcome`). The
+# message lists the errors.
+class InvalidChangeset < Error
+  @changeset: Shareable
+  @errors: Array[FieldError]
+
+  # The error of `changeset`, with its `errors`, `summary` listing them.
+  def initialize(changeset: Shareable, errors: Array[FieldError], summary: String)
+    @changeset = changeset
+    @errors = errors
+    super(summary)
+  end
+
+  # The changeset.
+  def changeset -> Shareable = @changeset
+
+  # Its errors.
+  def errors -> Array[FieldError] = @errors
+end
