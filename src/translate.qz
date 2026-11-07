@@ -291,7 +291,7 @@ class Translator
 
   # Refuses `e` as a value when its classes are more than one SQL type
   # holds (a `Bool` and another value, a `String` and an `Int`): a
-  # `CASE` or `COALESCE` of them is an error in PostgreSQL. `Int`s and
+  # SQL CASE or COALESCE of them is an error in PostgreSQL. `Int`s and
   # `Float`s meet in double precision; nil and what the translator does
   # not know the class of (`Object`) meet anything.
   def one_type(e: Meta::Expr) -> Void
@@ -645,7 +645,8 @@ class Translator
     one_type(e)
     one_type(l)
     sb = assuming(known) { sql(r) }
-    one_type(r)
+    # (Under the facts its translation had: `level && (!(level > 1) ? ...)`.)
+    assuming(known) { one_type(r) }
     [[l, sa], [r, sb]].each do |x|
       if what = x[1].tri
         raise UntranslatableError.new(Translator.value_error(x[0], what, @file))
@@ -1029,8 +1030,8 @@ class Translator
   # model's column, an `if` without `else`), a comparison's `Bool`,
   # arithmetic's by its operands' (`Int` only from two `Int`s). An `if`
   # gives its branches' (only the one a known condition takes, as `sql`
-  # does). A nullable column gives its class alone: a NULL there is
-  # PostgreSQL's to refuse where the column admits none. For an `update`
+  # does). A column that can be NULL (past the `nil?` facts) gives `Nil`
+  # as well, so an `update` refuses it into a non-null column. For an `update`
   # to check its value against the column, and a condition to be tested
   # for its truthiness: PostgreSQL would convert another class on
   # assignment (round a double precision into a bigint, write a number
@@ -1130,8 +1131,9 @@ class Translator
     # (Of `l`, what makes it the value: its falsy classes for `&&`, its
     # truthy ones for `||`.)
     kept = conj ? ls.select { |k| k == Nil || k == Bool } : ls.reject { |k| k == Nil }
-    # (A nullable column's classes do not say it is nil when NULL: its
-    # translation as a value does. One that is not a value has none.)
+    # (Whether it can be NULL is its translation as a value's: a column's
+    # classes say it, an expression's need not. One that is not a value
+    # has none.)
     if conj
       nulls = begin
                 valued(true) { sql(l) }.nulls

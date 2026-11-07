@@ -555,6 +555,9 @@ class QueryTest < Test::Case
     assert_match(/\A`\(on \? level : label\) \|\| label`, an `Int` or a `String`, as a value/, e.message)
     check(Gauge.where { (if on then level else ratio end) > 1.0 }, "#{GS} WHERE CASE WHEN \"on\" THEN \"level\" ELSE \"ratio\" END > $1::double precision", [1.5 - 0.5])
     check(Gauge.order { on ? level : ratio }, "#{GS} ORDER BY CASE WHEN \"on\" THEN \"level\" ELSE \"ratio\" END", [])
+    # The right operand of `&&` is checked under the left's facts.
+    check(Gauge.order { level && (!(level > 1) ? "lo" : "hi") }, "#{GS} ORDER BY CASE WHEN \"level\" IS NOT NULL THEN CASE WHEN NOT \"level\" > 1 THEN $1::text ELSE $2::text END ELSE NULL END", ["lo", "hi"])
+    check(Gauge.where { (label && (Rotor::SQL.not_nil(label) == "a" ? 1 : 2)) == 1 }, "#{GS} WHERE CASE WHEN \"label\" IS NOT NULL THEN CASE WHEN \"label\" = $1 THEN 1 ELSE 2 END ELSE NULL END = 1", ["a"])
   end
 
   def test_order_limit_offset
