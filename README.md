@@ -636,13 +636,15 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   and run every migration there: two processes migrating at once run
   one after the other, and the second finds nothing pending.
   `lock_timeout:` bounds the wait (a `PG::ServerError` when it runs
-  out). The repository must not be inside a transaction
-  (`ArgumentError`). When the run ends, a transaction a migration left
-  open is rolled back and the lock released; a connection taken from a
-  pool has its settings reset (`RESET ALL`), so that a migration's
-  `SET` does not reach the pool, while a repository over one
-  connection keeps its session as the migrations left it. A migration
-  with `disable_transaction!` that leaves a transaction open fails.
+  out), the session's own `lock_timeout` restored after it. The
+  repository must not be inside a transaction (`ArgumentError`). When
+  the run ends, a transaction a migration left open is rolled back and
+  the lock released; a connection taken from a pool has its settings
+  reset (`RESET ALL`), so that a migration's `SET` does not reach the
+  pool, while a repository over one connection keeps its session as
+  the migrations left it (the program owns that session: its settings,
+  and those a migration's `SET` made, stay). A migration with
+  `disable_transaction!` that leaves a transaction open fails.
 - **Order.** `migrate` refuses a pending version lower than the
   highest one applied (`Rotor::MigrationError`, before running
   anything) unless `allow_out_of_order: true`. Ecto and Rails run it;
