@@ -259,6 +259,38 @@ class QueryTest < Test::Case
     check(Gauge.where { level != nil }, "#{GS} WHERE \"level\" IS NOT NULL", [])
   end
 
+  # `==` between a column and an expression: `=` when neither can be
+  # NULL (which an index serves), `IS NOT DISTINCT FROM` otherwise.
+  def test_equality_with_an_expression
+    flag = true
+    x = 1
+    y = 2
+    s = "a"
+    t = "b"
+    c = "CASE WHEN $1::boolean THEN $2::bigint ELSE $3::bigint END"
+    check(Person.where { age == (flag ? x : y) }, "#{COLS} WHERE \"age\" = #{c}", [true, 1, 2])
+    check(Person.where { age == id + 1 }, "#{COLS} WHERE \"age\" = \"id\" + 1", [])
+    check(Person.where { age == (admin ? id : age) }, "#{COLS} WHERE \"age\" = CASE WHEN \"admin\" THEN \"id\" ELSE \"age\" END", [])
+    check(Person.where { name == Rotor::SQL.lower(name) }, "#{COLS} WHERE \"name\" = lower(\"name\")", [])
+    check(Person.where { !(age == (flag ? x : y)) }, "#{COLS} WHERE NOT \"age\" = #{c}", [true, 1, 2])
+    check(Person.where { age != (flag ? x : y) }, "#{COLS} WHERE \"age\" <> #{c}", [true, 1, 2])
+    # Past a `nil?` test the column is not NULL.
+    check(Gauge.where { !level.nil? && level == (flag ? x : y) }, "#{GS} WHERE NOT \"level\" IS NULL AND \"level\" = #{c}", [true, 1, 2])
+    # A nil branch, a missing `else`, a nullable column on either side.
+    check(Person.where { age == (flag ? x : nil) }, "#{COLS} WHERE \"age\" IS NOT DISTINCT FROM CASE WHEN $1::boolean THEN $2::bigint ELSE NULL END", [true, 1])
+    check(Person.where { age != (flag ? x : nil) }, "#{COLS} WHERE \"age\" IS DISTINCT FROM CASE WHEN $1::boolean THEN $2::bigint ELSE NULL END", [true, 1])
+    check(Person.where { age == (if flag then x end) }, "#{COLS} WHERE \"age\" IS NOT DISTINCT FROM CASE WHEN $1::boolean THEN $2::bigint END", [true, 1])
+    check(Person.where { email == (flag ? s : t) }, "#{COLS} WHERE \"email\" IS NOT DISTINCT FROM CASE WHEN $1::boolean THEN $2::text ELSE $3::text END", [true, "a", "b"])
+    check(Person.where { name == (admin ? email : name) }, "#{COLS} WHERE \"name\" IS NOT DISTINCT FROM CASE WHEN \"admin\" THEN \"email\" ELSE \"name\" END", [])
+    # A captured nil in a branch can be NULL; a captured value cannot
+    # (each kind its own translation).
+    [nil, 5].each do |v|
+      w: Int? = v
+      q = Person.where { age == (flag ? x : w) }
+      assert_equal(v.nil? ? "#{COLS} WHERE \"age\" IS NOT DISTINCT FROM CASE WHEN $1::boolean THEN $2::bigint ELSE $3 END" : "#{COLS} WHERE \"age\" = #{c}", q.to_sql[0])
+    end
+  end
+
   # Outside query blocks `Int? > Int` is still a type error.
   def test_compare_is_in_scope_in_query_blocks_only
     out = Process.sh("cd test/fixtures/compare_out_of_scope && exec \"${QUARZ:-quarz}\" check")
@@ -362,7 +394,7 @@ class QueryTest < Test::Case
     check(Person.where { age < (admin ? 2000000000 : 1) * 2 }, "#{COLS} WHERE \"age\" < CASE WHEN \"admin\" THEN 2000000000 ELSE 1 END::bigint * 2", [])
     check(Person.where { age < (admin ? age : 1) * 2 }, "#{COLS} WHERE \"age\" < CASE WHEN \"admin\" THEN \"age\" ELSE 1 END * 2", [])
     check(Person.where { age < (admin ? age : score) * 2 }, "#{COLS} WHERE \"age\" < CASE WHEN \"admin\" THEN \"age\" ELSE \"score\" END * 2", [])
-    check(Person.where { age % 3 == 2000000000 % 3 }, "#{COLS} WHERE (\"age\" % 3 + 3) % 3 IS NOT DISTINCT FROM (2000000000::bigint % 3 + 3) % 3", [])
+    check(Person.where { age % 3 == 2000000000 % 3 }, "#{COLS} WHERE (\"age\" % 3 + 3) % 3 = (2000000000::bigint % 3 + 3) % 3", [])
     check(Person.where { age < 2000000000 / 2 * 3 }, "#{COLS} WHERE \"age\" < floor(2000000000::numeric / 2)::bigint * 3", [])
     check(Person.where { age < (admin ? 2000000000 : 1) + (admin ? 2 : 1) }, "#{COLS} WHERE \"age\" < CASE WHEN \"admin\" THEN 2000000000 ELSE 1 END::bigint + CASE WHEN \"admin\" THEN 2 ELSE 1 END", [])
     check(Person.where { age < -(admin ? 2000000000 : 1) - 1 }, "#{COLS} WHERE \"age\" < - CASE WHEN \"admin\" THEN 2000000000 ELSE 1 END::bigint - 1", [])

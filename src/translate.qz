@@ -816,8 +816,9 @@ class Translator
 
   # `a == b` and the others. Against a value, equality is decided by it:
   # `IS NULL` for nil, `=` otherwise (which an index serves); between
-  # columns or expressions, one of which admits NULL, `IS NOT DISTINCT
-  # FROM`, as Quarz's `==` takes nil for equal to nil.
+  # columns or expressions, one of which can be NULL (`nullable?`), `IS
+  # NOT DISTINCT FROM`, as Quarz's `==` takes nil for equal to nil, and
+  # `=` when neither can (`n = CASE WHEN ... END`, which an index serves).
   private def compare(le: Meta::Expr, op: String, re: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     l = operand(le)
     r = operand(re)
@@ -1046,9 +1047,15 @@ class Translator
     end
   end
 
+  # Whether `s` (not a known value) can be NULL: a column that admits
+  # it (unless a `nil?` before says otherwise), or an expression whose
+  # `nulls` says so (a CASE with a nil branch or without `else`,
+  # arithmetic or a function of something that can be NULL).
   private def nullable?(s: Sql) -> Bool
-    c = s.column
-    c.nil? || c.null
+    if c = s.column
+      return c.null
+    end
+    !s.nulls.nil?
   end
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
