@@ -12,7 +12,7 @@ Quarz blocks that are translated to SQL. It runs on PostgreSQL through
 Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 ```
 
-Work in progress. What exists: the schema, queries and statements as values (`to_sql`), a repository that runs them on PostgreSQL, associations with preloading, and migrations.
+Work in progress. What exists: the schema, queries and statements as values (`to_sql`), a repository that runs them on PostgreSQL, associations with preloading, migrations, and changesets.
 
 ```ruby
 class User < Rotor::Model
@@ -667,6 +667,117 @@ may refer to each other in a cycle). `if_not_exists: true` leaves the
 tables that exist. `Rotor::Schema.drop(repo, models, if_exists:)`
 drops them in one `DROP TABLE`, without `CASCADE`. A production
 database goes through migrations.
+
+## Changesets
+
+Input from outside (a form, JSON) goes through a changeset, as in
+Ecto: an immutable `Rotor::Changeset[M]` of the changes cast to the
+columns' types, validated, and carrying the errors meant for a user.
+The repository saves it and answers with a `Rotor::Outcome` rather
+than raising for what the user got wrong. Models keep working as they
+are (`with`, `repo.insert(model)`); a changeset is the layer for
+untrusted input.
+
+```ruby
+class User < Rotor::Model
+  table "users" do
+    column :id, Int, primary: true
+    column :email, String
+    column :name, String
+    column :age, Int, null: true
+    column :role, String, default: "user"
+    column :password, String, null: true, redact: true   # **redacted** in inspect
+    timestamps
+  end
+
+  def self.registration(params: Hash[String, Object?]) -> Rotor::Changeset[User]
+    Rotor::Changeset.cast(User, params, [:email, :name, :age, :password])   # cast(user, ...) for an existing one
+      .validate_required([:email, :name])
+      .validate_length(:name, max: 100)
+      .validate_format(:email, /\A[^@\s]+@[^@\s]+\z/)
+      .validate_number(:age, min: 0, max: 150)
+      .validate_confirmation(:password)                    # password_confirmation in params
+      .validate(:email) { |u| u.email.end_with?("@example.com") ? "is reserved" : nil }
+      .unique_constraint(:email)                           # the index users_email_index
+  end
+end
+
+# The form flow: cast and validate, save, show the errors.
+case repo.insert(User.registration(request.form_params))
+in Rotor::Outcome::Ok(user) then redirect_to(user)
+in Rotor::Outcome::Invalid(cs) then render(cs.errors_on(:email), cs.errors_on(:name))
+end
+```
+
+- **Casting.** `Changeset.cast(model_or_class, params, permitted)`
+  reads the `permitted` fields of `params` (by `String` name, as form
+  and JSON input give them, or by `Symbol`) and ignores the rest. Each
+  value is cast to its column's type: strings to `Int`, `Float`,
+  `Bool` (`true`/`false`, `1`/`0`, `on`/`off`) and `Time` (ISO 8601;
+  without an offset, as an HTML `datetime-local` gives it, UTC);
+  `Bytes` only from `Bytes`. A value that does not cast (letters for a
+  number, digits other than ASCII, an `Int` beyond 64 bits, an
+  infinite `Float`, a time `Time` cannot hold) is an `is invalid`
+  error (`validation: :cast`) and no change. A string of spaces or
+  nothing is nil, except for a `String` column that admits no NULL;
+  nil for a column that admits none is `can't be blank`. A value equal to the
+  model's is no change. A permitted name that is not a column raises
+  `Rotor::SchemaError`.
+- **Validations** each give a new changeset: `validate_required`,
+  `validate_length(min:, max:, is:)` (characters as a reader sees
+  them: grapheme clusters, as Ecto counts),
+  `validate_format`, `validate_number(min:, max:, greater_than:,
+  less_than:)`, `validate_inclusion`, `validate_exclusion`,
+  `validate_acceptance` (a checkbox parameter; skipped for
+  `Changeset.change`, which has no input), `validate_confirmation`
+  (cast as the field is), `validate(field) { |model| message? }` and
+  `validate_change(field, name) { ... }`, whose block gets the model with the changes applied
+  (typed: read the field through its getter) and runs only when the
+  field changed and cast, and `validate { |cs| cs }` for rules across
+  fields. A field without a change is skipped, except by
+  `validate_required`, which looks at the value the model would have;
+  a field `validate_required` found blank is skipped by the others.
+- **Errors.** `errors` are `Rotor::FieldError`s: `field` (`:base` for
+  the whole), `message` as a template (`should be at most %{count}
+  character(s)`), `validation` (`:required`, `:length`, ...), and `meta`
+  (`count`, `kind`, ...), so that an application can translate by
+  `validation` and `meta`. `text` and `errors_on(field)` give the
+  messages filled in.
+- **Saving.** `repo.insert(cs)`, `repo.update(cs)` and
+  `repo.delete(cs)` give `Rotor::Outcome::Ok(model)` or
+  `Rotor::Outcome::Invalid(changeset)`; `insert!` and `update!` raise
+  `Rotor::InvalidChangeset` (its `errors`, and the changeset as a
+  `Shareable`: the typed one comes from `insert`'s outcome). Timestamps
+  are set as for a model. `apply` gives the model with the changes
+  (nil when invalid), `apply!` raises.
+- **Constraints.** `unique_constraint(field, name:)` (by default
+  `<table>_<field>_index`, the name `create_index` gives),
+  `foreign_key_constraint` (`<table>_<field>_fkey`, PostgreSQL's),
+  `check_constraint(field, name:)` and `no_assoc_constraint(assoc)` (a
+  delete refused by rows that refer to the model) turn the database's
+  violation of that constraint into an error on the field and an
+  `Invalid`; an undeclared violation stays an exception. The save runs
+  in a transaction, or under a savepoint when the repository is in one,
+  so that an `Invalid` leaves the transaction usable (Ecto aborts it).
+- `unsafe_validate_unique(fields, repo, query:)` looks for a row with
+  the same values first, for a message before the save: racy, so no
+  replacement for the unique index and its `unique_constraint`.
+- `put_change`, `get_change`, `get_field`, `add_error`;
+  `put_assoc(:tags, tags)` makes a `has_many ..., through:` exactly
+  those (saved) models on save, replacing the join rows, the saved
+  model having them preloaded. Two saves of one model at once may both
+  insert a pair: a unique index on the join table's two keys stops
+  that.
+- A changeset is `Shareable`: params keep scalar values only (an array
+  or a hash given for a field is a cast error).
+- A column declared `redact: true` shows as `**redacted**` in the
+  model's `inspect` and in the changeset's `inspect` and `to_h` (the
+  model's `to_h` keeps it: the repository writes through it). A
+  violation of a constraint the changeset does not declare stays a
+  `PG::ServerError`, whose detail the server writes with the value
+  (`Key (token)=(...) already exists`): declare the constraints of such
+  columns.
+- Not yet: changesets of associations (`cast_assoc`), embedded schemas.
 
 ## Developing
 

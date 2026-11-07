@@ -1,0 +1,581 @@
+# A value a changeset keeps of its parameters: what form and JSON
+# input give for a field (an array or a hash is not one).
+type Param = String | Int | Float | Bool | Time | Bytes
+
+# A value of an error's `meta`.
+type MetaValue = Int | Float | String | Symbol | Array[Value]
+
+# An error of a changeset: the field it is on (`:base` for the whole),
+# its message as a template (`should be at most %{count} characters`),
+# the validation that made it (`:required`, `:length`, `:cast`, a
+# constraint's kind...), and the values the template names (`count`,
+# `kind`...), so that an application can translate by `validation` and
+# `meta` rather than by text.
+data FieldError(field: Symbol, message: String, validation: Symbol, meta: Hash[Symbol, MetaValue] = {})
+  # The message with its placeholders filled from `meta`.
+  #
+  # ```
+  # Rotor::FieldError.new(:name, "should be at most %{count} character(s)", :length, {count: 3}).text  # => "should be at most 3 character(s)"
+  # ```
+  def text -> String
+    message.gsub(/%\{(\w+)\}/) do |m: String|
+      v = meta[m[2, m.size - 3].to_sym]?
+      case v
+      in nil then m
+      in Int | Float | String | Symbol then v.to_s
+      else v.as(Array[Value]).map { |x| x.to_s }.join(", ")
+      end
+    end
+  end
+end
+
+# A constraint of the database a changeset expects to be violated by
+# user input: on save, a violation of it (its SQLSTATE and name) is an
+# error on `field` rather than an exception.
+data Constraint(kind: Symbol, field: Symbol, name: String, message: String)
+  # The SQLSTATE a violation of this kind has.
+  def code -> String
+    case kind
+    in :unique then "23505"
+    in :check then "23514"
+    else "23503"
+    end
+  end
+end
+
+# Changes to a model from untrusted input (a form, JSON), cast to the
+# columns' types and validated, with the errors meant for a user, as
+# Ecto's changesets: an immutable value, each validation giving a new
+# one; `Rotor::Repo#insert` and `Rotor::Repo#update` take it and answer with a
+# `Rotor::Outcome`.
+#
+# ```
+# class CsUser < Rotor::Model
+#   table "users" do
+#     column :id, Int, primary: true
+#     column :email, String
+#     column :age, Int, null: true
+#   end
+# end
+#
+# cs = Rotor::Changeset.cast(CsUser, {"email" => "ann@example.com", "age" => "x"}, [:email, :age])
+#   .validate_required([:email])
+#   .validate_format(:email, /@/)
+# cs.valid?               # => false
+# cs.errors_on(:age)      # => ["is invalid"]
+# cs.changes              # => {email: "ann@example.com"}
+# ```
+#
+# - `data` is the model it started from (a new one, the class's `new`,
+#   for `cast(Class, ...)`); `changes` the cast values that differ from
+#   its own; `params` the input's scalar values by name.
+# - Validations skip a field without a change, except
+#   `validate_required`, which looks at the value the model would have,
+#   and a field `validate_required` found blank.
+data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array[FieldError], params: Hash[String, Param?], permitted: Array[Symbol], constraints: Array[Constraint], assocs: Hash[Symbol, Array[Model]], action: Symbol?, cast: Bool = true)
+  # A changeset of `model` with the `permitted` fields of `params`
+  # (form or JSON input, by name) cast to their columns' types; the
+  # other parameters are ignored. A value that does not cast is an `is
+  # invalid` error (`validation: :cast`) and no change; a string of
+  # spaces or nothing is nil, except for a `String` column that admits
+  # no NULL; nil for a column that admits none is `can't be blank`
+  # (`:required`). Raises
+  # `Rotor::SchemaError` for a permitted name that is not a column.
+  def self.cast[T <: Model](model: T, params: Hash[String, Object?], permitted: Array[Symbol]) -> Changeset[T]
+    info = model.table_info
+    kept: Hash[String, Param?] = {}
+    params.each_pair do |k, v|
+      case v
+      in nil then kept = kept.put(k, nil)
+      in String | Int | Float | Bool | Time | Bytes then kept = kept.put(k, v)
+      else nil
+      end
+    end
+    changes: Hash[Symbol, Value?] = {}
+    errors: Array[FieldError] = []
+    current = model.to_h
+    permitted.each do |f|
+      c = info.columns.find { |x| x.name == f } || raise SchemaError.new("#{model.class.name} has no column `#{f}` to cast")
+      key = f.to_s
+      next unless params.key?(key)
+      raw = params[key]?
+      case Changeset.cast_value(c, raw)
+      in [true, v]
+        if v.nil? && !c.null
+          errors = errors + [FieldError.new(f, "can't be blank", :required)]
+        elsif current[f]? != v
+          changes = changes.put(f, v)
+        end
+      else
+        errors = errors + [FieldError.new(f, "is invalid", :cast, {type: c.type.name})]
+      end
+    end
+    Changeset[T].new(model, changes, errors, kept, permitted, [], {}, nil)
+  end
+
+  # :ditto:
+  def self.cast[T <: Model](model: T, params: Hash[Symbol, Object?], permitted: Array[Symbol]) -> Changeset[T]
+    named: Hash[String, Object?] = {}
+    params.each_pair { |k, v| named = named.put(k.to_s, v) }
+    cast(model, named, permitted)
+  end
+
+  # A changeset of a new model of class `model` (its `new`: the
+  # columns' defaults).
+  def self.cast[T <: Model](model: Type[T], params: Hash[String, Object?], permitted: Array[Symbol]) -> Changeset[T] = cast(model.blank, params, permitted)
+
+  # :ditto:
+  def self.cast[T <: Model](model: Type[T], params: Hash[Symbol, Object?], permitted: Array[Symbol]) -> Changeset[T] = cast(model.blank, params, permitted)
+
+  # A changeset of `model` without parameters: for `put_change`,
+  # `put_assoc` and validations of code's own values.
+  def self.change[T <: Model](model: T) -> Changeset[T] = Changeset[T].new(model, {}, [], {}, [], [], {}, nil, false)
+
+  # `[true, value]` for `raw` cast to column `c`'s type, `[false, nil]`
+  # when it does not cast.
+  def self.cast_value(c: Column, raw: Object?) -> [Bool, Value?]
+    return [true, nil] if raw.nil?
+    t = c.type
+    if raw.is_a?(String) && raw.as(String).strip.empty? && (c.null || t != String)
+      return [true, nil]
+    end
+    case raw
+    in String => s
+      x = s.strip
+      if t == String
+        [true, s]
+      elsif t == Int
+        Changeset.int?(x) ? [true, x.to_i] : [false, nil]
+      elsif t == Float
+        if x.match?(/\A[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?\z/) && x.to_f.finite?
+          [true, x.to_f]
+        else
+          [false, nil]
+        end
+      elsif t == Bool
+        case x.downcase
+        in "true" | "1" | "on" then [true, true]
+        in "false" | "0" | "off" then [true, false]
+        else [false, nil]
+        end
+      elsif t == Time
+        begin
+          [true, Time.iso8601(Changeset.with_zone(x)).utc]
+        rescue ArgumentError, RangeError
+          [false, nil]
+        end
+      else
+        [false, nil]
+      end
+    in Int => i
+      if t == Int
+        [true, i]
+      elsif t == Float
+        [true, i.to_f]
+      else
+        [false, nil]
+      end
+    in Float => x then t == Float && x.finite? ? [true, x] : [false, nil]
+    in Bool => b then t == Bool ? [true, b] : [false, nil]
+    in Time => tm then t == Time ? [true, tm.utc] : [false, nil]
+    in Bytes => bs then t == Bytes ? [true, bs] : [false, nil]
+    else [false, nil]
+    end
+  end
+
+  # Whether it has no error.
+  def valid? -> Bool = errors.empty?
+
+  # The messages of the errors on `field`, their placeholders filled.
+  def errors_on(field: Symbol) -> Array[String] = errors.select { |e| e.field == field }.map { |e| e.text }
+
+  # The change of `field`, or nil.
+  def get_change(field: Symbol) -> Value? = changes[field]?
+
+  # The value `field` would have: its change, else the data's (nil when
+  # it has none).
+  def get_field(field: Symbol) -> Value?
+    changes.key?(field) ? changes[field]? : data.to_h[field]?
+  end
+
+  # With `value` as the change of `field` (no change when it equals the
+  # data's), checked against the column's type.
+  def put_change(field: Symbol, value: Object?) -> Changeset[M]
+    c = column(field)
+    v = Model.value(value)
+    unless v.nil? || Changeset.same_class?(c, v)
+      raise ArgumentError.new("#{v.inspect} is not a value of #{data.class.name}##{field}")
+    end
+    raise ArgumentError.new("#{data.class.name}##{field} cannot be nil") if v.nil? && !c.null
+    if data.to_h[field]? == v && (data.to_h.key?(field) || v.nil?)
+      with(changes: changes.reject { |k, _| k == field })
+    else
+      with(changes: changes.put(field, v))
+    end
+  end
+
+  # With an error on `field` (`:base` for the whole).
+  def add_error(field: Symbol, message: String, *, validation: Symbol = :custom, meta: Hash[Symbol, MetaValue] = {}) -> Changeset[M]
+    with(errors: errors + [FieldError.new(field, message, validation, meta)])
+  end
+
+  # The model with the changes, or nil when there are errors.
+  def apply -> M?
+    valid? ? applied : nil
+  end
+
+  # The model with the changes; raises `Rotor::InvalidChangeset` when
+  # there are errors.
+  def apply! -> M
+    raise InvalidChangeset.new(self, errors, summary) unless valid?
+    applied
+  end
+
+  # :nodoc:
+  # The model with the changes, errors or not.
+  def applied -> M
+    values: Hash[Symbol, Object?] = {}
+    changes.each_pair { |k, v| values = values.put(k, v) }
+    data.with_values(values)
+  end
+
+  # Each of `fields` must have a value: not nil, not a blank string
+  # (`can't be blank`, `:required`). A field with an error already is
+  # skipped.
+  def validate_required(fields: Array[Symbol], *, message: String = "can't be blank") -> Changeset[M]
+    out = self
+    fields.each do |f|
+      column(f)
+      next if errors.any? { |e| e.field == f }
+      v = get_field(f)
+      blank = v.nil? || (v.is_a?(String) && v.as(String).strip.empty?)
+      out = out.add_error(f, message, validation: :required) if blank
+    end
+    out
+  end
+
+  # The change of `field`, a `String`, must have between `min` and
+  # `max` characters (grapheme clusters, what a reader sees as one,
+  # as Ecto counts), or `is` (`:length`, with `count` and `kind`).
+  def validate_length(field: Symbol, *, min: Int? = nil, max: Int? = nil, is: Int? = nil) -> Changeset[M]
+    s = changed_value(field)
+    return self unless s.is_a?(String)
+    n = s.as(String).graphemes.size
+    if (want = is) && n != want
+      return add_error(field, "should be %{count} character(s)", validation: :length, meta: {count: want, kind: :is})
+    end
+    if (lo = min) && n < lo
+      return add_error(field, "should be at least %{count} character(s)", validation: :length, meta: {count: lo, kind: :min})
+    end
+    if (hi = max) && n > hi
+      return add_error(field, "should be at most %{count} character(s)", validation: :length, meta: {count: hi, kind: :max})
+    end
+    self
+  end
+
+  # The change of `field`, a `String`, must match `pattern` (`has
+  # invalid format`, `:format`).
+  def validate_format(field: Symbol, pattern: Regexp, *, message: String = "has invalid format") -> Changeset[M]
+    s = changed_value(field)
+    return self unless s.is_a?(String)
+    pattern.match?(s.as(String)) ? self : add_error(field, message, validation: :format)
+  end
+
+  # The change of `field`, a number, must be within the bounds given
+  # (`:number`, with `kind` and `number`).
+  def validate_number(field: Symbol, *, min: Int | Float | Nil = nil, max: Int | Float | Nil = nil,
+                      greater_than: Int | Float | Nil = nil, less_than: Int | Float | Nil = nil) -> Changeset[M]
+    v = changed_value(field)
+    x: Int | Float = case v
+                     in Int => n then n
+                     in Float => f then f
+                     else return self
+                     end
+    out = self
+    out = out.bound(field, x, :min, min, "must be greater than or equal to %{number}")
+    out = out.bound(field, x, :max, max, "must be less than or equal to %{number}")
+    out = out.bound(field, x, :greater_than, greater_than, "must be greater than %{number}")
+    out.bound(field, x, :less_than, less_than, "must be less than %{number}")
+  end
+
+  # :nodoc:
+  # `validate_number`'s check of one bound, unless `field` has an
+  # error of it already.
+  def bound(field: Symbol, x: Int | Float, kind: Symbol, given: Int | Float | Nil, text: String) -> Changeset[M]
+    return self if errors.any? { |e| e.field == field && e.validation == :number }
+    number: Int | Float = case given
+                          in nil then return self
+                          in Int => i then i
+                          in Float => f then f
+                          end
+    # (Two Ints compared as Ints, exactly; else as Floats.)
+    order = case [x, number]
+            in [Int => a, Int => b] then a <=> b
+            else x.to_f <=> number.to_f
+            end
+    bad = case kind
+          in :min then order < 0
+          in :max then order > 0
+          in :greater_than then order <= 0
+          else order >= 0
+          end
+    bad ? add_error(field, text, validation: :number, meta: {kind: kind, number: number}) : self
+  end
+
+  # The change of `field` must be one of `values` (`is invalid`,
+  # `:inclusion`, with `enum`).
+  def validate_inclusion(field: Symbol, values: Array[Value], *, message: String = "is invalid") -> Changeset[M]
+    v = changed_value(field)
+    return self if v.nil? || values.include?(v)
+    add_error(field, message, validation: :inclusion, meta: {enum: values})
+  end
+
+  # The change of `field` must not be one of `values` (`is reserved`,
+  # `:exclusion`, with `enum`).
+  def validate_exclusion(field: Symbol, values: Array[Value], *, message: String = "is reserved") -> Changeset[M]
+    v = changed_value(field)
+    return self unless !v.nil? && values.include?(v)
+    add_error(field, message, validation: :exclusion, meta: {enum: values})
+  end
+
+  # The parameter `field` (a checkbox, not a column) must be true:
+  # `true`, `"true"`, `"1"` or `"on"` (`must be accepted`,
+  # `:acceptance`); a missing one is not. Skipped for a changeset
+  # made by `Rotor::Changeset.change` (no input), as Ecto.
+  def validate_acceptance(field: Symbol, *, message: String = "must be accepted") -> Changeset[M]
+    return self unless cast
+    v = params[field.to_s]?
+    ok = case v
+         in true then true
+         in String => s then ["true", "1", "on"].include?(s.strip.downcase)
+         in 1 then true
+         else false
+         end
+    ok ? self : add_error(field, message, validation: :acceptance)
+  end
+
+  # The parameter `<field>_confirmation`, cast as `field` is, must equal
+  # the change of `field` (`does not match confirmation`, `:confirmation`, on the
+  # confirmation's field); a missing one is an error with `required:
+  # true` only.
+  def validate_confirmation(field: Symbol, *, required: Bool = false, message: String = "does not match confirmation") -> Changeset[M]
+    return self unless changes.key?(field)
+    name = "#{field}_confirmation"
+    unless params.key?(name)
+      return required ? add_error(name.to_sym, "can't be blank", validation: :required) : self
+    end
+    cast = Changeset.cast_value(column(field), params[name]?)
+    matches = cast[0] && cast[1] == changes[field]?
+    matches ? self : add_error(name.to_sym, message, validation: :confirmation)
+  end
+
+  # A rule of the change of `field`: the block gets the model with the
+  # changes and gives a message, or nil when it holds (`:custom`). Runs
+  # only when `field` changed and cast.
+  #
+  # ```
+  # class CsAccount < Rotor::Model
+  #   table "accounts" do
+  #     column :id, Int, primary: true
+  #     column :email, String
+  #   end
+  # end
+  #
+  # cs = Rotor::Changeset.cast(CsAccount, {"email" => "root@example.com"}, [:email])
+  #   .validate(:email) { |a| a.email.start_with?("root@") ? "is reserved" : nil }
+  # cs.errors_on(:email)  # => ["is reserved"]
+  # ```
+  def validate(field: Symbol, &: (M) -> String?) -> Changeset[M]
+    validate_change(field, :custom) { |m| yield m }
+  end
+
+  # A rule of the whole: the block gives the changeset with the errors
+  # it adds (`cs.add_error(...)`).
+  def validate(&: (Changeset[M]) -> Changeset[M]) -> Changeset[M] = yield self
+
+  # As `validate(field)`, the error's `validation` named.
+  def validate_change(field: Symbol, validation: Symbol, &: (M) -> String?) -> Changeset[M]
+    column(field)
+    return self unless changes.key?(field)
+    return self if errors.any? { |e| e.field == field && (e.validation == :cast || e.validation == :required) }
+    msg = yield applied
+    msg ? add_error(field, msg, validation: validation) : self
+  end
+
+  # Whether a row of the table has the values `fields` would have, by a
+  # query: an error on the first field (`has already been taken`,
+  # `:unsafe_unique`) before the database's unique index refuses the
+  # row. Racy (two saves may pass it at once): no replacement for the
+  # index and its `unique_constraint`. Checked when one of the fields
+  # changed and none has an error; nil values never match. `query`
+  # narrows the rows looked at.
+  def unsafe_validate_unique(fields: Array[Symbol], repo: Repo, *, query: Query[M]? = nil, message: String = "has already been taken") -> Changeset[M]
+    fields.each { |f| column(f) }
+    return self unless fields.any? { |f| changes.key?(f) }
+    return self if errors.any? { |e| fields.include?(e.field) }
+    values = fields.map { |f| get_field(f) }
+    return self if values.any? { |v| v.nil? }
+    info = data.table_info
+    pk = info.primary_key
+    own = pk ? data.to_h[pk.as(Symbol)]? : nil
+    taken = if q = query
+              narrowed = q
+              fields.each_with_index { |f, i| narrowed = narrowed.where_key(f, values[i]) }
+              repo.all(narrowed.limit(2)).any? { |m| own.nil? || pk.nil? || m.to_h[pk.as(Symbol)]? != own }
+            else
+              conds = fields.each_with_index.map { |f, i| "#{Dialect.quote(f.to_s)} = #{Dialect.param(i + 1)}" }
+              params: Array[Object?] = []
+              values.each { |v| params = params + [v] }
+              if (k = pk) && !own.nil?
+                conds = conds + ["#{Dialect.quote(k.to_s)} <> #{Dialect.param(fields.size + 1)}"]
+                params = params + [own]
+              end
+              found = repo.query("SELECT 1 FROM #{Dialect.quote(info.name)} WHERE #{conds.join(" AND ")} LIMIT 1", params) { |r| r.int(0) }
+              !found.empty?
+            end
+    taken ? add_error(fields[0], message, validation: :unsafe_unique) : self
+  end
+
+  # On save, a unique violation of the index `name` (by default
+  # `<table>_<field>_index`, the name `create_index` gives) is an error
+  # on `field` (`has already been taken`, `:unique`).
+  def unique_constraint(field: Symbol, *, name: String? = nil, message: String = "has already been taken") -> Changeset[M]
+    constraint(:unique, field, name || "#{data.table_info.name}_#{field}_index", message)
+  end
+
+  # On save, a foreign key violation of `name` (by default
+  # `<table>_<field>_fkey`, PostgreSQL's) is an error on `field` (`does
+  # not exist`, `:foreign_key`).
+  def foreign_key_constraint(field: Symbol, *, name: String? = nil, message: String = "does not exist") -> Changeset[M]
+    constraint(:foreign_key, field, name || "#{data.table_info.name}_#{field}_fkey", message)
+  end
+
+  # On save, a violation of the check constraint `name` is an error on
+  # `field` (`is invalid`, `:check`).
+  def check_constraint(field: Symbol, *, name: String, message: String = "is invalid") -> Changeset[M]
+    constraint(:check, field, name, message)
+  end
+
+  # On save (a delete), a violation of the foreign key from the
+  # association `assoc`'s table (a `has_many`; by default
+  # `<its table>_<its key>_fkey`) is an error on `assoc` (`are still
+  # associated with this entry`, `:no_assoc`).
+  def no_assoc_constraint(assoc: Symbol, *, name: String? = nil, message: String = "are still associated with this entry") -> Changeset[M]
+    a = data.table_info.associations.find { |x| x.name == assoc && x.kind == :has_many } ||
+        raise SchemaError.new("#{data.class.name} has no `has_many` named `#{assoc}`")
+    n = name || (a.through ? raise ArgumentError.new("`#{assoc}` goes through a join model: give the constraint's `name:`") : "#{a.target.table_name}_#{a.foreign_key}_fkey")
+    constraint(:no_assoc, assoc, n, message)
+  end
+
+  # On save, the `has_many ..., through:` association `name` is made
+  # exactly `models` (persisted ones: their key is read): the join rows
+  # for others deleted, the missing ones inserted, and the saved model
+  # has `models` preloaded as `name`. Two saves of one model at once may
+  # both insert a pair: a unique index on the join table's two keys
+  # stops that.
+  def put_assoc(name: Symbol, models: Array[Model]) -> Changeset[M]
+    a = data.table_info.associations.find { |x| x.name == name } ||
+        raise SchemaError.new("#{data.class.name} has no association `#{name}`")
+    raise ArgumentError.new("`put_assoc` takes a `has_many ..., through:`; `#{name}` is not one") if a.through.nil?
+    if bad = models.find { |m| m.class != a.target }
+      raise ArgumentError.new("`#{name}` holds #{a.target.name}, not #{bad.class.name}")
+    end
+    with(assocs: assocs.put(name, models))
+  end
+
+  # `User is invalid: email can't be blank; age is invalid`.
+  def summary -> String
+    "#{data.class.name} is invalid: #{errors.map { |e| "#{e.field} #{e.text}" }.join("; ")}"
+  end
+
+  # The changeset with `action` (set by the repository on save).
+  def with_action(a: Symbol) -> Changeset[M] = with(action: a)
+
+  # The error a violation `e` of a declared constraint is, or nil.
+  def constraint_error(e: ::PG::ServerError) -> FieldError?
+    n = e.constraint || return nil
+    found = constraints.find { |c| c.code == e.code && c.name == n } || return nil
+    FieldError.new(found.field, found.message, found.kind, {constraint: found.name})
+  end
+
+  # The values by field, a field declared `redact: true` shown as
+  # `**redacted**`: the changes, the errors, the action.
+  def to_h -> Hash[Symbol, String]
+    {changes: shown(changes), errors: errors.map { |e| "#{e.field} #{e.text}" }.join("; "), action: action.inspect, valid: valid?.to_s}
+  end
+
+  # `#<Rotor::Changeset User changes: {...} errors: [...] valid: false>`,
+  # a field declared `redact: true` hidden.
+  def inspect -> String
+    "#<Rotor::Changeset #{data.class.name} action: #{action.inspect}, changes: #{shown(changes)}, errors: #{errors.map { |e| "#{e.field} #{e.text}" }.inspect}, valid: #{valid?}>"
+  end
+
+  # As `inspect`.
+  def to_s -> String = inspect
+
+  private def shown(values: Hash[Symbol, Value?]) -> String
+    hidden = data.table_info.columns.select { |c| c.redact }.map { |c| c.name }
+    "{#{values.map { |k, v| "#{k}: #{hidden.include?(k) ? "**redacted**" : v.inspect}" }.join(", ")}}"
+  end
+
+  private def constraint(kind: Symbol, field: Symbol, name: String, message: String) -> Changeset[M]
+    with(constraints: constraints + [Constraint.new(kind, field, name, message)])
+  end
+
+  private def column(field: Symbol) -> Column
+    data.table_info.columns.find { |c| c.name == field } || raise SchemaError.new("#{data.class.name} has no column `#{field}`")
+  end
+
+  # The change of `field`, nil when it has none (or is a column's nil),
+  # or when `validate_required` found it blank already.
+  private def changed_value(field: Symbol) -> Value?
+    column(field)
+    return nil if errors.any? { |e| e.field == field && e.validation == :required }
+    changes[field]?
+  end
+
+  # Whether `s` is an `Int` in decimal: ASCII digits, within 64 bits.
+  def self.int?(s: String) -> Bool
+    return false unless s.match?(/\A[+-]?[0-9]+\z/)
+    digits = s.sub(/\A[+-]/, "").sub(/\A0+/, "")
+    return true if digits.size < 19
+    return false if digits.size > 19
+    digits <= (s.start_with?("-") ? "9223372036854775808" : "9223372036854775807")
+  end
+
+  # An ISO 8601 time as `Time.iso8601` reads it: a space between the
+  # date and the time taken as `T`, and a time without an offset (an
+  # HTML `datetime-local`, `2026-11-07T10:00`) read as UTC, as Ecto.
+  def self.with_zone(s: String) -> String
+    x = s.match?(/\A\d{4}-\d\d-\d\d \d/) ? s.sub(" ", "T") : s
+    return x unless x.match?(/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?\z/)
+    x.size == 16 ? "#{x}:00Z" : "#{x}Z"
+  end
+
+  # Whether `v` is of column `c`'s class exactly (a change put by code).
+  def self.same_class?(c: Column, v: Value) -> Bool
+    case v
+    in Int then c.type == Int
+    in Float then c.type == Float
+    in String then c.type == String
+    in Bool then c.type == Bool
+    in Time then c.type == Time
+    in Bytes then c.type == Bytes
+    end
+  end
+end
+
+# What saving a changeset gave: the model as saved, or the changeset
+# with its errors (validation errors, or a declared constraint's).
+enum Outcome[M]
+  variant Ok(value: M)
+  variant Invalid(changeset: Changeset[M])
+
+  # Whether it is `Ok`.
+  def ok? -> Bool
+    case self
+    in Ok then true
+    else false
+    end
+  end
+end
