@@ -196,23 +196,11 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   (PostgreSQL has none). An `Int`'s `/` or `%` on what may be an
   `Int` or a `Float` (`(if b then age else score end) / 2`) is
   refused: which one SQL does would depend on the row. Its `+`, `-`
-  and `*` are computed in double precision for both (SQL's `CASE` of
-  a bigint and a double precision is one), so an `Int` row differs
-  from Quarz beyond 2**53.
-- Parameters are typed where PostgreSQL would not type them as Quarz
-  does: a `Float` that meets anything but a `Float` column itself is
-  written `$1::double precision`, so that it is not taken for a bigint
-  (`age > 25.5`; against the column it takes the column's type, `real`
-  or `numeric` too); an `Int` that meets anything but a column is
-  `::bigint` (an `Int` literal is an `integer`, which `big + 1` would
-  overflow); and by its class (`::bigint`, `::double precision`,
-  `::text`, `::boolean`, `::timestamptz`, `::bytea`) one in a `CASE`'s
-  branch or bare condition, under a unary minus (`age > -x`), beside
-  another parameter (`lo < hi`, compared as text otherwise) and under
-  `IS NULL` (a nil there as `::text`). In arithmetic a `Float`
-  parameter is double precision and an `Int` one a bigint against any
-  other column, so that `r + 0.1` on a `real` column is computed as
-  Quarz does on the value read. An `if` that is nil either way is
+  and `*` are computed in double precision for both (see
+  [Parameter types](#parameter-types)).
+- Parameters are typed by what they meet, and cast by their value's
+  class where PostgreSQL would take another type than Quarz's (see
+  [Parameter types](#parameter-types)). An `if` that is nil either way is
   `NULL`; one whose condition is a captured value other than a `Bool`
   is the branch Quarz's truthiness takes; any other condition that is
   not a `Bool` (a column, an expression; of an `if`, `&&`, `||` or
@@ -230,9 +218,7 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   operands as above. Arithmetic of two `integer`s, as PostgreSQL types `Int`
   literals and CASEs of them, casts the left one to a bigint:
   `2000000000 * 2` is `2000000000::bigint * 2`, where an `integer`
-  would overflow; `age + 1` stays as it is. (An `Int`
-  parameter or literal against an `integer` column of a table rotor did
-  not create is an `integer`.)
+  would overflow; `age + 1` stays as it is.
 - `include?` is `col = ANY($1)` with the array as one parameter (pg's
   array parameters): one statement and one translation for every
   length. A nil item is left out of the array and `OR col IS NULL`
@@ -280,6 +266,61 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   method of the row or passes it on), and each row, loaded with those
   only, gives the block's value. Reading a column it did not fetch
   raises `Rotor::NotLoadedError`. Counting is `count`, a query's shape.
+
+### Parameter types
+
+PostgreSQL types a parameter by what it meets; rotor casts one where
+that type would not be Quarz's. What follows from it:
+
+1. **How a parameter is typed.** Beside a column it is left untyped
+   and takes the column's type (`"age" > $1`; a `Float` against a
+   `Float` column too, which may be `real` or `numeric`: `r == 0.1`
+   finds the `real` 0.1). Elsewhere it is cast by its value's class
+   (`::bigint`, `::double precision`, `::text`, `::boolean`,
+   `::timestamptz`, `::bytea`): in a `CASE`'s branch or bare
+   condition, under a unary minus (`age > -x`), beside an `Int`
+   literal (`x + 1`: an `integer` would overflow), beside another
+   parameter (`lo < hi`, compared as text otherwise) and under `IS
+   NULL` (a nil there as `::text`); so is a `Float` that meets
+   anything but a `Float` column (`age > 25.5`, which would be read as
+   a bigint). In arithmetic a `Float` parameter is double precision
+   and an `Int` one a bigint against any column but an `Int`'s, so
+   that `r + 0.1` on a `real` column is computed as Quarz does on the
+   value read. An array is one parameter: pg sends an array of `Int`s
+   as a `bigint[]` (of `Bool`s, `boolean[]`; of `Bytes`, `bytea[]`),
+   the column decides the others' type (`Float`s beside a column that
+   is not a `Float`'s are cast, `$1::double precision[]`).
+2. **`integer` columns of tables rotor did not create.** rotor's
+   schema makes an `Int` column a `bigint`. A table made otherwise may
+   have `integer` ones, and rotor, which does not know a column's SQL
+   type, does not cast by it (decided 2026-11-07, #28). A parameter
+   beside such a column is an `integer`: `n == x` is exact for an `x`
+   in its range, and one beyond it is an error from the server
+   (`value "3000000000" is out of range for type integer`) where Quarz
+   finds no row; the column's arithmetic with such a parameter or an
+   `Int` literal is an `integer`'s, which overflows the same way
+   (`n * 100000000`). A parameter cast `::bigint` compares with the
+   column through PostgreSQL's cross-type operators (`integer =
+   bigint` is in the `integer_ops` btree family), exactly and served
+   by an index on the column: `n > (flag ? x : y)` (`"n" > CASE WHEN
+   $1::boolean THEN $2::bigint ELSE $3::bigint END`) and
+   `xs.include?(n)` (`"n" = ANY($1)` of a `bigint[]`) both use an
+   index on `n`; arithmetic with one is a `bigint`'s.
+   (test/repo_test.qz checks these on such a table.)
+3. **A `Time` in a `CASE`'s branch** is cast `::timestamptz`, the type
+   rotor's schema gives a `Time` column. Against a `timestamp` (without
+   time zone) column of a table rotor did not create, PostgreSQL
+   converts it to the column's type with the session's time zone
+   before comparing. Keep such columns `timestamptz`, or set the
+   session's `TimeZone` to the one their values are in. (Decided
+   2026-11-06, #31: left untyped, the comparison fails, as it did
+   before; cast `::timestamp`, `timestamptz` columns would have the
+   mirror problem.)
+4. **Arithmetic on what may be an `Int` or a `Float`** (`(if b then
+   age else score end) + 1`): its `+`, `-` and `*` are computed in
+   double precision for both, as SQL's `CASE` of a bigint and a double
+   precision is one, so an `Int` row differs from Quarz beyond 2**53
+   (#31); its `/` and `%` are refused (above).
 
 ## Running them: `Rotor::Repo`
 

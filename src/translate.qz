@@ -28,7 +28,9 @@ end
 # SQL. A `tri` expression is kept where NULL acts as false (a condition,
 # an operand of `&&`/`||`, a CASE WHEN's), and refused anywhere else.
 # `narrow` marks what PostgreSQL types as an `integer` where Quarz has
-# an `Int`: an `Int` literal, or a CASE of them.
+# an `Int`: an `Int` literal, or a CASE of them. A column never is:
+# rotor does not know the SQL type of a table it did not create, whose
+# `integer` columns are left as they are (README, "Parameter types").
 #
 # `test` names an `&&` or `||` (as written) that tests the truthiness
 # of an operand other than a `Bool` (`email IS NOT NULL`): right as a
@@ -955,7 +957,10 @@ class Translator
   # finds the `real` 0.1); against an expression, such as one over a
   # `real` column, a `Float` is double precision, where PostgreSQL
   # computes it as Quarz does on the values read (`r + 0.0 == 0.1` finds
-  # none, as in Quarz).
+  # none, as in Quarz). Beside an `integer` column of a table rotor did
+  # not create, an untyped `Int` is an `integer` and one cast compares
+  # through the cross-type operators, an index still serving it
+  # (README, "Parameter types").
   private def typed(s: Sql, other: Sql?, arithmetic: Bool = false) -> Sql
     o = other || return s
     return cast(s) if param?(o)
@@ -994,7 +999,9 @@ class Translator
 
   # `s`, when it is a parameter, cast to its value's class's type:
   # `$1::bigint`. A nil is cast to `nil_type` if given, else left to take
-  # the type of what it meets.
+  # the type of what it meets. (A `Time` is a `timestamptz`, which
+  # PostgreSQL converts with the session's time zone against a
+  # `timestamp` column: README, "Parameter types".)
   private def cast(s: Sql, nil_type: String? = nil) -> Sql
     return s unless param?(s)
     type = case s.value

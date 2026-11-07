@@ -68,6 +68,14 @@ class Reading < Rotor::Model
   end
 end
 
+# A table rotor did not create, with `integer` columns.
+class Legacy < Rotor::Model
+  table "legacy" do
+    column :id, Int, primary: true
+    column :n, Int
+  end
+end
+
 class Remark < Rotor::Model
   table "remarks" do
     column :id, Int, primary: true
@@ -108,7 +116,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -126,7 +134,9 @@ class RepoTest < Test::Case
     CREATE TABLE remarks (id bigserial PRIMARY KEY, stars bigint NOT NULL, volume_id bigint NOT NULL REFERENCES volumes);
     CREATE TABLE readings (id bigserial PRIMARY KEY, r real NOT NULL, n numeric NOT NULL);
     CREATE TABLE genres (id bigserial PRIMARY KEY, name text NOT NULL);
-    CREATE TABLE volume_genres (id bigserial PRIMARY KEY, volume_id bigint NOT NULL REFERENCES volumes, genre_id bigint NOT NULL REFERENCES genres, position bigint NOT NULL DEFAULT 0)
+    CREATE TABLE volume_genres (id bigserial PRIMARY KEY, volume_id bigint NOT NULL REFERENCES volumes, genre_id bigint NOT NULL REFERENCES genres, position bigint NOT NULL DEFAULT 0);
+    CREATE TABLE legacy (id integer PRIMARY KEY, n integer NOT NULL);
+    CREATE INDEX legacy_n ON legacy (n)
   SQL
 
   def self.startup
@@ -160,7 +170,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -348,6 +358,41 @@ class RepoTest < Test::Case
       # itself, the column's type, as before.
       assert_equal(0, repo.count(Reading.where { r == (id > 0 ? 0.1 : 0.2) }))
       assert_equal(1, repo.count(Reading.where { r == 0.1 }))
+    end
+  end
+
+  # `integer` columns of a table rotor did not create (README, "Parameter
+  # types"): a parameter beside one is an `integer`, one cast `::bigint`
+  # elsewhere compares through PostgreSQL's cross-type operators, and an
+  # index on the column serves both, `= ANY` included.
+  def test_integer_columns_of_a_foreign_table
+    with_repo do |repo|
+      repo.exec("INSERT INTO legacy SELECT i, i % 100 FROM generate_series(1, 1000) i")
+      repo.exec("ANALYZE legacy")
+      # (The plans below would take an index anyway; this makes sure.)
+      repo.exec("SET enable_seqscan = off")
+      x = 42
+      y = 0
+      flag = true
+      big = 3000000000
+      xs = [5, 7, big]
+      eq = Legacy.where { n == x }
+      branch = Legacy.where { n > (flag ? 97 : y) }
+      any = Legacy.where { xs.include?(n) }
+      assert_equal("SELECT \"id\", \"n\" FROM \"legacy\" WHERE \"n\" > CASE WHEN $1::boolean THEN 97 ELSE $2::bigint END", branch.to_sql[0])
+      assert_equal(10, repo.count(eq))
+      assert_equal(20, repo.count(branch))
+      assert_equal(20, repo.count(any))
+      assert_equal(0, repo.count(Legacy.where { n > (flag ? big : y) }))
+      [eq, branch, any].each do |q|
+        sql, params = q.to_sql
+        plan = repo.query("EXPLAIN " + sql, params) { |r| r.string(0) }.join("\n")
+        assert(plan.include?("Index Scan on legacy_n") || plan.include?("Index Scan using legacy_n"), plan)
+      end
+      # Beside the column, a value beyond an `integer`'s range is an
+      # error, and so is arithmetic that overflows an `integer`.
+      assert_raise(PG::ServerError) { repo.count(Legacy.where { n == big }) }
+      assert_raise(PG::ServerError) { repo.count(Legacy.where { n * 100000000 > 0 }) }
     end
   end
 
