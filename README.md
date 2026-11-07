@@ -239,12 +239,14 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   `Int`, `Float`, `String` and `Time` the comparisons `<`, `<=`, `>` and
   `>=` with a nil (`Int` and `Float` mixed either way): nil compares
   false (Quarz's meaning in these blocks), which is what SQL's NULL does
-  in a condition. With a literal nil (`level > nil`, or an `if` that is
-  nil either way) such a comparison is always false, and refused:
-  compare with a value, or use `nil?` (`level == nil` and `level != nil`
-  are `IS NULL` and `IS NOT NULL`). Where the two would differ (`!(age >
-  18)`, an `order` key, an `update` value), the query is refused, as
-  above. Outside query blocks `Int? > Int` is still a type error, and
+  in a condition. With a literal nil (`level > nil`, or an `if` whose
+  branches are literal nils, a missing `else` counting as one) such a
+  comparison is always false, and refused: compare with a value, or use
+  `nil?` (`level == nil` and `level != nil` are `IS NULL` and `IS NOT
+  NULL`). A captured nil is an unset value, and kept (`> $1`, or `>
+  NULL` through an `if`). Where Quarz's false and SQL's NULL would
+  differ (`!(age > 18)`, an `order` key, an `update` value), the query
+  is refused, as above. Outside query blocks `Int? > Int` is still a type error, and
   nil has no arithmetic (`age + 1` is one in a block too). (As for any
   column, SQL compares strings by the database's collation, Quarz by
   bytes.) `Rotor::SQL.not_nil(age)` is the column as a `T` for the

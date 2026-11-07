@@ -243,6 +243,10 @@ class QueryTest < Test::Case
     flag = true
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { (flag ? level : cap) > (if flag then nil end) } }
     assert_match(/\A`\(flag \? level : cap\) > \(if flag then nil end\)` is always false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level >= (unless flag then nil end) } }
+    assert_match(/always false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level < (flag ? nil : (on ? nil : nil)) } }
+    assert_match(/always false/, e.message)
     # A captured nil is an unset value, as above, inside an `if` too:
     # what is refused does not depend on what was captured.
     check(Gauge.where { level > none }, "#{GS} WHERE \"level\" > $1", [nil])
