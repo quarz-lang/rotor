@@ -227,14 +227,22 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   items are of one class, or `Int`s and `Float`s (sent as `Float`s);
   pg types an array of `Int`s, `Bool`s or `Bytes`, the column decides
   the others' (`Float`s beside a column that is not a `Float`'s are
-  cast, `$1::double precision[]`, as a `Float` is).
+  cast, `$1::double precision[]`, as a `Float` is). An array literal
+  with expressions (`[age, 3].include?(id)`) is an `IN (...)` list
+  instead: its SQL is fixed by the literal's length in the source, so
+  it makes no statement per length (the reason a captured array is one
+  parameter, `= ANY($1)`), and `IN` is the form every SQL dialect has,
+  where `= ANY(array)` is PostgreSQL's.
 - Comparing a nullable column: `where { age > 18 }` is allowed in
   query blocks, with `age` an `Int?`. Every query block is checked with
   `using Rotor::Compare` (Quarz's docs/01 §7), whose extensions give
   `nil` and `Int`, `Float`, `String` and `Time` the comparisons `<`,
   `<=`, `>` and `>=` with a nil (`Int` and `Float` mixed either way):
   nil compares false (Quarz's meaning in
-  these blocks), which is what SQL's NULL does in a condition. Where the
+  these blocks), which is what SQL's NULL does in a condition. With a
+  literal nil (`level > nil`) such a comparison is always false, and
+  refused: compare with a value, or use `nil?` (`level == nil` and
+  `level != nil` are `IS NULL` and `IS NOT NULL`). Where the
   two would differ (`!(age > 18)`, an `order` key, an `update` value),
   the query is refused, as above. Outside query blocks `Int? > Int` is
   still a type error, and nil has no arithmetic (`age + 1` is one in a
@@ -275,15 +283,16 @@ that type would not be Quarz's. What follows from it:
 1. **How a parameter is typed.** Beside a column it is left untyped
    and takes the column's type (`"age" > $1`; a `Float` against a
    `Float` column too, which may be `real` or `numeric`: `r == 0.1`
-   finds the `real` 0.1). Elsewhere it is cast by its value's class
-   (`::bigint`, `::double precision`, `::text`, `::boolean`,
-   `::timestamptz`, `::bytea`): in a `CASE`'s branch or bare
-   condition, under a unary minus (`age > -x`), beside an `Int`
-   literal (`x + 1`: an `integer` would overflow), beside another
+   finds the `real` 0.1). An `Int` that meets anything but a column (a
+   literal, an expression: `age < big + 1`, where `$1` would be an
+   `integer`) is cast `::bigint`, and a `Float` that meets anything but
+   a `Float` column `::double precision` (`age > 25.5`, which would be
+   read as a bigint). A parameter of any class is cast by its value's
+   class (`::bigint`, `::double precision`, `::text`, `::boolean`,
+   `::timestamptz`, `::bytea`) in a `CASE`'s branch or bare
+   condition, under a unary minus (`age > -x`), beside another
    parameter (`lo < hi`, compared as text otherwise) and under `IS
-   NULL` (a nil there as `::text`); so is a `Float` that meets
-   anything but a `Float` column (`age > 25.5`, which would be read as
-   a bigint). In arithmetic a `Float` parameter is double precision
+   NULL` (a nil there as `::text`). In arithmetic a `Float` parameter is double precision
    and an `Int` one a bigint against any column but an `Int`'s, so
    that `r + 0.1` on a `real` column is computed as Quarz does on the
    value read. An array is one parameter: pg sends an array of `Int`s
@@ -310,8 +319,8 @@ that type would not be Quarz's. What follows from it:
 3. **A `Time` in a `CASE`'s branch** is cast `::timestamptz`, the type
    rotor's schema gives a `Time` column. Against a `timestamp` (without
    time zone) column of a table rotor did not create, PostgreSQL
-   converts it to the column's type with the session's time zone
-   before comparing. Keep such columns `timestamptz`, or set the
+   compares through its cross-type operators, reading the column's
+   values in the session's time zone. Keep such columns `timestamptz`, or set the
    session's `TimeZone` to the one their values are in. (Decided
    2026-11-06, #31: left untyped, the comparison fails, as it did
    before; cast `::timestamp`, `timestamptz` columns would have the

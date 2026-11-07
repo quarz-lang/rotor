@@ -369,7 +369,8 @@ class RepoTest < Test::Case
     with_repo do |repo|
       repo.exec("INSERT INTO legacy SELECT i, i % 100 FROM generate_series(1, 1000) i")
       repo.exec("ANALYZE legacy")
-      # (The plans below would take an index anyway; this makes sure.)
+      # (So that the plans below take the index wherever it can serve:
+      # on so few rows a seq scan may be cheaper.)
       repo.exec("SET enable_seqscan = off")
       x = 42
       y = 0
@@ -387,7 +388,10 @@ class RepoTest < Test::Case
       [eq, branch, any].each do |q|
         sql, params = q.to_sql
         plan = repo.query("EXPLAIN " + sql, params) { |r| r.string(0) }.join("\n")
-        assert(plan.include?("Index Scan on legacy_n") || plan.include?("Index Scan using legacy_n"), plan)
+        # (An Index Scan, or a Bitmap Index Scan, whose condition is
+        # the comparison: not a Filter.)
+        assert(plan.include?(" on legacy_n") || plan.include?(" using legacy_n"), plan)
+        assert(plan.include?("Index Cond: "), plan)
       end
       # Beside the column, a value beyond an `integer`'s range is an
       # error, and so is arithmetic that overflows an `integer`.

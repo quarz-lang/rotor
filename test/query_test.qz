@@ -230,6 +230,18 @@ class QueryTest < Test::Case
     assert_match(/\A`level > cap` as a value is NULL/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { (level > 18) == on } }
     assert_match(/\A`level > 18` as a value is NULL/, e.message)
+    # Ordered against a literal nil: always false, refused; `==` and
+    # `!=` nil are `IS NULL`.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level > nil } }
+    assert_match(/\A`level > nil` is always false \(.*query_test\.qz:\d+\): compare with a value, or use `nil\?`\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { level < nil } }
+    assert_match(/\A`level < nil` is always false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| g.ratio >= nil } }
+    assert_match(/\A`g.ratio >= nil` is always false/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { nil <= label } }
+    assert_match(/\A`nil <= label` is always false/, e.message)
+    check(Gauge.where { level == nil }, "#{GS} WHERE \"level\" IS NULL", [])
+    check(Gauge.where { level != nil }, "#{GS} WHERE \"level\" IS NOT NULL", [])
   end
 
   # Outside query blocks `Int? > Int` is still a type error.

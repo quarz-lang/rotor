@@ -740,6 +740,12 @@ class Translator
       if arr = ms.find { |x| x.owner == Array }
         untranslatable(Translator.label(arr), line)
       end
+      # (`Rotor::Compare` gives nil an order, false either way: with a
+      # literal nil the comparison is always false, which is not what
+      # was meant. `== nil` is `IS NULL`.)
+      if name != "==" && name != "!=" && (nil_literal?(r) || nil_literal?(a))
+        raise UntranslatableError.new("`#{Translator.show(r)} #{name} #{Translator.show(a)}` is always false (#{@file}:#{line}): compare with a value, or use `nil?`")
+      end
       return compare(r, sym, a)
     end
     if op = ARITHMETIC[m.name]?
@@ -999,9 +1005,9 @@ class Translator
 
   # `s`, when it is a parameter, cast to its value's class's type:
   # `$1::bigint`. A nil is cast to `nil_type` if given, else left to take
-  # the type of what it meets. (A `Time` is a `timestamptz`, which
-  # PostgreSQL converts with the session's time zone against a
-  # `timestamp` column: README, "Parameter types".)
+  # the type of what it meets. (A `Time` is a `timestamptz`: against a
+  # `timestamp` column PostgreSQL reads the column's values in the
+  # session's time zone; README, "Parameter types".)
   private def cast(s: Sql, nil_type: String? = nil) -> Sql
     return s unless param?(s)
     type = case s.value
