@@ -480,6 +480,22 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#45, #46: `include?` of classes that never meet is refused
+  # before the server sees it; an `if` of a `String` and an `Int` tested
+  # as a condition runs, each branch tested.
+  def test_include_and_truth_of_an_if
+    with_repo do |repo|
+      repo.insert(member("ann", 30).with(email: "a@x", admin: true))
+      repo.insert(member("bob", 40))
+      assert_raise(Rotor::UntranslatableError) { repo.all(Member.where { [1, 2].include?(name) }) }
+      assert_equal(1, repo.count(Member.where { [30, 31].include?(age) }))
+      # ann: admin, email set; bob: not admin, age 40 (truthy).
+      assert_equal(2, repo.count(Member.where { ((admin ? email : age) ? 1 : 0) == 1 }))
+      assert_equal(0, repo.count(Member.where { !(admin ? email : age) }))
+      assert_equal(1, repo.count(Member.where { ((if admin then email end) ? 1 : 0) == 1 }))
+    end
+  end
+
   # Rows with NULLs: what `!=` (`IS DISTINCT FROM`) and the explicit
   # form (`!email.nil? && email != e`, `<>`) each find.
   def test_null_semantics

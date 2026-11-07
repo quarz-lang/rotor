@@ -304,6 +304,20 @@ class Translator
   # `one_type` of `e` as a value (an order key).
   def valued_check(e: Meta::Expr) -> Void = valued(true) { one_type(e) }
 
+  # Whether values of the classes `ls` and of `rs` (nil aside) can be
+  # equal: a class in both, `Int` and `Float`, nil only or a class the
+  # translator does not know (`Object`) on either side.
+  def self.meet?(ls: Array[Type[Object]], rs: Array[Type[Object]]) -> Bool
+    return true if ls.empty? || rs.empty? || ls.include?(Object) || rs.include?(Object)
+    numeric = ->(ks: Array[Type[Object]]) { ks.any? { |k| k == Int || k == Float } }
+    ls.any? { |k| rs.include?(k) } || (numeric.call(ls) && numeric.call(rs))
+  end
+
+  # "a `String` and a `Bool` are never equal".
+  def self.never_equal(ls: Array[Type[Object]], rs: Array[Type[Object]]) -> String
+    "#{ls.map { |k| Translator.a(k) }.join(" or ")} and #{rs.map { |k| Translator.a(k) }.join(" or ")} are never equal"
+  end
+
   # "a `String`", "an `Int`".
   def self.a(k: Type[Object]) -> String = "#{"AEIOU".include?(k.name[0]) ? "an" : "a"} `#{k.name}`"
 
@@ -887,7 +901,7 @@ class Translator
     untranslatable(label, line) unless args.size == 1
     a = args[0]
     if name == "include?" && m.owner == Array
-      return in_list(r, a, line)
+      return in_list(r, a, whole, line)
     end
     if m.owner == String && (name == "include?" || name == "start_with?" || name == "end_with?")
       return like(operand(r), a, name, label, line)
@@ -983,12 +997,8 @@ class Translator
     if op == "=" || op == "<>"
       ls = valued(true) { classes(le) }.reject { |k| k == Nil }
       rs = valued(true) { classes(re) }.reject { |k| k == Nil }
-      numeric = ->(ks: Array[Type[Object]]) { ks.any? { |k| k == Int || k == Float } }
-      meet = ls.empty? || rs.empty? || ls.include?(Object) || rs.include?(Object) ||
-        ls.any? { |k| rs.include?(k) } || (numeric.call(ls) && numeric.call(rs))
-      unless meet
-        what = "#{ls.map { |k| Translator.a(k) }.join(" or ")} and #{rs.map { |k| Translator.a(k) }.join(" or ")}"
-        raise UntranslatableError.new("`#{Translator.show(whole)}` is always #{op == "=" ? "false" : "true"} (#{@file}:#{line}): #{what} are never equal")
+      unless Translator.meet?(ls, rs)
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always #{op == "=" ? "false" : "true"} (#{@file}:#{line}): #{Translator.never_equal(ls, rs)}")
       end
     end
     l = coerce(l, r.column)
@@ -1157,10 +1167,42 @@ class Translator
     end
     ks = classes(e)
     return s unless ks.any? { |k| k != Bool && k != Nil }
+    case e
+    in Meta::Expr::If(c, t, f, _) then return if_truth(c, t, f)
+    else nil
+    end
     if ks.include?(Bool)
       untranslatable("`#{Translator.show(e)}`, a `Bool` or another value, as a condition", Translator.line_of(e))
     end
     is_null(s, "IS NOT NULL")
+  end
+
+  # The truthiness of `if c then t else f end` that is not a `Bool`:
+  # each branch's, in the `CASE` (`CASE WHEN c THEN "label" IS NOT NULL
+  # ELSE "on" END`), so that its branches need no type in common (#46);
+  # `ELSE FALSE` without `else`. NULL where a branch's test is.
+  private def if_truth(c: Meta::Expr, t: Meta::Expr, f: Meta::Expr?) -> Sql
+    cond = valued(false) { sql(c) }
+    unless (dd = decided(cond)).nil?
+      return assuming(facts(c, true)) { branch_truth(t) } if dd.as(Bool)
+      return f ? assuming(facts(c, false)) { branch_truth(f.as(Meta::Expr)) } : constant(false)
+    end
+    cond = cast(valued(false) { truth(c, cond) })
+    th = assuming(facts(c, true)) { branch_truth(t) }
+    el = f ? assuming(facts(c, false)) { branch_truth(f.as(Meta::Expr)) } : constant(false)
+    pieces = [Piece::Text.new("CASE WHEN ")] + cond.pieces + [Piece::Text.new(" THEN ")] + th.pieces + [Piece::Text.new(" ELSE ")] + el.pieces + [Piece::Text.new(" END")]
+    Sql.new(pieces, ATOM, nil, nil, false, nil, th.nulls || el.nulls, th.tri || el.tri)
+  end
+
+  # `e` as a condition, tested for its truthiness: a nil one `FALSE`, a
+  # decided one `TRUE` or `FALSE`.
+  private def branch_truth(e: Meta::Expr) -> Sql
+    s = valued(false) { sql(e) }
+    unless (dd = decided(s)).nil?
+      return constant(dd.as(Bool))
+    end
+    return constant(false) if Translator.null?(s)
+    valued(false) { truth(e, s) }
   end
 
   # A parameter, cast (`cast`) where PostgreSQL, which types an untyped
@@ -1257,7 +1299,7 @@ class Translator
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
   # of literals or a captured array).
-  private def in_list(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
+  private def in_list(arr: Meta::Expr, x: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     # (A captured array, or a literal one of literals: one parameter.)
     case arr
     in Meta::Expr::Capture(index, _, l)
@@ -1265,7 +1307,7 @@ class Translator
       in Array => xs
         k = Binds.kind(xs)
         b = Bind::Items.new(index, k.item == Float)
-        return any(x, Piece::Bound.new(b), k.item, k.nils, l)
+        return any(x, Piece::Bound.new(b), k.item, k.nils, whole, l)
       else untranslatable("`include?` on a #{v.class.name}", l)
       end
     in Meta::Expr::ArrayLit(es, l) if es.all? { |e| e.is_a?(Meta::Expr::Lit) }
@@ -1278,21 +1320,27 @@ class Translator
       end
       item = Binds.item_class(vs)
       vs = Binds.value(Bind::Items.new(0, item == Float), [vs.as(Object)]).as(Array[Object?])
-      return any(x, Piece::Param.new(Binds.items(vs)), item, vs.size < es.size, l) unless item == Object
+      return any(x, Piece::Param.new(Binds.items(vs)), item, vs.size < es.size, whole, l) unless item == Object
     else nil
     end
-    in_items(arr, x, line)
+    in_items(arr, x, whole, line)
   end
 
   # `x = ANY(array)`, `array` the parameter of an array of `item`s (nil:
   # none, or nils only), its nils removed (`nils`: there were some, so
   # `OR x IS NULL`; `= ANY` never finds a NULL); the empty array is
   # `{}`, false for every row.
-  private def any(x: Meta::Expr, array: Piece, item: Type[Object]?, nils: Bool, line: Int) -> Sql
+  private def any(x: Meta::Expr, array: Piece, item: Type[Object]?, nils: Bool, whole: Meta::Expr, line: Int) -> Sql
     untranslatable("`include?` on an array of mixed classes", line) if item == Object
     if k = item
       unless k == Int || k == Float || k == String || k == Bool || k == Time || k == Bytes || k == Symbol
         untranslatable("`include?` on an array of #{k.name}", line)
+      end
+      # (Items of a class the target's never equal: found nowhere, as
+      # `==` is #41.)
+      ts = valued(true) { classes(x) }.reject { |c| c == Nil }
+      unless Translator.meet?(ts, [k])
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts, [k])}")
       end
     end
     target = operand(x)
@@ -1326,11 +1374,23 @@ class Translator
 
   # `xs.include?(x)` for an array literal with other than literals:
   # `x IN (...)`.
-  private def in_items(arr: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
-    items = case arr
-            in Meta::Expr::ArrayLit(es, _) then es.map { |e| operand(e) }
-            else untranslatable("`Array#include?` on an array SQL does not have", line)
-            end
+  private def in_items(arr: Meta::Expr, x: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
+    es = case arr
+         in Meta::Expr::ArrayLit(xs, _) then xs
+         else untranslatable("`Array#include?` on an array SQL does not have", line)
+         end
+    # (Items of a class the target's never equal, as `==` is #41: none
+    # that can be, always false; some, the others named.)
+    ts = valued(true) { classes(x) }.reject { |c| c == Nil }
+    apart = es.reject { |e| Translator.meet?(ts, valued(true) { classes(e) }.reject { |c| c == Nil }) }
+    unless apart.empty?
+      if apart.size == es.size
+        raise UntranslatableError.new("`#{Translator.show(whole)}` is always false (#{@file}:#{line}): #{Translator.never_equal(ts, valued(true) { classes(es[0]) }.reject { |c| c == Nil })}")
+      end
+      e = apart[0]
+      raise UntranslatableError.new("`#{Translator.show(e)}` in `#{Translator.show(whole)}` is never equal to `#{Translator.show(x)}` (#{@file}:#{line}): #{Translator.never_equal(valued(true) { classes(e) }.reject { |c| c == Nil }, ts)}")
+    end
+    items = es.map { |e| operand(e) }
     # (A nil among them is `IS NULL`: `IN` never finds a NULL.)
     has_nil = items.any? { |s| s.known && s.value.nil? }
     items = items.reject { |s| s.known && s.value.nil? }

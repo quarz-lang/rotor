@@ -438,10 +438,10 @@ class QueryTest < Test::Case
     check(Person.where { (admin ? (email && name) : name) == "x" }, "#{COLS} WHERE CASE WHEN \"admin\" THEN CASE WHEN \"email\" IS NOT NULL THEN \"name\" ELSE NULL END ELSE \"name\" END = $1", ["x"])
     check(Person.order { email || name }, "#{COLS} ORDER BY COALESCE(\"email\", \"name\")", [])
     # An `if` of them as a condition: a `String` (or nil), tested.
-    check(Person.where { ((if admin then email || name end) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN COALESCE(\"email\", \"name\") END IS NOT NULL THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { ((if admin then email || name end) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL OR \"name\" IS NOT NULL ELSE FALSE END THEN 1 ELSE 0 END = 1", [])
     check(Person.where { !(email && admin) }, "#{COLS} WHERE NOT (\"email\" IS NOT NULL AND \"admin\")", [])
-    e = assert_raise(Rotor::UntranslatableError) { Person.where { (if (admin ? email : admin) then age else 0 end) > 1 } }
-    assert_match(/\A`admin \? email : admin`, a `Bool` or another value, as a condition cannot be translated to SQL/, e.message)
+    # A `Bool` or another value as a condition: each branch tested (#46).
+    check(Person.where { (if (admin ? email : admin) then age else 0 end) > 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL ELSE \"admin\" END THEN \"age\" ELSE 0 END > 1", [])
     # Against a column, untyped as before.
     check(Person.where { age > n && name == "a" }, "#{COLS} WHERE \"age\" > $1 AND \"name\" = $2", [30, "a"])
   end
@@ -464,7 +464,7 @@ class QueryTest < Test::Case
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { !(label && level > 1) } }
     assert_match(/three-valued in SQL when `level` can be NULL/, e.message)
     # As a value: one of the operands.
-    check(Person.where { ((admin ? (email || name) : "x") ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN COALESCE(\"email\", \"name\") ELSE $1::text END IS NOT NULL THEN 1 ELSE 0 END = 1", ["x"])
+    check(Person.where { ((admin ? (email || name) : "x") ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL OR \"name\" IS NOT NULL ELSE TRUE END THEN 1 ELSE 0 END = 1", [])
     assert_equal(["UPDATE \"people\" SET \"name\" = COALESCE(\"email\", \"name\")", Array[Object?].new], Person.query.update { {name: email || name} }.to_sql)
     assert_equal(["UPDATE \"people\" SET \"age\" = COALESCE(CASE WHEN \"born\" IS NOT NULL THEN \"age\" ELSE NULL END, 0)", Array[Object?].new], Person.query.update { {age: (born && age) || 0} }.to_sql)
     # Two `Bool`s: Quarz's nil kept (`nil && x` is nil, `nil || x` x).
@@ -499,11 +499,11 @@ class QueryTest < Test::Case
     assert_match(/\Aan order by a constant/, e.message)
     # An `if` whose condition is decided, of an `&&` or `||` of values:
     # the branch tested as a value is.
-    check(Person.where { ((sx ? (email || name) : nil) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN COALESCE(\"email\", \"name\") IS NOT NULL THEN 1 ELSE 0 END = 1", [])
-    check(Person.where { !(sx ? (email && name) : nil) }, "#{COLS} WHERE NOT CASE WHEN \"email\" IS NOT NULL THEN \"name\" ELSE NULL END IS NOT NULL", [])
+    check(Person.where { ((sx ? (email || name) : nil) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN \"email\" IS NOT NULL OR \"name\" IS NOT NULL THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { !(sx ? (email && name) : nil) }, "#{COLS} WHERE NOT (\"email\" IS NOT NULL AND \"name\" IS NOT NULL)", [])
     check(Person.where { ((if sx || admin then name else age end) || email) == "ann" }, "#{COLS} WHERE COALESCE(\"name\", \"email\") = $1", ["ann"])
     # The condition of an `if` stays one inside a value.
-    check(Person.where { (!(if admin && email then age end)) == true }, "#{COLS} WHERE (NOT CASE WHEN \"admin\" AND \"email\" IS NOT NULL THEN \"age\" END IS NOT NULL) = TRUE", [])
+    check(Person.where { (!(if admin && email then age end)) == true }, "#{COLS} WHERE (NOT CASE WHEN \"admin\" AND \"email\" IS NOT NULL THEN \"age\" IS NOT NULL ELSE FALSE END) = TRUE", [])
     check(Person.where { ((if admin && name then email end) || name) == "x" }, "#{COLS} WHERE COALESCE(CASE WHEN \"admin\" AND \"name\" IS NOT NULL THEN \"email\" END, \"name\") = $1", ["x"])
     # `&&` whose left can be NULL: nil, into a non-null column refused.
     e = assert_raise(ArgumentError) { Gauge.query.update { {on: (level || cap) && on} } }
@@ -558,6 +558,43 @@ class QueryTest < Test::Case
     # The right operand of `&&` is checked under the left's facts.
     check(Gauge.order { level && (!(level > 1) ? "lo" : "hi") }, "#{GS} ORDER BY CASE WHEN \"level\" IS NOT NULL THEN CASE WHEN NOT \"level\" > 1 THEN $1::text ELSE $2::text END ELSE NULL END", ["lo", "hi"])
     check(Gauge.where { (label && (Rotor::SQL.not_nil(label) == "a" ? 1 : 2)) == 1 }, "#{GS} WHERE CASE WHEN \"label\" IS NOT NULL THEN CASE WHEN \"label\" = $1 THEN 1 ELSE 2 END ELSE NULL END = 1", ["a"])
+  end
+
+  # rotor#45: `include?` of items whose class the target's never equals.
+  def test_include_of_classes_that_do_not_meet
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { [1, 2].include?(name) } }
+    assert_match(/\A`\[1, 2\].include\?\(name\)` is always false \(.*query_test\.qz:\d+\): a `String` and an `Int` are never equal\z/, e.message)
+    xs = [1, 2]
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { xs.include?(name) } }
+    assert_match(/\A`xs.include\?\(name\)` is always false/, e.message)
+    sym = :ann
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { [sym].include?(name) } }
+    assert_match(/\A`\[sym\].include\?\(name\)` is always false \(.*\): a `String` and a `Symbol` are never equal\z/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { [name, age].include?(email) } }
+    assert_match(/\A`age` in `\[name, age\].include\?\(email\)` is never equal to `email` \(.*\): an `Int` and a `String` are never equal\z/, e.message)
+    # Items that can be equal.
+    check(Person.where { [1, 2].include?(age) }, "#{COLS} WHERE \"age\" = ANY($1)", [[1, 2]])
+    check(Person.where { [1.5].include?(age) }, "#{COLS} WHERE \"age\" = ANY($1::double precision[])", [[1.5]])
+    s = "s"
+    check(Person.where { ["a", s].include?(name) }, "#{COLS} WHERE \"name\" IN ($1, $2)", ["a", "s"])
+    check(Person.where { [name, email].include?(email) }, "#{COLS} WHERE \"email\" IS NOT DISTINCT FROM \"name\" OR \"email\" IS NOT DISTINCT FROM \"email\"", [])
+  end
+
+  # rotor#46: an `if` that is not a `Bool`, as a condition: each branch
+  # tested for its truthiness, in the `CASE`.
+  def test_truthiness_of_an_if
+    check(Gauge.where { ((on ? label : level) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"label\" IS NOT NULL ELSE \"level\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    check(Gauge.where { !(on ? label : level) }, "#{GS} WHERE NOT CASE WHEN \"on\" THEN \"label\" IS NOT NULL ELSE \"level\" IS NOT NULL END", [])
+    check(Gauge.where { ((if on then label end) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"label\" IS NOT NULL ELSE FALSE END THEN 1 ELSE 0 END = 1", [])
+    check(Gauge.where { ((on ? label : nil) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"label\" IS NOT NULL ELSE FALSE END THEN 1 ELSE 0 END = 1", [])
+    check(Gauge.where { ((on ? on : label) ? 1 : 0) == 1 }, "#{GS} WHERE CASE WHEN CASE WHEN \"on\" THEN \"on\" ELSE \"label\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    check(Person.where { ((admin ? email : name) ? 1 : 0) == 1 }, "#{COLS} WHERE CASE WHEN CASE WHEN \"admin\" THEN \"email\" IS NOT NULL ELSE \"name\" IS NOT NULL END THEN 1 ELSE 0 END = 1", [])
+    # A nullable `Bool` branch: NULL there, so `!` is refused as before.
+    e = assert_raise(Rotor::UntranslatableError) { Flagged.where { !(id > 1 ? vip : "x") } }
+    assert_match(/three-valued in SQL when `vip` can be NULL/, e.message)
+    # As a value, still one type (#43).
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { on ? label : level } }
+    assert_match(/an `Int` or a `String`, as a value|a `String` or an `Int`, as a value/, e.message)
   end
 
   def test_order_limit_offset
