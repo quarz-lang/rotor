@@ -512,6 +512,12 @@ class QueryTest < Test::Case
     e = assert_raise(Rotor::UntranslatableError) { Person.where { (email || age) == "x" } }
     assert_match(/\A`email \|\| age`, a `String` or an `Int`, as a value cannot be translated/, e.message)
     check(Gauge.where { (level || ratio) == 1.5 }, "#{GS} WHERE COALESCE(\"level\", \"ratio\") = $1::double precision", [1.5])
+    # (Long chains translate each operand once: `classes` translates
+    # operands again, which would be exponential without `@sqls`.)
+    q = Gauge.order { level || cap || level || cap || level || cap || level || cap || level || cap || level || cap || level || cap || level || cap }
+    assert(q.to_sql[0].end_with?("COALESCE(\"level\", \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\"), \"level\"), \"cap\")"), q.to_sql[0])
+    q2 = Gauge.order { level && cap && level && cap && level && cap && level && cap && level && cap && level && cap && level && cap && level && cap }
+    assert(q2.to_sql[0].include?("ORDER BY CASE WHEN"), q2.to_sql[0])
     # A pattern is a value.
     check(Person.where { name.start_with?(sx || "a") }, "#{COLS} WHERE \"name\" LIKE $1", ["x%"])
     # A nil right operand.

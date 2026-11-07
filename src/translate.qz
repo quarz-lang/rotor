@@ -108,6 +108,12 @@ class Translator
   # condition: `&&` and `||` of other values than `Bool`s are one of
   # their operands there (`COALESCE`), a `Bool` in a condition.
   var @value: Bool = false
+  # The translations and classes made so far, by expression, mode and
+  # the columns known not to be NULL: `classes` translates operands
+  # again, which chains of `&&` and `||` would make exponential. (Keyed
+  # by how the expression is shown too: `Lit(1)` is `==` to `Lit(1.0)`.)
+  var @sqls: Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Sql] = Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Sql].new
+  var @kinds: Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Array[Type[Object]]] = Hash[[Meta::Expr, String, Bool, Array[[Int, Symbol]]], Array[Type[Object]]].new
 
   def initialize(@sources: Array[Source], @captures: Array[Object], @file: String, @scopes: Array[Scope], @guards: Guards = Guards.new, @non_null: Array[[Int, Symbol]] = [])
   end
@@ -184,8 +190,18 @@ class Translator
     end
   end
 
-  # `e` as SQL.
+  # `e` as SQL (made once for each mode and facts: `@sqls`).
   def sql(e: Meta::Expr) -> Sql
+    key = [e, Translator.show(e), @value, @non_null]
+    if s = @sqls[key]?
+      return s
+    end
+    s = translate(e)
+    @sqls = @sqls.put(key, s)
+    s
+  end
+
+  private def translate(e: Meta::Expr) -> Sql
     case e
     in Meta::Expr::Lit(value, line) then literal(value, line)
     in Meta::Expr::Capture(index, name, line)
@@ -997,6 +1013,16 @@ class Translator
   # left operand the value (its falsy ones for `&&`, its truthy ones for
   # `||`) and the right operand's.
   def classes(e: Meta::Expr) -> Array[Type[Object]]
+    key = [e, Translator.show(e), @value, @non_null]
+    if ks = @kinds[key]?
+      return ks
+    end
+    ks = classes_of(e)
+    @kinds = @kinds.put(key, ks)
+    ks
+  end
+
+  private def classes_of(e: Meta::Expr) -> Array[Type[Object]]
     out: Array[Type[Object]] = []
     case e
     in Meta::Expr::If(c, t, f, _)
