@@ -2,6 +2,8 @@
 name = "rotor"
 version = "0.1.0"
 module = "Rotor"
+documentation = "https://rotor.api.quarz.dev"
+repository = "https://github.com/quarz-lang/rotor"
 
 [dependencies]
 PG = { git = "https://github.com/quarz-lang/pg", branch = "main" }
