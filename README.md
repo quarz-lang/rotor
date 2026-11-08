@@ -14,7 +14,7 @@ Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 
 Work in progress. What exists: the schema, queries and statements as values (`to_sql`), a repository that runs them on PostgreSQL, associations with preloading, migrations, and changesets.
 
-```ruby
+```crystal
 class User < Rotor::Model
   table "users" do                      # `table do`: `users` from the class's name
     column :id, Int, primary: true      # Int, Float, String, Bool, Time, Bytes
@@ -100,7 +100,7 @@ A model never changes: `with` gives a new one, the one it was called on
 left as it was, and the repository's `insert`, `update` and `touch`
 give the model as saved.
 
-```ruby
+```crystal
 u = repo.get(User, 1).as(User)
 v = u.with(name: "Bob", email: nil)   # email: NULL; age left as it was
 v.changed                             # => [:name, :email]
@@ -131,7 +131,7 @@ A query is a value, built from blocks that are never run: each is
 received as its tree (Quarz's `Quoted`, docs/14 §6) and translated to
 SQL when the query is built, with the values it captured as parameters.
 
-```ruby
+```crystal
 min = 18
 q = User.where { age >= min && !email.nil? }.order { name }.desc.limit(10)
 q.to_sql
@@ -366,7 +366,7 @@ that type would not be Quarz's. What follows from it:
 
 ## Running them: `Rotor::Repo`
 
-```ruby
+```crystal
 PG::Pool.open("postgres://app@localhost/shop") do |pool|
   repo = Rotor::Repo.new(pool: pool)       # or connection: a PG::Connection
   u = repo.insert(User.new(name: "Ann"))   # key, defaults and timestamps loaded back
@@ -406,7 +406,7 @@ end
 
 ## Associations
 
-```ruby
+```crystal
 class User < Rotor::Model
   table "users" do
     column :id, Int, primary: true
@@ -462,7 +462,7 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 
 ### Many to many: `has_many ..., through:`
 
-```ruby
+```crystal
 class Post < Rotor::Model
   table do
     column :id, Int, primary: true
@@ -509,7 +509,7 @@ repo.insert(PostTag.new(post_id: post.id, tag_id: tag.id))   # writing: the join
 A query joins other tables in one SELECT, each table with its alias
 (`"u0"`, `"p1"`):
 
-```ruby
+```crystal
 # A `for` comprehension over several queries: an INNER JOIN on its
 # conditions (the inner query's and the `when`), a CROSS JOIN for none.
 for u in User.query, p in Post.where { published } when p.user_id == u.id do [u.name, p.title] end
@@ -545,7 +545,7 @@ database is). The command that runs them (`rotor migrate`, `rollback`,
 `status`) and the generator of migration files come with bezel; this
 cog gives the API they call.
 
-```ruby
+```crystal
 class CreateUsers < Rotor::Migration
   version 20261107120000          # an Int, unique; the generator will use the UTC time
 
@@ -678,7 +678,7 @@ than raising for what the user got wrong. Models keep working as they
 are (`with`, `repo.insert(model)`); a changeset is the layer for
 untrusted input.
 
-```ruby
+```crystal
 class User < Rotor::Model
   table "users" do
     column :id, Int, primary: true
