@@ -12,6 +12,8 @@ Quarz blocks that are translated to SQL. It runs on PostgreSQL through
 Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
 ```
 
+The API reference is at <https://rotor.api.quarz.dev>.
+
 Work in progress. What exists: the schema, queries and statements as values (`to_sql`), a repository that runs them on PostgreSQL, associations with preloading, migrations, and changesets.
 
 ```crystal
