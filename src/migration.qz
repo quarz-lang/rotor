@@ -288,7 +288,7 @@ end
 # without `down:`), or `repo` used in `change`, raises
 # `Rotor::IrreversibleMigration` before any runs. Use `up` and `down`
 # for those.
-class Migration
+abstract class Migration
   # What `change_column` takes to drop a column's default.
   NO_DEFAULT = NoDefault.new
 
@@ -309,7 +309,9 @@ class Migration
   def self.transaction? -> Bool = true
 
   # :nodoc:
-  def self.make -> Migration = new
+  # A migration of this class, which the migrator runs (`new` builds the
+  # concrete class the method is called on).
+  def self.make -> Self = new
 
   # Declares the migration's version, and checks that the class defines
   # `change`, or `up` and `down`, not both: an error where the class is
