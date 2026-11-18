@@ -95,9 +95,11 @@ class Query[T]
   @preloads: Array[Preload]
   # How its rows are models, for a preload (nil after `select`).
   @ops: ModelOps[T]?
+  # Its locking clause (` FOR UPDATE SKIP LOCKED`), or nil.
+  @lock: String?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil)
+  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil, @lock: String? = nil)
   end
 
   # The table (the first, in a join).
@@ -257,6 +259,41 @@ class Query[T]
     copy(offset: n)
   end
 
+  # Its rows locked for update, `FOR UPDATE`, until the transaction
+  # ends: another transaction's `for_update` of one of them waits, or
+  # with `skip_locked: true` leaves the locked rows out (`SKIP LOCKED`:
+  # a queue's workers each claim a row), or with `nowait: true` raises
+  # (NOWAIT, a `PG::ServerError`, SQLSTATE 55P03). Not both. Refused
+  # after `select`, `count` and `exists` (SQL locks rows, not a
+  # projection or an aggregate). Outside a transaction the lock ends
+  # with the statement: run it in `Rotor::Repo#transaction`.
+  #
+  # ```
+  # class LJob < Rotor::Model
+  #   table "jobs" do
+  #     column :id, Int, primary: true
+  #     column :done, Bool
+  #   end
+  # end
+  #
+  # LJob.where { !done }.order { id }.limit(1).for_update(skip_locked: true).to_sql[0]
+  # # => "SELECT \"id\", \"done\" FROM \"jobs\" WHERE NOT \"done\" ORDER BY \"id\" LIMIT 1 FOR UPDATE SKIP LOCKED"
+  # ```
+  def for_update(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_update", "UPDATE", skip_locked, nowait)
+
+  # Its rows locked as `for_update` does, `FOR NO KEY UPDATE`: the lock
+  # an UPDATE that changes no key column takes, which a row's `FOR
+  # KEY SHARE` (a foreign key's check) does not wait for.
+  def for_no_key_update(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_no_key_update", "NO KEY UPDATE", skip_locked, nowait)
+
+  # Its rows locked for share, `FOR SHARE`, as `for_update` does: other
+  # transactions may share the lock, not update or delete the rows.
+  def for_share(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_share", "SHARE", skip_locked, nowait)
+
+  # Its rows locked as `for_share` does, `FOR KEY SHARE`: only a change
+  # of a key column, or a delete, waits for it.
+  def for_key_share(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_key_share", "KEY SHARE", skip_locked, nowait)
+
   # Its rows with the associations the block names preloaded, as
   # `Rotor::Repo#preload` does after they are loaded (`repo.all(User.query.preload
   # { posts })`): Ecto's `preload:`.
@@ -266,7 +303,7 @@ class Query[T]
     added = Cache.fetch(Cache::PRELOADS, Cache.key(spec.site, @sources), Array[Object].new) do
       [Preloads.parse(table, @sources[0].model.name, spec.expr, spec.file), Array[Guard].new]
     end
-    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), ops)
+    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), ops, @lock)
   end
 
   # The rows `repo` loaded with the preloads done (`preload`).
@@ -342,6 +379,7 @@ class Query[T]
   # ```
   def flat_map[R](&f: Quoted[shareable (T) -> Query[R]] using Compare) -> Query[R]
     rows!("flat_map")
+    unlocked!("flat_map")
     joinable!("flat_map")
     plan = Joins.plan(@sources, f.expr, f.captures, f.file, f.site)
     k = @sources.size
@@ -426,12 +464,14 @@ class Query[T]
   # The number of rows: `SELECT count(*)`.
   def count -> Query[Int]
     unshaped!("count")
+    unlocked!("count")
     Query[Int].new(@sources, @wheres, @orders, @projected, @limit, @offset, Shape::Count, ->(rows: Array[Array[Fetched]]) { rows.map { |r| r[0].values[:value]?.as(Int) } })
   end
 
   # Whether there is a row: `SELECT EXISTS (...)`.
   def exists -> Query[Bool]
     unshaped!("exists")
+    unlocked!("exists")
     Query[Bool].new(@sources, @wheres, @orders, @projected, @limit, @offset, Shape::Exists, ->(rows: Array[Array[Fetched]]) { rows.map { |r| r[0].values[:value]?.as(Bool) } })
   end
 
@@ -471,7 +511,11 @@ class Query[T]
           in Shape::Exists
             [Piece::Text.new("SELECT EXISTS (SELECT 1")] + from + where_pieces + window + [Piece::Text.new(")")]
           in Shape::Rows
-            [Piece::Text.new("SELECT ")] + select_list + from + where_pieces + order_pieces + window
+            locking: Array[Piece] = []
+            if l = @lock
+              locking = [Piece::Text.new(l)]
+            end
+            [Piece::Text.new("SELECT ")] + select_list + from + where_pieces + order_pieces + window + locking
           end
     qualified(out)
   end
@@ -511,7 +555,7 @@ class Query[T]
   end
 
   private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
-    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, ops)
+    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, ops, @lock)
   end
 
   private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
@@ -562,6 +606,7 @@ class Query[T]
 
   private def project[R](expr: Meta::Expr, file: String, site: Int, f: shareable (T) -> R) -> Query[R]
     rows!("select")
+    unlocked!("select")
     raise ArgumentError.new("`select` after `preload`: a projection has no models to preload for") unless @preloads.empty?
     reads = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
       t, e = translator(expr, Array[Object].new, file)
@@ -633,6 +678,22 @@ class Query[T]
 
   # (Conditions and orders are of the model's rows: before a projection,
   # a count or an exists.)
+  # (A lock is of the rows a query gives as they are: not of a count, an
+  # exists, a projection, or the rows a statement changes.)
+  private def unlocked!(what: String) -> Void
+    if @lock
+      raise ArgumentError.new("`#{what}` of a query that locks its rows (`for_update`...): write the lock last, on the rows themselves")
+    end
+  end
+
+  private def lock(what: String, mode: String, skip_locked: Bool, nowait: Bool) -> Query[T]
+    rows!(what)
+    raise ArgumentError.new("`#{what}` with both `skip_locked` and `nowait`: one or the other") if skip_locked && nowait
+    raise ArgumentError.new("`#{what}` of a query that already locks its rows") if @lock
+    wait = skip_locked ? " SKIP LOCKED" : (nowait ? " NOWAIT" : "")
+    Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, @preloads, ops, " FOR #{mode}#{wait}")
+  end
+
   private def rows!(what: String) -> Void
     if @projected || @shape != Shape::Rows
       raise ArgumentError.new("`#{what}` after `select`, `count` or `exists`: write it before")
@@ -654,6 +715,7 @@ class Query[T]
   # (A join of every row: a limit or an offset is of the joined rows,
   # and a preload of the models alone, so both come after it.)
   private def joinable!(what: String) -> Void
+    unlocked!(what)
     if @limit || @offset
       raise ArgumentError.new("`#{what}` of a query with a limit or an offset: write them after it")
     end
@@ -662,6 +724,7 @@ class Query[T]
 
   private def plain!(what: String) -> Void
     single!(what)
+    unlocked!(what)
     if !@orders.empty? || @limit || @offset || @projected || @shape != Shape::Rows
       raise ArgumentError.new("`#{what}` of a query with an order, a limit, an offset or a projection: only its conditions say which rows")
     end

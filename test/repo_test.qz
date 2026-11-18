@@ -484,6 +484,39 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#68: a row locked in one transaction, seen from another.
+  def test_row_locks
+    with_repo do |repo|
+      ann = repo.insert(Member.new(name: "ann"))
+      repo.insert(Member.new(name: "bob"))
+      aid = ann.id
+      c = PG.connect(url)
+      begin
+        other = Rotor::Repo.new(connection: c)
+        repo.transaction do |tx|
+          claimed = tx.first(Member.query.order { id }.for_update(skip_locked: true)) || raise "none"
+          assert_equal("ann", claimed.name)
+          # The other transaction skips the locked row, and claims the next.
+          other.transaction do |tx2|
+            mine = tx2.first(Member.query.order { id }.for_update(skip_locked: true)) || raise "none"
+            assert_equal("bob", mine.name)
+            nil
+          end
+          # NOWAIT on the locked row raises at once.
+          e = assert_raise(PG::ServerError) { other.all(Member.where { id == aid }.for_update(nowait: true)) }.as(PG::ServerError)
+          assert_equal("55P03", e.code)
+          # A share lock of another row is no conflict.
+          assert_equal(["bob"], other.all(Member.where { id != aid }.for_share(nowait: true)).map { |m| m.name })
+          nil
+        end
+        # Released at the commit.
+        assert_equal(["ann"], other.all(Member.where { id == aid }.for_update(nowait: true)).map { |m| m.name })
+      ensure
+        c.close
+      end
+    end
+  end
+
   # rotor#36: `&&`, `||` and `!` of other values than `Bool`s, with
   # NULL and non-NULL rows, and nil captures in each position.
   def test_truthiness_forms
