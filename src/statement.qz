@@ -142,7 +142,8 @@ class Statement
         raise ArgumentError.new("an `#{what}` of `#{name}` twice (#{file}:#{Translator.line_of(key)})")
       end
       seen = seen + [name]
-      v = t.operand(value, false)
+      # (An array column's new value may be a captured array.)
+      v = (c.element.nil? ? nil : t.array_value(value)) || t.operand(value, false)
       unless v.known
         t.classes(value).each do |k|
           if k == Nil

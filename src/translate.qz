@@ -851,8 +851,6 @@ class Translator
     in Time => x then x
     in Bytes => x then x
     in Symbol => x then x
-    # (An array column's value, `update { {tags: xs} }`: one parameter.)
-    in Array => xs then Model.value(xs)
     else untranslatable("a value of class #{value.class.name}", line)
     end
   end
@@ -1511,6 +1509,23 @@ class Translator
 
   # A LEFT JOIN's row `i` there: its key IS NOT NULL.
   private def present(i: Int) -> Sql = postfix(node([Piece::Column.new(i, @sources[i].table.primary_keys[0])], ATOM), "IS NOT NULL", IS)
+
+  # `e`, an array column's new value in an `update`, when it is a
+  # captured array: one parameter (`Rotor::Bind::Whole`), the array as
+  # is; nil for anything else. Only there: elsewhere a captured array as
+  # a value is refused, as before (`xs.include?(col)` has its own way).
+  def array_value(e: Meta::Expr) -> Sql?
+    case e
+    in Meta::Expr::Capture(index, _, _)
+      case v = look(Bind::Capture.new(index))
+      in Array => xs
+        b = Bind::Whole.new(index)
+        Sql.new([Piece::Bound.new(b)], ATOM, nil, Model.value(xs), true, b)
+      else nil
+      end
+    else nil
+    end
+  end
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
   # of literals or a captured array).

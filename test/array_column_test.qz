@@ -64,6 +64,13 @@ class ArrayColumnTextTest < Test::Case
     sql, params = Tagged.where { |t| t.id == 1 }.update { |t| {tags: xs} }.to_sql
     assert_equal("UPDATE \"tagged\" SET \"tags\" = $1 WHERE \"id\" = 1", sql)
     assert_equal(1, params.size)
+    # A captured array is a value only as an array column's new value:
+    # elsewhere refused, as rotor refuses it.
+    names = ["a", "b"]
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.name == names } })
+    ids = [1, 2]
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.id == ids } })
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.name == Rotor::SQL.not_nil(names) } })
     wrong = [1]
     assert_equal("Tagged#tags takes an Array of String, not [1]", refusal { Tagged.query.update { |t| {tags: wrong} } })
   end
