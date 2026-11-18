@@ -136,6 +136,10 @@ class JsonColumnTextTest < Test::Case
   end
 end
 
+# A stored document, one compared with it, and whether Quarz's `==` and
+# the server's find them equal.
+data Pair = (stored: String, given: String, quarz: Bool, sql: Bool)
+
 # A `json` column of a table rotor did not create.
 class RawDoc < Rotor::Model
   table "raw_docs" do
@@ -224,6 +228,77 @@ class JsonColumnTest < Test::Case
     end
   end
 
+  # Equality: Quarz's `JSON::Value#==` (numbers by value, an `Int` and
+  # a `Float` alike; objects without member order) against jsonb's
+  # (numbers as exact decimals; objects without member order). Each row:
+  # a stored document, a document compared with it, Quarz's `==` of the
+  # one read back with it, and the server's (`where { body == doc }`).
+  # They differ where Quarz reads a number as a `Float` that jsonb keeps
+  # exact (README, the document column's paragraph).
+  PAIRS = [
+    Pair.new("1", "1.0", true, true),
+    Pair.new("100", "1e2", true, true),
+    Pair.new("{\"a\": 1, \"b\": 2}", "{\"b\": 2, \"a\": 1}", true, true),
+    Pair.new("{\"a\": 1, \"a\": 2}", "{\"a\": 2}", true, true),
+    Pair.new("9007199254740993", "9007199254740992.0", true, false),
+    Pair.new("0.1000000000000000001", "0.1", true, false),
+    Pair.new("123456789012345678901234567890", "123456789012345678901234567890.0", false, false),
+  ]
+
+  def test_equality_against_quarz
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      PAIRS.each do |pair|
+        c.exec("TRUNCATE docs RESTART IDENTITY")
+        c.query("INSERT INTO docs (body) VALUES ($1::jsonb)", [pair.stored])
+        stored = (repo.get(Doc, 1) || raise "not found").body
+        given = doc(pair.given)
+        sql = repo.all(Doc.where { |x| x.body == given }).size == 1
+        assert_equal([pair.quarz, pair.sql], [stored == given, sql], pair.stored)
+        # Change tracking is Quarz's `==`: putting the document compared
+        # is no change where Quarz finds them equal.
+        model = repo.get(Doc, 1) || raise "not found"
+        assert_equal(!pair.quarz, Rotor::Changeset.change(model).put_change(:body, given).changes.key?(:body), pair.stored)
+      end
+    ensure
+      c.close
+    end
+  end
+
+  # Many rows, an upsert, `returning`, and an `if` of documents.
+  def test_statements
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE docs RESTART IDENTITY")
+      # The document `null` and SQL's NULL in one multi-row VALUES.
+      made = repo.insert_all([Doc.new(body: doc("{}"), extra: JSON::Value::Null), Doc.new(body: doc("[]"), extra: nil)])
+      byid = made.sort_by { |m| m.id }
+      assert(byid[0].extra == JSON::Value::Null)
+      assert_nil(byid[1].extra)
+      assert_equal(["null", "NULL"], c.query("SELECT coalesce(extra::text, 'NULL') FROM docs ORDER BY id").rows.map { |r| r.string(0) })
+      # An upsert that updates the document.
+      nb = doc("{\"v\": 2}")
+      up = repo.upsert(Rotor::Statement.insert(Doc.new(id: byid[0].id, body: nb)).on_conflict(:id).do_update { |old, new| {body: new.body} }) || raise "skipped"
+      assert_equal(nb, up.body)
+      # `returning` of an update.
+      d3 = doc("[3]")
+      second = byid[1].id
+      back = repo.all(Doc.where { |x| x.id == second }.update { |x| {body: d3} }.returning)
+      assert_equal(d3, back[0].body)
+      # An `if` of two documents: a CASE whose branches are cast `::jsonb`.
+      d1 = doc("{\"if\": 1}")
+      d2 = doc("{\"if\": 2}")
+      st = Doc.query.update { |x| {body: x.id > 1 ? d1 : d2} }
+      assert_equal("UPDATE \"docs\" SET \"body\" = CASE WHEN \"id\" > 1 THEN $1::jsonb ELSE $2::jsonb END", st.to_sql[0])
+      repo.run(st)
+      assert_equal([d2, d1], repo.all(Doc.query.order { |x| x.id }).map { |x| x.body })
+    ensure
+      c.close
+    end
+  end
+
   def test_json_column
     c = PG.connect(url)
     begin
@@ -235,6 +310,12 @@ class JsonColumnTest < Test::Case
       nb = doc("[null]")
       repo.run(RawDoc.where { |x| x.id == r.id }.update { |x| {body: nb} })
       assert_equal(nb, (repo.get(RawDoc, r.id) || raise "not found").body)
+      # An `if` of two documents on a `json` column: the branches cast
+      # `::jsonb`, assigned to `json` (an assignment cast the server has).
+      d1 = doc("{\"if\": 1}")
+      d2 = doc("{\"if\": 2}")
+      repo.run(RawDoc.query.update { |x| {body: x.id > 0 ? d1 : d2} })
+      assert_equal(d1, (repo.get(RawDoc, r.id) || raise "not found").body)
       repo.update((repo.get(RawDoc, r.id) || raise "not found").with(body: nil))
       assert_equal([r.id], repo.all(RawDoc.where { |x| x.body.nil? }).map { |x| x.id })
     ensure

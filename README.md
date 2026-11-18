@@ -85,9 +85,20 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   column that needs the document's exact text is declared `String`
   (item 5 of [Parameter types](#parameter-types)). In query blocks:
   `==` and `!=` against a document (captured, or `JSON::Value::Null`),
-  nil or another column, jsonb's equality (members in any order),
-  `nil?`, an `update`'s value; on a `json` column, which has no
-  equality, `==` and `!=` are an error from the server. Reading a
+  nil or another column, `nil?`, an `update`'s value (an `if` of two
+  documents is a `CASE` whose branches are cast `::jsonb`, which a
+  `json` column takes too). On a `json` column, which has no equality,
+  `==` and `!=` are an error from the server. On a `jsonb` column the
+  server's equality decides, not Quarz's `JSON::Value#==`: both ignore
+  the members' order and compare numbers by value (`1` and `1.0`,
+  `100` and `1e2` are equal to both), but jsonb compares them as
+  exact decimals where Quarz reads a `Float`, so a stored
+  `0.1000000000000000001` or `9007199254740993` (read as `0.1`, and
+  equal to `9007199254740992.0` in Quarz) does not match `0.1` or
+  `9007199254740992.0` in a query, though Quarz finds the document
+  read back equal to them; a changeset's change tracking is Quarz's
+  `==`, so putting such a document is no change
+  (test/json_column_test.qz, `PAIRS`). Reading a
   member (`body["kind"]`) is a later issue; everything else is refused
   (the document's own methods, an order by it: a `JSON::Value` has no
   order in Quarz), or does not compile (`<`, `+`). A
@@ -571,7 +582,8 @@ end
 ```
 
 - `repo.query`'s block reads a row with `Rotor::Row`'s typed readers:
-  `int`, `float`, `string`, `bool`, `time`, `bytes`, and for an array
+  `int`, `float`, `string`, `bool`, `time`, `bytes`, `json` (a `json`
+  or `jsonb` value as a `JSON::Value`), and for an array
   column `ints`, `floats`, `strings`, `bools`, `times` (its elements
   nil for NULL; one dimension), each with a `?` form that gives nil
   for a NULL value; the others raise `ArgumentError` on one.
