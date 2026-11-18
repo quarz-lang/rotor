@@ -105,6 +105,38 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   order in Quarz), or does not compile (`<`, `+`). A
   changeset takes a `JSON::Value` (`put_change`, `cast`), not text to
   parse. No `default:`.
+- A document column of a `data` type (#94): `column :prefs, Prefs,
+  json: true` is a `jsonb` column whose getter gives a `Prefs`, written
+  as the value's JSON (`JSON.generate`) and read with
+  `JSON.decode[Prefs]`; `new` and `with` take a `Prefs`. The type is a
+  `data` type, whose fields are what `JSON.decode` takes (numbers,
+  strings, `Bool`, `Time`, `Symbol`, `Bytes`, other `data` types,
+  arrays, hashes, nullable fields); an `Array` or `Hash` is a field of
+  one (`data Log = (entries: Array[Entry])`), as a `Type` value in
+  `table` carries no type arguments. A type `JSON.decode` cannot take
+  is an error when the program is compiled, reported at the `table`
+  line and naming the column's generated decoder
+  (`__rotor_document_<column>`) and the type; `json: false` is
+  refused. A row whose document does not have the type's shape raises
+  `JSON::DecodeError` when it is loaded, naming the table, the column
+  and where ("accounts.prefs: $: missing field \`theme\` of Prefs");
+  a field with a default takes it for a missing key, and a
+  key the type has no field for is ignored. Values round-trip
+  (`m.with(prefs: v).prefs == v`, through the server too). A
+  changeset's change tracking compares the decoded values with the
+  type's `==`; a changeset takes a value of the type (`put_change`),
+  not a form's text (`cast` refuses the column). In query blocks a
+  document column is `nil?`, `== nil` and `!= nil`, and nil as an
+  `update`'s value; comparing it, reading a field (`prefs.theme`),
+  ordering by it and a value of the type in an `update` are refused
+  for now (give a model its value with `with` and `repo.update` it).
+  The getter decodes the document on each read: the cost grows with
+  the document (measured, 1,000 reads: a five-field value 5.6 µs a
+  read interpreted, 1.9 µs compiled; a value holding 1,000 entries
+  1,004 µs and 463 µs; a `String` column 1.5 µs and 0.3 µs), so read
+  it once into a local. (A model will keep the decoded value when
+  Quarz lets a generated `initialize` assign a generated field,
+  quarz-lang/quarz#890; nothing in the API changes then.)
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`

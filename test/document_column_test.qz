@@ -1,0 +1,220 @@
+require "test"
+
+# Document columns of a type (rotor#94): `column :prefs, Prefs, json:
+# true`, a `jsonb` column read with `JSON.decode[Prefs]`.
+data Prefs = (theme: String, per_page: Int = 20)
+data Entry = (at: Int, note: String?)
+data Ledger = (entries: Array[Entry])
+
+class DocAccount < Rotor::Model
+  table "doc_accounts" do
+    column :id, Int, primary: true
+    column :prefs, Prefs, json: true
+    column :log, Ledger, json: true, null: true
+  end
+end
+
+# A value of every kind of field `JSON.decode` takes.
+data Inner = (n: Int)
+data Every = (
+  i: Int,
+  big: Integer,
+  f: Float,
+  s: String,
+  b: Bool,
+  t: Time,
+  sym: Symbol,
+  bytes: Bytes,
+  inner: Inner,
+  list: Array[Int],
+  map: Hash[String, Int],
+  maybe: String?,
+  absent: Int? = nil
+)
+
+class Kept < Rotor::Model
+  table "kept" do
+    column :id, Int, primary: true
+    column :every, Every, json: true
+  end
+end
+
+class DocumentColumnTextTest < Test::Case
+  COLS = "SELECT \"id\", \"prefs\", \"log\" FROM \"doc_accounts\""
+
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*document_column_test\.qz:\d+\)/, "")
+    end
+  end
+
+  def test_columns
+    assert_equal(["bigint", "jsonb", "jsonb"], DocAccount.columns.map { |c| c.sql })
+    prefs = DocAccount.columns[1]
+    assert(prefs.type == JSON::Value && prefs.document == Prefs && !prefs.null)
+    log = DocAccount.columns[2]
+    assert(log.document == Ledger && log.null)
+  end
+
+  def test_values
+    a = DocAccount.new(prefs: Prefs.new("dark"))
+    assert_equal(Prefs.new("dark", 20), a.prefs)
+    assert_nil(a.log)
+    # Held as the document.
+    assert(a.to_h[:prefs]? == JSON.parse("{\"theme\": \"dark\", \"per_page\": 20}"))
+    sql, params = Rotor::Statement.insert(a).to_sql
+    assert_equal("INSERT INTO \"doc_accounts\" (\"prefs\") VALUES ($1)", sql)
+    expected: Array[Object?] = [JSON.parse("{\"theme\": \"dark\", \"per_page\": 20}")]
+    assert_equal(expected, params)
+    es = Ledger.new([Entry.new(1, nil), Entry.new(2, "x")])
+    b = a.with(log: es)
+    assert_equal(es, b.log)
+    assert_equal([:prefs, :log], b.changed)
+  end
+
+  def test_load
+    # A missing key takes its field's default.
+    a = DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: nil})
+    assert_equal(Prefs.new("x", 20), a.prefs)
+    # A document of another shape: the table, the column and where.
+    e = assert_raise(JSON::DecodeError) { DocAccount.load({id: 1, prefs: JSON.parse("{\"per_page\": 1}"), log: nil}) }
+    assert_equal("doc_accounts.prefs: $: missing field `theme` of Prefs", e.message)
+    e = assert_raise(JSON::DecodeError) { DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: JSON.parse("{\"entries\": [{\"at\": \"1\"}]}")}) }
+    assert_match(/\Adoc_accounts\.log: \$\.entries\[0\]/, e.message)
+  end
+
+  # `m.with(every: v).every == v` for every kind of field.
+  def test_round_trip_in_quarz
+    v = Every.new(1, Integer.parse("1000000000000000000000000000000"), 0.1, "é\"", true, Time.utc(2026, 11, 18, 1, 2, 3) + 0.123456789.seconds, :sym, b"\x00\xff", Inner.new(2), [1, 2], {"k" => 3}, nil)
+    k = Kept.new(every: v)
+    assert_equal(v, k.every)
+    assert_equal(v, k.with(every: v).every)
+  end
+
+  def test_query_blocks
+    p = Prefs.new("x")
+    assert_equal("#{COLS} WHERE \"log\" IS NULL", DocAccount.where { |a| a.log.nil? }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"log\" IS NULL", DocAccount.where { |a| a.log == nil }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"log\" IS NOT NULL", DocAccount.where { |a| a.log != nil }.to_sql[0])
+    assert_equal("a comparison of the document column `prefs` (a Prefs) cannot be translated to SQL", refusal { DocAccount.where { |a| a.prefs == p } })
+    assert_equal("`Prefs#theme` cannot be translated to SQL", refusal { DocAccount.where { |a| a.prefs.theme == "x" } })
+    assert_equal("an order by a `JSON::Value` cannot be translated to SQL", refusal { DocAccount.query.order { |a| a.prefs }.to_sql })
+    assert_equal("`prefs`'s new value in an `update`: a document column (a Prefs) takes nil or a document column of its type here; give a model its value with `with` and `repo.update` it cannot be translated to SQL", refusal { DocAccount.query.update { |a| {prefs: p} } })
+    assert_equal("UPDATE \"doc_accounts\" SET \"log\" = NULL", DocAccount.query.update { |a| {log: nil} }.to_sql[0])
+  end
+
+  def test_changeset
+    a = DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: nil})
+    # Change tracking by `==`: an equal value is no change.
+    assert(Rotor::Changeset.change(a).put_change(:prefs, Prefs.new("x", 20)).changes.empty?)
+    c = Rotor::Changeset.change(a).put_change(:prefs, Prefs.new("y"))
+    assert_equal(Prefs.new("y"), (c.apply || raise "invalid").prefs)
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(a).put_change(:prefs, "x") }
+    assert_equal("\"x\" is not a value of DocAccount#prefs", e.message)
+    # Not cast from parameters (a form's text): put it.
+    params: Hash[String, Object?] = {"prefs" => "{}"}
+    assert(Rotor::Changeset.cast(a, params, [:prefs]).errors.any? { |x| x.field == :prefs })
+  end
+
+  def test_schema
+    models: Array[Type[Rotor::Model]] = [DocAccount]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"doc_accounts\" (\"id\" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \"prefs\" jsonb NOT NULL, \"log\" jsonb)"], sql)
+  end
+
+  def test_undecodable_types_do_not_compile
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/document_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:6:\d+: error: `def_method\(:__rotor_document_owner\)`: `JSON\.decode` in the block cannot decode into Owner: `Owner` is a class/, out.stderr)
+    assert_match(/main\.qz:12:\d+: error: .*json: false/, out.stderr)
+    assert_match(/main\.qz:26:\d+: error: .*wrap the Array in one/, out.stderr)
+    refute_match(/main\.qz:1[89]:\d+: error/, out.stderr)
+  end
+end
+
+# Against a real server.
+class DocumentColumnTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS doc_accounts, kept")
+        models: Array[Type[Rotor::Model]] = [DocAccount, Kept]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def test_round_trip
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE doc_accounts RESTART IDENTITY")
+      es = Ledger.new([Entry.new(1, nil), Entry.new(2, "x")])
+      a = repo.insert(DocAccount.new(prefs: Prefs.new("dark", 5), log: es))
+      got = repo.get(DocAccount, a.id) || raise "not found"
+      assert_equal(Prefs.new("dark", 5), got.prefs)
+      assert_equal(es, got.log)
+      u = repo.update(got.with(prefs: Prefs.new("light"), log: nil))
+      again = repo.get(DocAccount, u.id) || raise "not found"
+      assert_equal(Prefs.new("light"), again.prefs)
+      assert_nil(again.log)
+      assert_equal([u.id], repo.all(DocAccount.where { |x| x.log.nil? }).map { |x| x.id })
+      # A key the type does not have is ignored; a missing one with a
+      # default takes it.
+      c.exec("UPDATE doc_accounts SET prefs = '{\"theme\": \"t\", \"extra\": 1}'")
+      assert_equal(Prefs.new("t", 20), (repo.get(DocAccount, a.id) || raise "not found").prefs)
+      # A row of another shape raises when it is loaded.
+      c.exec("UPDATE doc_accounts SET prefs = '{\"theme\": 1}'")
+      e = assert_raise(JSON::DecodeError) { repo.get(DocAccount, a.id) }
+      assert_match(/\Adoc_accounts\.prefs: \$\.theme/, e.message)
+      e = assert_raise(JSON::DecodeError) { repo.all(DocAccount.query) }
+      assert_match(/\Adoc_accounts\.prefs: /, e.message)
+    ensure
+      c.close
+    end
+  end
+
+  def test_every_kind_round_trips
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE kept RESTART IDENTITY")
+      v = Every.new(1, Integer.parse("1000000000000000000000000000000"), 0.1, "é\"", true, Time.utc(2026, 11, 18, 1, 2, 3) + 0.123456789.seconds, :sym, b"\x00\xff", Inner.new(2), [1, 2], {"k" => 3}, nil)
+      k = repo.insert(Kept.new(every: v))
+      got = repo.get(Kept, k.id) || raise "not found"
+      assert_equal(v, got.every)
+      # Change tracking: the value read back is equal to the one written.
+      assert(Rotor::Changeset.change(got).put_change(:every, v).changes.empty?)
+      # `with` of an equal value: an assignment, which `changed` lists.
+      assert_equal([:every], got.with(every: v).changed)
+    ensure
+      c.close
+    end
+  end
+end

@@ -1,0 +1,30 @@
+class Owner
+  def initialize; end
+end
+
+class Bad < Rotor::Model
+  table "bads" do
+    column :id, Int, primary: true
+    column :owner, Owner, json: true
+  end
+end
+class Off < Rotor::Model
+  table "offs" do
+    column :id, Int, primary: true
+    column :n, Int, json: false
+  end
+end
+data Prefs = (theme: String)
+class Good < Rotor::Model
+  table "goods" do
+    column :id, Int, primary: true
+    column :prefs, Prefs, json: true
+  end
+end
+data Entry = (at: Int)
+class Listed < Rotor::Model
+  table "listed" do
+    column :id, Int, primary: true
+    column :entries, Array[Entry], json: true
+  end
+end

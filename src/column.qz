@@ -24,7 +24,11 @@ data Column = (
   # another column. (A `Type` value carries no type arguments: the
   # column keeps its declared element here.)
   element: Type[Object]? = nil,
-  nils: Bool = false
+  nils: Bool = false,
+  # For a document column (`json: true`): the `data` type its getter
+  # gives, its value held as the `JSON::Value` stored (`type`); nil for
+  # another column.
+  document: Type[Object]? = nil
 )
 
 # An association of a model, as its `table` block declares it: what the

@@ -134,6 +134,8 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
   # `[true, value]` for `raw` cast to column `c`'s type, `[false, nil]`
   # when it does not cast.
   def self.cast_value(c: Column, raw: Object?) -> [Bool, Value?]
+    # (A document column of a type: not from a form's text; put it.)
+    return [false, nil] unless c.document.nil?
     return [true, nil] if raw.nil?
     t = c.type
     if raw.is_a?(String) && raw.as(String).strip.empty? && (c.null || t != String)
@@ -204,12 +206,27 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
   # data's), checked against the column's type.
   def put_change(field: Symbol, value: Object?) -> Changeset[M]
     c = column(field)
-    v = Model.value(value)
-    unless v.nil? || Changeset.same_class?(c, v)
+    v = Model.stored_value(c, value)
+    if c.document && !v.nil?
+      # (A document column's: of its type's shape, decoded.)
+      begin
+        data.check_document(c, v.as(JSON::Value))
+      rescue JSON::DecodeError
+        raise ArgumentError.new("#{value.inspect} is not a value of #{data.class.name}##{field}")
+      end
+    elsif !(v.nil? || Changeset.same_class?(c, v))
       raise ArgumentError.new("#{v.inspect} is not a value of #{data.class.name}##{field}")
     end
     raise ArgumentError.new("#{data.class.name}##{field} cannot be nil") if v.nil? && !c.null
-    if data.to_h[field]? == v && (data.to_h.key?(field) || v.nil?)
+    # (A document column's change by its type's `==`: the documents
+    # decoded, a missing key taking its field's default.)
+    old = data.to_h[field]?
+    same = if c.document && old.is_a?(JSON::Value) && v.is_a?(JSON::Value)
+             data.decode_document(field, old.as(JSON::Value)) == data.decode_document(field, v.as(JSON::Value))
+           else
+             old == v
+           end
+    if same && (data.to_h.key?(field) || v.nil?)
       with(changes: changes.reject { |k, _| k == field })
     else
       with(changes: changes.put(field, v))
