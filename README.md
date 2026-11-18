@@ -401,6 +401,15 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   `asc` is the order as given, written to say so). Without them the
   order is PostgreSQL's: NULLs last ascending, first descending. Quarz
   has no order of nil, so there is no other default to follow.
+- Times and durations (#76): `Time + Duration` and `Time - Duration`
+  are `+`/`-` of an `interval` on the `timestamptz`
+  (`where { created_at > at - 24.hours }`, `update { {due: due + span} }`):
+  a captured `Duration` is a parameter of its microseconds
+  (`($1::bigint * interval '1 microsecond')`), `n.hours` and the like
+  `n` times an interval of the unit, a day being 24 hours as a
+  `Duration`'s (not a calendar day). A `Duration` has no days or months,
+  so the arithmetic is exact, as in Quarz. `Time - Time` and comparing
+  `Duration`s are refused.
 - Queries are `Shareable` (Quarz's docs/03): a query can be a constant
   (`ACTIVE = User.where { active }`), be captured by `Task.spawn` or sent
   on a `Channel`, and run in another task; so can a `Rotor::Statement`.

@@ -12,6 +12,8 @@ enum Bind
   variant ToFloat(of: Bind)
   # (`name`: `"start_with?"`, `"end_with?"` or `"include?"`.)
   variant Like(of: Bind, name: String)
+  # A captured `Duration` as its microseconds, an `interval`'s unit.
+  variant Micros(of: Bind)
   # A captured query, as a subquery (`col IN (SELECT ...)`): its pieces,
   # its parameters among them, in the place of the one piece.
   variant Subquery(index: Int)
@@ -89,7 +91,20 @@ module Binds
       else v
       end
     in Bind::Subquery(i) then captures[i]
+    in Bind::Micros(x)
+      case v = value(x, captures)
+      in Duration => d then micros(d)
+      else v
+      end
     end
+  end
+
+  # `d` in microseconds (PostgreSQL's `interval` keeps no less), its
+  # nanoseconds rounded: exact for any `Duration`, the milliseconds an
+  # `Int` and the rest under one.
+  def self.micros(d: Duration) -> Int
+    ms = d.to_ms
+    ms * 1000 + ((d - ms.ms).to_f * 1_000_000).round.to_i
   end
 
   # The kind of `v`.

@@ -67,6 +67,9 @@ class Translator
   LIKE = 6
   OTHER = 7
   ADD = 8
+  # The units of `Int#hours` and the like, as `interval`s.
+  UNITS = {ms: "1 millisecond", milliseconds: "1 millisecond", second: "1 second", seconds: "1 second",
+           minute: "1 minute", minutes: "1 minute", hour: "1 hour", hours: "1 hour", day: "24 hours", days: "24 hours"}
   MUL = 9
   ATOM = 10
 
@@ -209,6 +212,10 @@ class Translator
     case e
     in Meta::Expr::Lit(value, line) then literal(value, line)
     in Meta::Expr::Capture(index, name, line)
+      # (A captured `Duration`: an interval of its microseconds.)
+      if look(Bind::Capture.new(index)).is_a?(Duration)
+        return interval([Piece::Bound.new(Bind::Micros.new(Bind::Capture.new(index))).as(Piece), Piece::Text.new("::bigint").as(Piece)], "1 microsecond")
+      end
       b = bound(Bind::Capture.new(index), line)
       b.value.nil? ? Sql.new(b.pieces, b.prec, nil, nil, true, b.bind, name.to_s) : b
     in Meta::Expr::And(l, r, _) then logical(e, l, "AND", r, AND, facts(l, true))
@@ -912,6 +919,12 @@ class Translator
       end
     end
     if args.size == 0
+      # (`n.hours` and the like: `n` times an interval of the unit; a
+      # day is 24 hours, as a `Duration`'s, not a calendar day.)
+      if (m.owner == Int || m.owner == Float) && (unit = UNITS[m.name]?)
+        n = cast(operand(r))
+        return interval(wrap(n, MUL + 1), unit)
+      end
       case name
       in "nil?" then return is_null(operand(r), "IS NULL")
       in "-@"
@@ -935,6 +948,14 @@ class Translator
         untranslatable(Translator.label(arr), line)
       end
       return compare(r, sym, a, whole, line)
+    end
+    # `Time + Duration`, `Time - Duration`: on a `timestamptz`, exact
+    # for a `Duration`'s hours to microseconds, as in Quarz.
+    if m.owner == Time && (name == "+" || name == "-")
+      untranslatable("`Time - Time`", line) unless duration?(a)
+      l = cast(operand(r))
+      rr = operand(a)
+      return with_nulls(binary(l, name, rr, ADD, name == "+"), [l])
     end
     if op = ARITHMETIC[m.name]?
       l = operand(r)
@@ -1006,6 +1027,7 @@ class Translator
   private def compare(le: Meta::Expr, op: String, re: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     l = operand(le)
     r = operand(re)
+    untranslatable("a comparison of `Duration`s", line) if duration?(le) || duration?(re)
     # (`Rotor::Compare` gives nil an order, false either way: against a
     # nil literal, or an `if` whose branches are, the comparison is
     # always false, which is not what was meant. Decided by the source,
@@ -1120,6 +1142,8 @@ class Translator
     in Meta::Expr::Call(_, m, _, _, nil, _) if m.singleton && m.owner == SQL && (m.name == :lower || m.name == :upper)
       [String]
     in Meta::Expr::Call(_, m, _, [], nil, _) if (m.singleton && m.owner == SQL && m.name == :now) || Translator.bare_now?(m)
+      [Time]
+    in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) if !m.singleton && m.owner == Time && (m.name == :+ || m.name == :-)
       [Time]
     in Meta::Expr::Call(_, m, _, _, nil, _) if m.singleton && m.owner == SQL
       [Bool]
@@ -1401,6 +1425,22 @@ class Translator
   # Whether `m` is the `now` written bare in a query's block:
   # `Rotor::Compare`'s, not a model's or anything else's of that name.
   def self.bare_now?(m: Meta::MethodRef) -> Bool = m.name == :now && m.extension == Compare
+
+  # `pieces` (a number) times an interval of `unit`: `($1::bigint *
+  # interval '1 microsecond')`.
+  private def interval(pieces: Array[Piece], unit: String) -> Sql
+    node([Piece::Text.new("(").as(Piece)] + pieces + [Piece::Text.new(" * interval '#{unit}')").as(Piece)], ATOM)
+  end
+
+  # Whether `e` is a `Duration`: a captured one, or `n.hours` and the
+  # like of a number.
+  private def duration?(e: Meta::Expr) -> Bool
+    case e
+    in Meta::Expr::Capture(index, _, _) then look(Bind::Capture.new(index)).is_a?(Duration)
+    in Meta::Expr::Call(Meta::Expr, m, _, [], nil, _) then (m.owner == Int || m.owner == Float) && UNITS.has_key?(m.name)
+    else false
+    end
+  end
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
   # of literals or a captured array).

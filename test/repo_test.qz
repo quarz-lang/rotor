@@ -551,6 +551,22 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#76: a Duration against the server: exact to the microsecond.
+  def test_time_and_duration
+    with_repo do |repo|
+      repo.insert(Member.new(name: "old"))
+      m = repo.insert(Member.new(name: "new"))
+      at = m.created_at
+      tiny = 1.ms * 0.001
+      names = ->(q: Rotor::Query[Member]) { repo.all(q.order { |x| x.id }).map { |x| x.name } }
+      assert_equal(["old", "new"], names.call(Member.where { created_at > at - 1.hour }))
+      assert_equal(["new"], names.call(Member.where { created_at + tiny > at }))
+      assert_equal(Array[String].new, names.call(Member.where { created_at - tiny >= at }))
+      n = 2
+      assert_equal(Array[String].new, names.call(Member.where { created_at < at - n.days }))
+    end
+  end
+
   # rotor#73: the rows a statement changed, as models.
   def test_rows_a_statement_returns
     with_repo do |repo|

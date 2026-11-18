@@ -698,6 +698,23 @@ class QueryTest < Test::Case
     assert_match(/calling `now` uses `self`, which has the non-shareable type Holder and cannot be captured by a shareable procedure/, out.stderr)
   end
 
+  # rotor#76: `Time + Duration` and `Time - Duration` as intervals.
+  def test_time_and_duration
+    at = Time.at(1_700_000_000).utc
+    span = 90.seconds + 500.ms
+    check(Person.where { joined <= at - span }, "#{COLS} WHERE \"joined\" <= $1::timestamptz - ($2::bigint * interval '1 microsecond')", [at, 90_500_000])
+    check(Person.where { joined + 24.hours > at }, "#{COLS} WHERE \"joined\" + (24 * interval '1 hour') > $1", [at])
+    n = 3
+    check(Person.where { joined - n.days < at }, "#{COLS} WHERE \"joined\" - ($1::bigint * interval '24 hours') < $2", [3, at])
+    check(Person.where { joined > at - 1.5.minutes }, "#{COLS} WHERE \"joined\" > $1::timestamptz - ($2::double precision * interval '1 minute')", [at, 1.5])
+    assert_equal("UPDATE \"people\" SET \"joined\" = \"joined\" + ($1::bigint * interval '1 microsecond')", Person.query.update { {joined: joined + span} }.to_sql[0])
+    # Out: `Time - Time`, and comparing `Duration`s.
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { joined - at > span } }
+    assert_match(/`Time - Time`/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| span > 1.hour } }
+    assert_match(/a comparison of `Duration`s/, e.message)
+  end
+
   def test_order_limit_offset
     check(Person.order { name }, "#{COLS} ORDER BY \"name\"", [])
     check(Person.order { name }.desc.order { |p| p.id }, "#{COLS} ORDER BY \"name\" DESC, \"id\"", [])
@@ -928,7 +945,9 @@ class QueryTest < Test::Case
     check(Person.where { (if admin then age else score end) + 1 > 2 }, "#{COLS} WHERE CASE WHEN \"admin\" THEN \"age\" ELSE \"score\" END + 1 > 2", [])
     d = 3.seconds
     e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| d > d } }
-    assert_match(/\Aa value of class Duration cannot be translated to SQL/, e.message)
+    # (A captured `Duration` is an interval now, #76: comparing two is
+    # what is refused.)
+    assert_match(/\Aa comparison of `Duration`s cannot be translated to SQL/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Person.order { |p| 1 } }
     assert_match(/\Aan order by a constant cannot be translated to SQL/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Person.where { name.start_with?(name) } }
