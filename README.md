@@ -414,8 +414,15 @@ PG::Pool.open("postgres://app@localhost/shop") do |pool|
   repo.exec("VACUUM members")                                 # rows changed
   repo.query(User, "SELECT * FROM users WHERE age > $1", [18])  # Array[User]
   repo.query("SELECT id, name FROM users") { |r| Summary.new(r.int(0), r.string(1)) }
+  repo.query("SELECT tags FROM posts") { |r| r.strings(0) }   # Array[Array[String?]]
 end
 ```
+
+- `repo.query`'s block reads a row with `Rotor::Row`'s typed readers:
+  `int`, `float`, `string`, `bool`, `time`, `bytes`, and for an array
+  column `ints`, `floats`, `strings`, `bools`, `times` (its elements
+  nil for NULL; one dimension), each with a `?` form that gives nil
+  for a NULL value; the others raise `ArgumentError` on one.
 
 - `run(statement)` gives the rows changed and `run(query)` the rows;
   the others are conveniences over them.
