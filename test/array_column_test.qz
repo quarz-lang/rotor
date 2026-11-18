@@ -46,6 +46,29 @@ class ArrayColumnTextTest < Test::Case
     end
   end
 
+  # One site of an array column's new value: the translation kept for it
+  # serves a later call only for a captured array of the same kind (its
+  # element class and whether it holds a nil: `Binds.kind`), so the
+  # element check runs again for another kind.
+  def retag(xs: Array[String?] | Array[Int]) -> Rotor::Changes[Tagged] = Tagged.where { |t| t.id == 1 }.update { |t| {tags: xs} }
+
+  def test_an_update_site_checks_each_kind
+    first: Array[String?] = ["a"]
+    assert_equal(1, retag(first).to_sql[1].size)
+    nils: Array[String?] = ["a", nil]
+    e = assert_raise(ArgumentError) { retag(nils) }
+    assert_match(/\ATagged#tags takes an Array of String, not \["a", nil\]/, e.message)
+    ints: Array[Int] = [1]
+    e = assert_raise(ArgumentError) { retag(ints) }
+    assert_match(/\ATagged#tags takes an Array of String, not \[1\]/, e.message)
+    # The same kind again: the kept translation, and it still fits.
+    again: Array[String?] = ["b", "c"]
+    sql, params = retag(again).to_sql
+    assert_equal("UPDATE \"tagged\" SET \"tags\" = $1 WHERE \"id\" = 1", sql)
+    expected: Array[Object?] = [["b", "c"]]
+    assert_equal(expected, params)
+  end
+
   def test_query_blocks
     xs = ["a"]
     cols = "SELECT \"id\", \"tags\", \"scores\" FROM \"tagged\""
