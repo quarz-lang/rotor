@@ -1,6 +1,6 @@
 # What a parameter of a statement may be: the values PostgreSQL is
 # given (a symbol as its name).
-type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol | Items
+type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol | Items | Array[Int?] | Array[String?]
 
 # An array parameter: one class's values (pg sends it as one array).
 type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Time] | Array[Bytes] | Array[Symbol]

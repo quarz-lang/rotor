@@ -230,7 +230,7 @@ class Query[T]
         lists.each_with_index.map do |cols, i|
           values: Hash[Symbol, Object?] = {}
           cols.each do |c|
-            values = values.put(c.name, r.value(at, c.type))
+            values = values.put(c.name, r.column_value(at, c))
             at += 1
           end
           Fetched.new(values, @sources[i].fetch.nil?)

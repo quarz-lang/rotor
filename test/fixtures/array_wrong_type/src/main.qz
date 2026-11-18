@@ -1,0 +1,13 @@
+class Tag < Rotor::Model
+  table "tags" do
+    column :id, Int, primary: true
+    column :names, Array[String]
+    column :counts, Array[Int?], null: true
+  end
+end
+
+p Tag.new(names: [1])
+p Tag.new(names: ["a", nil])
+p Tag.new(names: ["a"]).with(counts: ["x"])
+p Tag.new(names: ["a"]).with(counts: [1, nil])
+p Tag.new(names: ["a"]).with(counts: nil)

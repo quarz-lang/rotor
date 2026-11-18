@@ -1,7 +1,10 @@
 # What a model's `table` block runs on, at compile time: each of its
 # calls declares a column or an association. Its `column` takes the
 # column's type as a class: `Int`, `Float`, `String`, `Bool`, `Time` or
-# `Bytes`, one overload each, so that a default is of the column's type.
+# `Bytes`, one overload each, so that a default is of the column's type;
+# or an array of `String`s or `Int`s (`Array[String]`, `text[]`;
+# `Array[Int]`, `bigint[]`), its elements non-null unless declared `T?`
+# (`Array[String?]`), without a default.
 #
 # - `null: true`: the column admits NULL, and its getter returns `T?`.
 # - `default:`: the value a model made with `new` starts with (not for
@@ -61,6 +64,29 @@ class Schema
   # A `Bytes` column (`bytea`).
   def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "bytea", Bytes, null, default, primary, redact)
+  end
+
+  # An array column of `String`s (`text[]`), its elements never NULL: a
+  # NULL element read raises `ArgumentError` (declare `Array[String?]`
+  # for one that may hold them).
+  def column(name: Symbol, type: Type[Array[String]], *, null: Bool = false, redact: Bool = false) -> Void
+    add(name, "text[]", Array, null, nil, false, redact, String, false)
+  end
+
+  # An array column of `String`s that may be nil (`text[]`).
+  def column(name: Symbol, type: Type[Array[String?]], *, null: Bool = false, redact: Bool = false) -> Void
+    add(name, "text[]", Array, null, nil, false, redact, String, true)
+  end
+
+  # An array column of `Int`s (`bigint[]`), its elements never NULL, as
+  # `Array[String]`'s.
+  def column(name: Symbol, type: Type[Array[Int]], *, null: Bool = false, redact: Bool = false) -> Void
+    add(name, "bigint[]", Array, null, nil, false, redact, Int, false)
+  end
+
+  # An array column of `Int`s that may be nil (`bigint[]`).
+  def column(name: Symbol, type: Type[Array[Int?]], *, null: Bool = false, redact: Bool = false) -> Void
+    add(name, "bigint[]", Array, null, nil, false, redact, Int, true)
   end
 
   # `created_at` and `updated_at`, `Time` columns (`timestamptz`) that
@@ -288,7 +314,7 @@ class Schema
   # The methods of `Rotor::Model` that a column's getter would replace.
   RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?]
 
-  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false) -> Void
+  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false, element: Type[Object]? = nil, nils: Bool = false) -> Void
     if RESERVED.include?(name)
       raise ArgumentError.new("#{@model}'s column `#{name}` would replace the model's own `#{name}`")
     end
@@ -301,6 +327,6 @@ class Schema
     if primary && null
       raise ArgumentError.new("#{@model}'s primary key `#{name}` cannot be NULL")
     end
-    @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact)]
+    @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact, element, nils)]
   end
 end

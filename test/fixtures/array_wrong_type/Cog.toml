@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/array_column_test.qz): an array
+# column's keyword of `new` and `with` is typed in full. It is checked
+# against this checkout of rotor.
+[cog]
+name = "array_wrong_type"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

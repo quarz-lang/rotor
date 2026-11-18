@@ -568,6 +568,9 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in Bool then c.type == Bool
     in Time then c.type == Time
     in Bytes then c.type == Bytes
+    # (An array column's value: of the column's element, nils where it
+    # admits them.)
+    in Array then !c.element.nil? && Model.value(v) == v
     end
   end
 end

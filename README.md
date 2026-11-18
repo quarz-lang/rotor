@@ -19,7 +19,7 @@ Work in progress. What exists: the schema, queries and statements as values (`to
 ```crystal
 class User < Rotor::Model
   table "users" do                      # `table do`: `users` from the class's name
-    column :id, Int, primary: true      # Int, Float, String, Bool, Time, Bytes
+    column :id, Int, primary: true      # Int, Float, String, Bool, Time, Bytes, Array[String], Array[Int]
     column :name, String
     column :email, String, null: true   # its getter returns String?
     column :age, Int, default: 0
@@ -57,6 +57,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   when the program is compiled), and a `belongs_to`, a `through` or a
   preload that targets one raises `Rotor::SchemaError` when used
   (#63).
+- An array column (#66): `column :tags, Array[String]` (`text[]`) or
+  `Array[Int]` (`bigint[]`). Its elements are non-null: a NULL element
+  read raises `ArgumentError`, unless the column says they may be nil
+  (`Array[String?]`, `Array[Int?]`); `null: true` lets the array itself
+  be NULL. `new` and `with` take it typed in full (`tags: Array[String]`,
+  checked when the program is compiled: quarz-lang/quarz#401's typed
+  keywords), and the getter gives it so. The column keeps its declared
+  element (`Rotor::Column#element`, `#nils`), as a `Type` value carries
+  no type arguments. No `default:`; element tests in query blocks
+  (`tags.include?(x)`) are a later issue.
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`

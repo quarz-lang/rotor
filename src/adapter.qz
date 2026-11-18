@@ -99,6 +99,26 @@ abstract class Row
     end
   end
 
+  # :nodoc:
+  # The `i`-th value as the column `c` reads it: an array column's by
+  # its element (a NULL element raising `ArgumentError` unless the
+  # column's elements may be nil), another's as `value` reads it.
+  def column_value(i: Int, c: Column) -> Object?
+    e = c.element
+    return value(i, c.type) if e.nil?
+    if e == Int
+      xs = ints?(i) || return nil
+      return xs if c.nils
+      raise ArgumentError.new("column `#{c.name}` holds a NULL element: declare it Array[Int?]") if xs.any? { |x| x.nil? }
+      xs.map { |x| x.as(Int) }
+    else
+      ss = strings?(i) || return nil
+      return ss if c.nils
+      raise ArgumentError.new("column `#{c.name}` holds a NULL element: declare it Array[String?]") if ss.any? { |x| x.nil? }
+      ss.map { |x| x.as(String) }
+    end
+  end
+
   private def null(i: Int) -> Nothing = raise ArgumentError.new("column #{i} is NULL")
 end
 

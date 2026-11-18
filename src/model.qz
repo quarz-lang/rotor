@@ -151,7 +151,7 @@ class Model
     def_class_method(:table_info) { Model.own_table!(self, owner, owner_name); info }
     doc "The table's name, columns and primary key, as the class's `table_info`."
     def_method(:table_info) { Model.own_table!(self.class, owner, owner_name); info }
-    keywords = cols.map { |c| Meta::Keyword.new(c.name, c.type, false, nullable: c.null) }
+    keywords = cols.map { |c| Model.keyword(c) }
     doc "A copy with the columns given changed (each an optional keyword), which remembers them as changed."
     def_method(:with, keywords: keywords) do |given| -> Self
       with_values(given)
@@ -368,8 +368,29 @@ class Model
     case v
     in nil then nil
     in Int | Float | String | Bool | Time | Bytes then v
+    in Array
+      if v.is_a?(Array[Int]) then v.as(Array[Int])
+      elsif v.is_a?(Array[String]) then v.as(Array[String])
+      elsif v.is_a?(Array[Int?]) then v.as(Array[Int?])
+      elsif v.is_a?(Array[String?]) then v.as(Array[String?])
+      else raise ArgumentError.new("not a column's value: an Array of other than Ints or Strings")
+      end
     else raise ArgumentError.new("not a column's value: #{v.class.name}")
     end
+  end
+
+  # :nodoc:
+  # The keyword `new` and `with` take for the column `c`: its type, `T?`
+  # for `null: true`; an array column's in full (`Array[String]`,
+  # `Array[Int?]`), its element kept by the column.
+  static def self.keyword(c: Column) -> Meta::Keyword
+    e = c.element
+    return Meta::Keyword.new(c.name, c.type, false, nullable: c.null) if e.nil?
+    item = Meta::TypeRef.of(e)
+    item = Meta::TypeRef.union([item, Meta::TypeRef.of(Nil)]) if c.nils
+    ref = Meta::TypeRef.of(Array, [item])
+    ref = Meta::TypeRef.union([ref, Meta::TypeRef.of(Nil)]) if c.null
+    Meta::Keyword.typed(c.name, ref, false)
   end
 
   # `#<User id: 1, name: "Ann", password: **redacted**>`: a column
@@ -413,6 +434,16 @@ class Model
     end
     unless v.is_a?(c.type)
       raise ArgumentError.new("#{self.class.name}##{c.name} takes #{c.type.name}, not #{v.class.name}")
+    end
+    # (An array's elements: a `Type` value carries no type arguments,
+    # the column keeps them.)
+    if e = c.element
+      fits = if e == Int
+               c.nils ? v.is_a?(Array[Int?]) : v.is_a?(Array[Int])
+             else
+               c.nils ? v.is_a?(Array[String?]) : v.is_a?(Array[String])
+             end
+      raise ArgumentError.new("#{self.class.name}##{c.name} takes an Array of #{e.name}#{c.nils ? "?" : ""}, not #{v.inspect}") unless fits
     end
   end
 
@@ -516,6 +547,33 @@ class Model
         def_method(n) { read_nullable(n).as?(Time) }
       else
         def_method(n) { read_attr(n).as(Time) }
+      end
+    elsif t == Array
+      e = c.element
+      if e == Int && c.nils
+        if c.null
+          def_method(n) { read_nullable(n).as?(Array[Int?]) }
+        else
+          def_method(n) { read_attr(n).as(Array[Int?]) }
+        end
+      elsif e == Int
+        if c.null
+          def_method(n) { read_nullable(n).as?(Array[Int]) }
+        else
+          def_method(n) { read_attr(n).as(Array[Int]) }
+        end
+      elsif c.nils
+        if c.null
+          def_method(n) { read_nullable(n).as?(Array[String?]) }
+        else
+          def_method(n) { read_attr(n).as(Array[String?]) }
+        end
+      else
+        if c.null
+          def_method(n) { read_nullable(n).as?(Array[String]) }
+        else
+          def_method(n) { read_attr(n).as(Array[String]) }
+        end
       end
     else
       if c.null
