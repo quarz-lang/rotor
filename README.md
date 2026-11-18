@@ -491,6 +491,7 @@ PG::Pool.open("postgres://app@localhost/shop") do |pool|
   u = repo.touch(u)                        # updated_at alone
   repo.delete(u)                           # the model; StaleError when its row is gone
   repo.delete_all(q); repo.update_all(q) { {age: age + 1} }   # Int
+  repo.all(q.update { {admin: true} }.returning(:id))          # Array[User]: the rows changed
   repo.transaction { |tx| tx.insert(other) }                  # a Repo on the transaction
   repo.exec("VACUUM members")                                 # rows changed
   repo.query(User, "SELECT * FROM users WHERE age > $1", [18])  # Array[User]
@@ -507,6 +508,13 @@ end
 
 - `run(statement)` gives the rows changed and `run(query)` the rows;
   the others are conveniences over them.
+- `all(statement)` of a statement that says `returning` gives the rows
+  it changed (#73), as models of the columns returned, loaded as
+  `select` loads them (reading another raises
+  `Rotor::NotLoadedError`): a query's `update` and `delete` and a
+  model's `Rotor::Statement.update`, `.delete` and `.insert` are typed
+  by their model (`Rotor::Changes[T]`). One without `returning` is
+  refused: `run` gives its count.
 - Values are decoded by the columns' types through pg's readers, times
   in UTC.
 - Timestamps are set by the repository, never by SQL: `insert` sets

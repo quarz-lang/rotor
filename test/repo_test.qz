@@ -518,6 +518,33 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#73: the rows a statement changed, as models.
+  def test_rows_a_statement_returns
+    with_repo do |repo|
+      ["ann", "bob", "cy"].each_with_index { |n, i| repo.insert(Member.new(name: n, age: 20 + i)) }
+      # `update_all`'s rows, of the columns returned: the others not loaded.
+      older = repo.all(Member.where { age > 20 }.update { |m| {admin: true} }.returning(:id, :name))
+      assert_equal(["bob", "cy"], older.map { |m| m.name }.sort)
+      e = assert_raise(Rotor::NotLoadedError) { older[0].age }
+      assert_match(/was not loaded/, e.message)
+      # Every column: models as loaded.
+      everyone = repo.all(Member.where { admin }.update { |m| {age: m.age + 1} }.returning)
+      assert_equal([22, 23], everyone.map { |m| m.age }.sort)
+      assert(everyone.all? { |m| m.admin && !m.changed? })
+      # A model's update and delete, and a query's delete.
+      bob = repo.all(Member.where { name == "bob" })[0]
+      changed = repo.all((Rotor::Statement.update(bob.with(name: "Bob")) || raise "no change").returning(:name))
+      assert_equal(["Bob"], changed.map { |m| m.name })
+      gone = repo.all(Member.where { admin }.delete.returning(:name))
+      assert_equal(["Bob", "cy"], gone.map { |m| m.name }.sort)
+      assert_equal(["ann"], repo.all(Rotor::Statement.delete(repo.all(Member.query)[0]).returning(:name)).map { |m| m.name })
+      # Nothing changed: no rows.
+      assert_equal(Array[Member].new, repo.all(Member.where { admin }.delete.returning))
+      e2 = assert_raise(ArgumentError) { repo.all(Member.query.delete) }
+      assert_match(/\A`all` of a statement without `returning`/, e2.message)
+    end
+  end
+
   # rotor#72: a correlated `exists?`, against the server.
   def test_exists_of_a_query
     with_repo do |repo|
