@@ -72,6 +72,13 @@ class Schema
     add(name, "timestamptz", Time, null, nil, primary, redact)
   end
 
+  # A `Date` column (`date`), a calendar date; without a default, as a
+  # `Time` column (a `String` column stays valid for a `date` of a table
+  # rotor did not create).
+  def column(name: Symbol, type: Type[Date], *, null: Bool = false, primary: Bool = false, redact: Bool = false) -> Void
+    add(name, "date", Date, null, nil, primary, redact)
+  end
+
   # A `Bytes` column (`bytea`).
   def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "bytea", Bytes, null, default, primary, redact)

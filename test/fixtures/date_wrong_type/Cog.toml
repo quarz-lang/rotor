@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/date_column_test.qz): a `Date`
+# column takes a `Date`, and a `Time` and a `Date` have no order between
+# them. It is checked against this checkout of rotor.
+[cog]
+name = "date_wrong_type"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

@@ -106,6 +106,32 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   order in Quarz), or does not compile (`<`, `+`). A
   changeset takes a `JSON::Value` (`put_change`, `cast`), not text to
   parse. No `default:`.
+- A date column (#98): `column :day, Date` (`date`), read and written
+  as a `Date` (pg's `row.date`), in a composite key too; no `default:`,
+  as for `Time`. In query blocks: `==`, `!=`, `<`, `<=`, `>`, `>=` and
+  `nil?` (a nullable one with Quarz's nil, as other columns), `include?`
+  of a captured array of `Date`s (a `date[]`), an order key, an
+  `update`'s value, and the arithmetic of days: `day + 7` and `day - 7`
+  (SQL's `date + integer`, a `Date`; an `Int` that is not a literal is
+  cast `::integer`) and `day - other` (`date - date`, an `Int` of days).
+  There SQL and Quarz part: Quarz's `Date` raises `RangeError` past the
+  year 9999, while PostgreSQL's `date + integer` goes on to the year
+  5874897 and `::integer` raises past 2**31. So `where { day + n > x }`
+  with a huge `n` is an error from the server (`22003`, "value … is
+  out of range for type integer", as an `integer` column's overflow
+  is, "Parameter types" 2), and **an
+  `update { {day: day + 3_000_000} }` can write a date beyond 9999,
+  which the model then cannot read** (`ArgumentError` from pg's reader,
+  naming the value). A date built in the block (`Date.new(...)`,
+  `Date.parse(...)`) is refused, as a `Time` is: capture a variable.
+  The parts and the calendar (`year`, `month`, `wday`, `next_month`,
+  `next_year`, `strftime`) are refused for now. A `Time` and a `Date`
+  are never equal in Quarz: comparing them is refused (`==`), or does
+  not compile (`<`); converting a `Time` to a date needs a time zone,
+  a later issue. A changeset casts a form's text with `Date.parse?`
+  (ISO `2026-11-20` only; anything else is invalid). There is no
+  `date[]` column type yet. A `date` column may stay `String` (item 5
+  of [Parameter types](#parameter-types)).
 - A document column of a `data` type (#94): `column :prefs, Prefs,
   json: true` is a `jsonb` column whose getter gives a `Prefs`, written
   as the value's JSON (`JSON.generate`) and read with
@@ -575,8 +601,8 @@ that type would not be Quarz's. What follows from it:
    precision is one, so an `Int` row differs from Quarz beyond 2**53
    (#31); its `/` and `%` are refused (above).
 5. **`jsonb`, `json` and `date` columns of tables rotor did not
-   create** are declared `String` (#64), or a document column
-   `JSON::Value` (#93, above). pg reads every column as
+   create** may be declared `String` (#64), as well as a document
+   column `JSON::Value` (#93) or a `Date` (#98, above). pg reads every column as
    text, and a parameter beside such a column takes the column's
    type: a model reads and writes the document as JSON text and the
    date as `YYYY-MM-DD` (pg asks the server for ISO dates), and the

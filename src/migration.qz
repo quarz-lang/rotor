@@ -149,6 +149,12 @@ class TableBuilder
     add(Columns.make(name, "timestamptz", null, default, primary))
   end
 
+  # A `Date` column (`date`): its default only as SQL
+  # (`Rotor::SQL.raw("CURRENT_DATE")`).
+  def column(name: Symbol, type: Type[Date], *, null: Bool = false, default: SQL::Raw? = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "date", null, default, primary))
+  end
+
   # A `Bytes` column (`bytea`).
   def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes | SQL::Raw | Nil = nil, primary: Bool = false) -> Void
     add(Columns.make(name, "bytea", null, default, primary))
@@ -228,6 +234,8 @@ module Columns
       "boolean"
     elsif type == Time
       "timestamptz"
+    elsif type == Date
+      "date"
     elsif type == Bytes
       "bytea"
     else
@@ -438,6 +446,11 @@ abstract class Migration
   # :ditto:
   def add_column(table: Symbol, name: Symbol, type: Type[Time], *, null: Bool = false, default: SQL::Raw? = nil) -> Void
     add(table, Columns.make(name, "timestamptz", null, default, false))
+  end
+
+  # :ditto:
+  def add_column(table: Symbol, name: Symbol, type: Type[Date], *, null: Bool = false, default: SQL::Raw? = nil) -> Void
+    add(table, Columns.make(name, "date", null, default, false))
   end
 
   # :ditto:
