@@ -1,0 +1,183 @@
+require "test"
+
+# `Date` columns (rotor#98): `date`, in a composite key too.
+class DayStat < Rotor::Model
+  table "day_stats" do
+    column :site, String, primary: true
+    column :day, Date, primary: true
+    column :hits, Int
+    column :ends, Date, null: true
+    column :seen_at, Time, null: true
+  end
+end
+
+class DateColumnTextTest < Test::Case
+  COLS = "SELECT \"site\", \"day\", \"hits\", \"ends\", \"seen_at\" FROM \"day_stats\""
+
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*date_column_test\.qz:\d+\)/, "")
+    end
+  end
+
+  def test_columns
+    assert_equal(["text", "date", "bigint", "date", "timestamptz"], DayStat.columns.map { |c| c.sql })
+    assert_equal([:site, :day], DayStat.primary_keys)
+    s = DayStat.new(site: "a", day: Date.new(2026, 11, 20), hits: 3)
+    assert_equal(Date.new(2026, 11, 20), s.day)
+    assert_nil(s.ends)
+    e = assert_raise(ArgumentError) { DayStat.load({site: "a", day: "2026-11-20", hits: 1, ends: nil, seen_at: nil}) }
+    assert_equal("DayStat#day takes Date, not String", e.message)
+  end
+
+  def test_query_blocks
+    d = Date.new(2026, 11, 20)
+    sql, params = DayStat.where { |s| s.day == d }.to_sql
+    assert_equal("#{COLS} WHERE \"day\" = $1", sql)
+    expected: Array[Object?] = [d]
+    assert_equal(expected, params)
+    assert_equal("#{COLS} WHERE \"day\" >= $1", DayStat.where { |s| s.day >= d }.to_sql[0])
+    # A nullable column: Quarz's nil.
+    assert_equal("#{COLS} WHERE \"ends\" IS DISTINCT FROM $1", DayStat.where { |s| s.ends != d }.to_sql[0])
+    # (In a condition a NULL is not true, as Quarz's comparison with nil
+    # is false.)
+    assert_equal("#{COLS} WHERE \"ends\" < $1", DayStat.where { |s| s.ends < d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"ends\" IS NULL", DayStat.where { |s| s.ends.nil? }.to_sql[0])
+    # `include?` of a captured array.
+    days = [d, d + 1]
+    sql, params = DayStat.where { |s| days.include?(s.day) }.to_sql
+    assert_equal("#{COLS} WHERE \"day\" = ANY($1)", sql)
+    # An order key, and an update's value.
+    assert_equal("#{COLS} ORDER BY \"day\"", DayStat.query.order { |s| s.day }.to_sql[0])
+    assert_equal("UPDATE \"day_stats\" SET \"ends\" = $1 WHERE \"day\" = $2", DayStat.where { |s| s.day == d }.update { |s| {ends: d} }.to_sql[0])
+    # Arithmetic: `date + integer`, `date - integer`, `date - date`.
+    assert_equal("#{COLS} WHERE \"ends\" > \"day\" + 7", DayStat.where { |s| s.ends > s.day + 7 }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"day\" - 7 < $1", DayStat.where { |s| s.day - 7 < d }.to_sql[0])
+    assert_equal("#{COLS} WHERE NOT \"ends\" IS NULL AND \"ends\" - \"day\" > 30", DayStat.where { |s| !s.ends.nil? && Rotor::SQL.not_nil(s.ends) - s.day > 30 }.to_sql[0])
+    n = 3
+    assert_equal("#{COLS} WHERE \"day\" + $1::integer = $2", DayStat.where { |s| s.day + n == d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"day\" + \"hits\"::integer > $1", DayStat.where { |s| s.day + s.hits > d }.to_sql[0])
+    assert_equal("#{COLS} WHERE $1::date - \"day\" < 7", DayStat.where { |s| d - s.day < 7 }.to_sql[0])
+    assert_equal("UPDATE \"day_stats\" SET \"ends\" = \"day\" + 30", DayStat.query.update { |s| {ends: s.day + 30} }.to_sql[0])
+  end
+
+  def test_refused
+    d = Date.new(2026, 11, 20)
+    t = Time.utc(2026, 11, 20)
+    s = "2026-11-20"
+    # A `Time` and a `Date`, a `String` and a `Date`: never equal.
+    assert_equal("`x.seen_at == x.day` is always false: a `Time` and a `Date` are never equal", refusal { DayStat.where { |x| x.seen_at == x.day } })
+    assert_equal("`x.day == t` is always false: a `Date` and a `Time` are never equal", refusal { DayStat.where { |x| x.day == t } })
+    assert_equal("`x.day == s` is always false: a `Date` and a `String` are never equal", refusal { DayStat.where { |x| x.day == s } })
+    # The parts and the calendar methods: later.
+    assert_equal("`Date#year` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.year == 2026 } })
+    assert_equal("`Date#next_month` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.next_month == d } })
+    assert_equal("`Date#wday` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.wday == 1 } })
+    assert_equal("`Date#strftime` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.strftime("%Y") == s } })
+  end
+
+  def test_wrong_types_do_not_compile
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/date_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    # A `String` for a `Date`; a `Time` ordered against a `Date` either
+    # way; a `Date` plus a `Float`.
+    [9, 10, 11, 12].each { |n| assert_match(/main\.qz:#{n}:\d+: error/, out.stderr) }
+    refute_match(/main\.qz:1[34]:\d+: error/, out.stderr)
+  end
+
+  def test_changeset
+    a = DayStat.load({site: "a", day: Date.new(2026, 11, 20), hits: 1, ends: nil, seen_at: nil})
+    params: Hash[String, Object?] = {"ends" => "2026-12-01"}
+    c = Rotor::Changeset.cast(a, params, [:ends])
+    assert(c.valid?)
+    assert(c.changes[:ends]? == Date.new(2026, 12, 1))
+    ["2026-13-01", "2026-02-30", "12/01/2026", "2026-12-01T00:00:00Z"].each do |text|
+      bad: Hash[String, Object?] = {"ends" => text}
+      assert(Rotor::Changeset.cast(a, bad, [:ends]).errors.any? { |x| x.field == :ends }, text)
+    end
+    blank: Hash[String, Object?] = {"ends" => ""}
+    assert_nil(Rotor::Changeset.cast(a, blank, [:ends]).changes[:ends]?)
+    Rotor::Changeset.change(a).put_change(:ends, Date.new(2026, 1, 1))
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(a).put_change(:ends, Time.utc(2026, 1, 1)) }
+    assert_equal("2026-01-01 00:00:00 UTC is not a value of DayStat#ends", e.message)
+  end
+
+  def test_schema
+    models: Array[Type[Rotor::Model]] = [DayStat]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"day_stats\" (\"site\" text NOT NULL, \"day\" date NOT NULL, \"hits\" bigint NOT NULL, \"ends\" date, \"seen_at\" timestamptz, PRIMARY KEY (\"site\", \"day\"))"], sql)
+  end
+end
+
+# Against a real server.
+class DateColumnTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS day_stats")
+        models: Array[Type[Rotor::Model]] = [DayStat]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def test_round_trip
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE day_stats")
+      d = Date.new(2026, 11, 20)
+      repo.insert(DayStat.new(site: "a", day: d, hits: 1, ends: Date.new(2027, 1, 31)))
+      repo.insert_all([DayStat.new(site: "a", day: d + 1, hits: 2), DayStat.new(site: "b", day: d, hits: 3, ends: Date.new(1, 1, 1))])
+      # The composite key, a date in it.
+      got = repo.get(DayStat, {site: "a", day: d}) || raise "not found"
+      assert_equal(Date.new(2027, 1, 31), got.ends)
+      assert_equal(Date.new(1, 1, 1), (repo.get(DayStat, {site: "b", day: d}) || raise "not found").ends)
+      assert_equal([2], repo.all(DayStat.where { |x| x.day > d }).map { |x| x.hits })
+      assert_equal([1, 3], repo.all(DayStat.where { |x| x.day == d }.order { |x| x.hits }).map { |x| x.hits })
+      days = [d + 1, d + 5]
+      assert_equal([2], repo.all(DayStat.where { |x| days.include?(x.day) }).map { |x| x.hits })
+      # Arithmetic, on the server.
+      assert_equal([1], repo.all(DayStat.where { |x| !x.ends.nil? && Rotor::SQL.not_nil(x.ends) - x.day > 30 }).map { |x| x.hits })
+      n = 1
+      assert_equal([2], repo.all(DayStat.where { |x| x.day - n == d }).map { |x| x.hits })
+      assert_equal([2, 3], repo.all(DayStat.where { |x| x.day + x.hits == d + 3 }).map { |x| x.hits }.sort)
+      repo.run(DayStat.where { |x| x.hits == 2 }.update { |x| {ends: x.day + 30} })
+      assert_equal(d + 31, (repo.get(DayStat, {site: "a", day: d + 1}) || raise "not found").ends)
+      # An update of the model, and an upsert keyed by the date.
+      u = repo.update(got.with(ends: nil))
+      assert_nil((repo.get(DayStat, {site: "a", day: d}) || raise "not found").ends)
+      up = repo.upsert(Rotor::Statement.insert(DayStat.new(site: "a", day: d, hits: 9)).on_conflict(:site, :day).do_update { |old, new| {hits: new.hits} }) || raise "skipped"
+      assert_equal(9, up.hits)
+      assert_equal(u.day, up.day)
+    ensure
+      c.close
+    end
+  end
+end

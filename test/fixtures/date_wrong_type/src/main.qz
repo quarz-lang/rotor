@@ -1,0 +1,14 @@
+class Visit < Rotor::Model
+  table "visits" do
+    column :id, Int, primary: true
+    column :day, Date
+    column :at, Time
+  end
+end
+
+p Visit.new(day: "2026-11-20", at: Time.utc(2026, 1, 1))
+p Visit.where { |v| v.at < v.day }
+p Visit.where { |v| v.day > Time.utc(2026, 1, 1) }
+p Visit.where { |v| v.day + 1.5 == v.day }
+p Visit.where { |v| v.day - 1 < v.day }
+p Visit.new(day: Date.new(2026, 11, 20), at: Time.utc(2026, 1, 1))

@@ -44,6 +44,7 @@ abstract class Row
   abstract def string?(i: Int) -> String?
   abstract def bool?(i: Int) -> Bool?
   abstract def time?(i: Int) -> Time?
+  abstract def date?(i: Int) -> Date?
   abstract def bytes?(i: Int) -> Bytes?
   # A `json` or `jsonb` value, parsed.
   abstract def json?(i: Int) -> JSON::Value?
@@ -66,6 +67,8 @@ abstract class Row
   end
   # :ditto:
   def time(i: Int) -> Time = time?(i) || null(i)
+  # :ditto:
+  def date(i: Int) -> Date = date?(i) || null(i)
   # :ditto:
   def bytes(i: Int) -> Bytes = bytes?(i) || null(i)
   # :ditto:
@@ -92,6 +95,8 @@ abstract class Row
       string?(i)
     elsif type == Bool
       bool?(i)
+    elsif type == Date
+      date?(i)
     elsif type == Time
       # (In UTC, as the repository writes them.)
       t = time?(i)
@@ -202,6 +207,7 @@ module Adapters
     def string?(i: Int) -> String? = @row.string?(i)
     def bool?(i: Int) -> Bool? = @row.bool?(i)
     def time?(i: Int) -> Time? = @row.time?(i)
+    def date?(i: Int) -> Date? = @row.date?(i)
     def bytes?(i: Int) -> Bytes? = @row.bytes?(i)
     def json?(i: Int) -> JSON::Value? = @row.json?(i)
     def ints?(i: Int) -> Array[Int?]? = @row.ints?(i)

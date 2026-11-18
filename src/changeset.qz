@@ -1,6 +1,6 @@
 # A value a changeset keeps of its parameters: what form and JSON
 # input give for a field (an array or a hash is not one).
-type Param = String | Int | Float | Bool | Time | Bytes
+type Param = String | Int | Float | Bool | Time | Date | Bytes
 
 # A value of an error's `meta`.
 type MetaValue = Int | Float | String | Symbol | Array[Value]
@@ -87,7 +87,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     params.each_pair do |k, v|
       case v
       in nil then kept = kept.put(k, nil)
-      in String | Int | Float | Bool | Time | Bytes then kept = kept.put(k, v)
+      in String | Int | Float | Bool | Time | Date | Bytes then kept = kept.put(k, v)
       else nil
       end
     end
@@ -160,6 +160,9 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
         in "false" | "0" | "off" then [true, false]
         else [false, nil]
         end
+      elsif t == Date
+        # (ISO only, `2026-11-20`: `Date.parse?`.)
+        (dt = Date.parse?(x)) ? [true, dt] : [false, nil]
       elsif t == Time
         begin
           [true, Time.iso8601(Changeset.with_zone(x)).utc]
@@ -180,6 +183,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in Float => x then t == Float && x.finite? ? [true, x] : [false, nil]
     in Bool => b then t == Bool ? [true, b] : [false, nil]
     in Time => tm then t == Time ? [true, tm.utc] : [false, nil]
+    in Date => dt then t == Date ? [true, dt] : [false, nil]
     in Bytes => bs then t == Bytes ? [true, bs] : [false, nil]
     # (A document as it is: a `String` is not parsed into one.)
     in JSON::Value => j then t == JSON::Value ? [true, j] : [false, nil]
@@ -586,6 +590,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in String then c.type == String
     in Bool then c.type == Bool
     in Time then c.type == Time
+    in Date then c.type == Date
     in Bytes then c.type == Bytes
     in JSON::Value then c.type == JSON::Value
     # (An array column's value: of the column's element, nils where it

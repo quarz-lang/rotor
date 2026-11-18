@@ -382,7 +382,7 @@ class Model
   def self.value(v: Object?) -> Value?
     case v
     in nil then nil
-    in Int | Float | String | Bool | Time | Bytes then v
+    in Int | Float | String | Bool | Time | Date | Bytes then v
     in JSON::Value => j then j
     in Array
       if v.is_a?(Array[Int]) then v.as(Array[Int])
@@ -620,6 +620,12 @@ class Model
         def_method(n) { read_nullable(n).as?(Time) }
       else
         def_method(n) { read_attr(n).as(Time) }
+      end
+    elsif t == Date
+      if c.null
+        def_method(n) { read_nullable(n).as?(Date) }
+      else
+        def_method(n) { read_attr(n).as(Date) }
       end
     elsif t == JSON::Value
       if c.null

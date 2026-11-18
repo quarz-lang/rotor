@@ -115,6 +115,14 @@ module Compare
     def >=(other: String?) -> Bool = other.nil? ? false : self >= other.as(String)
   end
 
+  # A `Date` compared with a `Date?`: false for nil.
+  extension Date
+    def <(other: Date?) -> Bool = other.nil? ? false : self < other.as(Date)
+    def <=(other: Date?) -> Bool = other.nil? ? false : self <= other.as(Date)
+    def >(other: Date?) -> Bool = other.nil? ? false : self > other.as(Date)
+    def >=(other: Date?) -> Bool = other.nil? ? false : self >= other.as(Date)
+  end
+
   # A `Time` compared with a `Time?`: false for nil.
   extension Time
     def <(other: Time?) -> Bool = other.nil? ? false : self < other.as(Time)
