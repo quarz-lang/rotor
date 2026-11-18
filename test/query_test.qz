@@ -708,6 +708,14 @@ class QueryTest < Test::Case
     check(Person.where { joined - n.days < at }, "#{COLS} WHERE \"joined\" - ($1::bigint * interval '24 hours') < $2", [3, at])
     check(Person.where { joined > at - 1.5.minutes }, "#{COLS} WHERE \"joined\" > $1::timestamptz - ($2::double precision * interval '1 minute')", [at, 1.5])
     assert_equal("UPDATE \"people\" SET \"joined\" = \"joined\" + ($1::bigint * interval '1 microsecond')", Person.query.update { {joined: joined + span} }.to_sql[0])
+    # A `Duration` computed of others: interval arithmetic.
+    d1 = 1.hour
+    d2 = 30.minutes
+    check(Person.where { joined < at + (1.hours + 30.minutes) }, "#{COLS} WHERE \"joined\" < $1::timestamptz + ((1 * interval '1 hour') + (30 * interval '1 minute'))", [at])
+    check(Person.where { joined > at - span * 2 }, "#{COLS} WHERE \"joined\" > $1::timestamptz - ($2::bigint * interval '1 microsecond') * 2", [at, 90_500_000])
+    check(Person.where { joined < at + (d1 - d2) }, "#{COLS} WHERE \"joined\" < $1::timestamptz + (($2::bigint * interval '1 microsecond') - ($3::bigint * interval '1 microsecond'))", [at, 3_600_000_000, 1_800_000_000])
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| 1.hours + 1.minutes > span } }
+    assert_match(/a comparison of `Duration`s/, e.message)
     # Out: `Time - Time`, and comparing `Duration`s.
     e = assert_raise(Rotor::UntranslatableError) { Person.where { joined - at > span } }
     assert_match(/`Time - Time`/, e.message)

@@ -908,6 +908,15 @@ class Translator
       untranslatable(label, line) unless args.size == 1
       return in_query(r, args[0], line)
     end
+    # A `Duration` computed of others: `interval + interval`, `interval -
+    # interval`, `interval * number`.
+    if m.owner == Duration && args.size == 1 && (name == "+" || name == "-" || name == "*")
+      l = operand(r)
+      if name == "*"
+        return binary(l, "*", cast(operand(args[0])), MUL, true)
+      end
+      return binary(l, name, operand(args[0]), ADD, name == "+")
+    end
     # Every method the call may run, one for each member of a union
     # receiver (`Int#>` and `Nil#>` for an `Int?`'s `>`), is one the
     # translator knows: a primitive's own, or `Rotor::Compare`'s, a
@@ -952,7 +961,7 @@ class Translator
     # `Time + Duration`, `Time - Duration`: on a `timestamptz`, exact
     # for a `Duration`'s hours to microseconds, as in Quarz.
     if m.owner == Time && (name == "+" || name == "-")
-      untranslatable("`Time - Time`", line) unless duration?(a)
+      untranslatable(name == "-" ? "`Time - Time`" : "`Time + Time`", line) unless duration?(a)
       l = cast(operand(r))
       rr = operand(a)
       return with_nulls(binary(l, name, rr, ADD, name == "+"), [l])
@@ -1438,6 +1447,8 @@ class Translator
     case e
     in Meta::Expr::Capture(index, _, _) then look(Bind::Capture.new(index)).is_a?(Duration)
     in Meta::Expr::Call(Meta::Expr, m, _, [], nil, _) then (m.owner == Int || m.owner == Float) && UNITS.has_key?(m.name)
+    # (Of others: `Duration#+`, `#-`, `#*`.)
+    in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) then m.owner == Duration && (m.name == :+ || m.name == :- || m.name == :*)
     else false
     end
   end

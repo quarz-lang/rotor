@@ -407,7 +407,8 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   a captured `Duration` is a parameter of its microseconds
   (`($1::bigint * interval '1 microsecond')`), `n.hours` and the like
   `n` times an interval of the unit, a day being 24 hours as a
-  `Duration`'s (not a calendar day). A `Duration` has no days or months,
+  `Duration`'s (not a calendar day), and a `Duration` computed of others
+  (`+`, `-`, `* n`) interval arithmetic. A `Duration` has no days or months,
   so the arithmetic is exact, as in Quarz. `Time - Time` and comparing
   `Duration`s are refused.
 - Queries are `Shareable` (Quarz's docs/03): a query can be a constant
