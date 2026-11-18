@@ -630,6 +630,23 @@ class QueryTest < Test::Case
     assert_match(/an `Int` or a `String`, as a value|a `String` or an `Int`, as a value/, e.message)
   end
 
+  # rotor#74: where an order's NULLs go.
+  def test_order_nulls
+    check(Gauge.query.order { |g| g.at }.desc.nulls_last, "#{GS} ORDER BY \"at\" DESC NULLS LAST", [])
+    check(Gauge.query.order { |g| g.at }.asc.nulls_first, "#{GS} ORDER BY \"at\" NULLS FIRST", [])
+    check(Gauge.query.order { |g| g.at }.nulls_first, "#{GS} ORDER BY \"at\" NULLS FIRST", [])
+    # `desc` after it: still before the NULLS clause.
+    check(Gauge.query.order { |g| g.level }.nulls_last.desc.order { |g| g.id }, "#{GS} ORDER BY \"level\" DESC NULLS LAST, \"id\"", [])
+    # Without it, PostgreSQL's: nothing written.
+    check(Gauge.query.order { |g| g.at }.desc, "#{GS} ORDER BY \"at\" DESC", [])
+    e = assert_raise(ArgumentError) { Gauge.query.nulls_last }
+    assert_equal("`nulls_last` without an `order` before it", e.message)
+    e = assert_raise(ArgumentError) { Gauge.query.asc }
+    assert_equal("`asc` without an `order` before it", e.message)
+    e = assert_raise(ArgumentError) { Gauge.query.order { |g| g.at }.nulls_last.nulls_first }
+    assert_equal("`nulls_first` of an order that says where its NULLs go already", e.message)
+  end
+
   def test_order_limit_offset
     check(Person.order { name }, "#{COLS} ORDER BY \"name\"", [])
     check(Person.order { name }.desc.order { |p| p.id }, "#{COLS} ORDER BY \"name\" DESC, \"id\"", [])
