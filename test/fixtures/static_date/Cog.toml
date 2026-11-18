@@ -1,0 +1,15 @@
+# A program `quarz run` runs (test/date_column_test.qz): a `Date` a
+# `static def` of a dependency gives, baked into a query block by
+# `static(...)` (quarz-lang/quarz#897). It runs against this checkout of
+# rotor.
+[cog]
+name = "static_date"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+DateLib = { git = "https://github.com/quarz-lang/static-date-lib", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }
+DateLib = { path = "lib" }

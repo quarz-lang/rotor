@@ -1,0 +1,4 @@
+# A date known when the program is compiled.
+class Start
+  static def self.date -> Date = Date.new(2026, 1, 1)
+end

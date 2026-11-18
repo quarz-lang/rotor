@@ -1,0 +1,5 @@
+# The dependency whose `static def` the fixture calls.
+[cog]
+name = "static_date_lib"
+version = "0.1.0"
+module = "DateLib"
