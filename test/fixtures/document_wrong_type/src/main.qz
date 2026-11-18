@@ -28,3 +28,16 @@ class Listed < Rotor::Model
     column :entries, Array[Entry], json: true
   end
 end
+data Box[T] = (value: T)
+class Boxed < Rotor::Model
+  table "boxed" do
+    column :id, Int, primary: true
+    column :box, Box, json: true
+  end
+end
+class BoxedInt < Rotor::Model
+  table "boxed_ints" do
+    column :id, Int, primary: true
+    column :box, Box[Int], json: true
+  end
+end

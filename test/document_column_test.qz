@@ -132,6 +132,10 @@ class DocumentColumnTextTest < Test::Case
     assert_match(/main\.qz:6:\d+: error: `def_method\(:__rotor_document_owner\)`: `JSON\.decode` in the block cannot decode into Owner: `Owner` is a class/, out.stderr)
     assert_match(/main\.qz:12:\d+: error: .*json: false/, out.stderr)
     assert_match(/main\.qz:26:\d+: error: .*wrap the Array in one/, out.stderr)
+    # A generic `data` type, without or with type arguments: a `Type`
+    # value carries none.
+    assert_match(/main\.qz:33:\d+: error: `def_method\(:__rotor_document_box\)`: `T` is `Box`, whose type arguments are not known here/, out.stderr)
+    assert_match(/main\.qz:39:\d+: error: `def_method\(:__rotor_document_box\)`: `T` is `Box`, whose type arguments are not known here/, out.stderr)
     refute_match(/main\.qz:1[89]:\d+: error/, out.stderr)
   end
 end

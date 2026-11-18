@@ -113,7 +113,11 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   strings, `Bool`, `Time`, `Symbol`, `Bytes`, other `data` types,
   arrays, hashes, nullable fields); an `Array` or `Hash` is a field of
   one (`data Log = (entries: Array[Entry])`), as a `Type` value in
-  `table` carries no type arguments. A type `JSON.decode` cannot take
+  `table` carries no type arguments (for the same reason a generic
+  `data` type, `Box` or `Box[Int]`, is an error when the program is
+  compiled). The model holds the document as its `JSON::Value`: `to_h`
+  and `inspect` (and what reads them, a serializer) give the document,
+  not the `data` value, which the getter gives. A type `JSON.decode` cannot take
   is an error when the program is compiled, reported at the `table`
   line and naming the column's generated decoder
   (`__rotor_document_<column>`) and the type; `json: false` is
