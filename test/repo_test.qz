@@ -436,8 +436,9 @@ class RepoTest < Test::Case
       repo.insert(Document.new(body: "{\"x\": 1, \"y\": 2}", day: "2026-10-01"))
       doc = "{\"y\":2,\"x\":1}"
       assert_equal(1, repo.count(Document.where { body == doc }))
-      # A date compares and orders as a date.
-      from = "2026-11-01"
+      # A date compares and orders as a date: `20261101` is the ISO date
+      # 2026-11-01, where as text it sorts after every `2026-...`.
+      from = "20261101"
       assert_equal([d.id], repo.all(Document.where { day >= from }).map { |x| x.id })
       assert_equal(["2026-10-01", "2026-11-19"], repo.all(Document.query.order { |x| x.day }).map { |x| x.day })
       # The server checks the values; `json` has no equality.
@@ -445,6 +446,14 @@ class RepoTest < Test::Case
       assert_raise(PG::ServerError) { repo.insert(Document.new(body: "{}", day: "2026-02-30")) }
       text = "{}"
       assert_raise(PG::ServerError) { repo.count(Document.where { |x| x.raw == text }) }
+      # What rotor writes for a `String` elsewhere does not fit them: a
+      # parameter cast `::text`, `LIKE`, and `+`, which is jsonb's `||`.
+      flag = true
+      assert_raise(PG::ServerError) { repo.count(Document.where { day >= (flag ? from : text) }) }
+      assert_raise(PG::ServerError) { repo.count(Document.where { body.include?("x") }) }
+      more = "{\"z\": 3}"
+      repo.update_all(Document.where { |x| x.id == d.id }) { |x| {body: x.body + more} }
+      assert_equal("[1, 2, {\"z\": 3}]", (repo.get(Document, d.id) || raise "not found").body)
     end
   end
 

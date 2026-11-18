@@ -378,7 +378,13 @@ that type would not be Quarz's. What follows from it:
    doc` is jsonb equality, where key order and spacing do not count
    (Quarz's `String#==` would compare the text); a `json` column has
    no equality (an error from the server); `day >= "2026-11-01"` and
-   `order { day }` compare dates. (test/repo_test.qz checks these.)
+   `order { day }` compare dates. Some of what rotor writes for
+   `String`s does not fit them: a parameter it casts `::text` (in a
+   `CASE`'s branch, item 1: `day >= (b ? x : y)`) is an error from
+   the server; `include?`, `start_with?` and `end_with?` (`LIKE`) are
+   errors; `+` on a `jsonb` column is jsonb's `||`, which
+   concatenates documents (merges objects, appends to arrays).
+   (test/repo_test.qz checks these.)
 
 ## Running them: `Rotor::Repo`
 
