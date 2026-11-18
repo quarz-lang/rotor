@@ -94,8 +94,15 @@ class Model
   # makes), `with`, and the class's metadata: `columns`,
   # `table_name` (`name`, by default the class's name in snake_case,
   # plural), `primary_key` and `associations`. A class has one `table`
-  # block.
-  static def self.table(name: String? = nil, &block: Schema.() -> Void) -> Void
+  # block. `schema:` names the PostgreSQL schema the table is in, which
+  # qualifies it in every statement (`"archive"."orders"`); without it
+  # the connection's `search_path` finds the table. `table_name` is the
+  # name alone, as are the names derived from it (a changeset's
+  # constraint names, `Rotor::Schema.create`'s indexes), as PostgreSQL
+  # names indexes and constraints without the schema.
+  static def self.table(name: String? = nil, *, schema: String? = nil, &block: Schema.() -> Void) -> Void
+    space = schema
+    Columns.ident(space) if space
     # (`table` generates `with`, keywords only, giving the model: an
     # ancestor that has one ran its own `table`. Seen when that ran
     # first: in a cog this one depends on, or before in this cog's
@@ -103,10 +110,10 @@ class Model
     if methods.any? { |m| m.name == :with && m.result <= Model && m.params.all? { |q| q.kind == Meta::ParamKind::Keyword } }
       raise SchemaError.new("#{self.name} subclasses a model with a table: a model's superclass is Rotor::Model or a class without a `table` (single-table inheritance is not provided)")
     end
-    schema = Schema.new(self.name)
-    schema.instance_exec(&block)
-    cols = schema.columns
-    assocs = schema.associations
+    decl = Schema.new(self.name)
+    decl.instance_exec(&block)
+    cols = decl.columns
+    assocs = decl.associations
     table = name || Inflector.pluralize(Inflector.underscore(self.name))
     key = cols.find { |c| c.primary }&.name
     # (First: a second `table` block in the class is refused at it,
@@ -124,8 +131,8 @@ class Model
     def_class_method(:primary_key) { Model.own_table!(self, owner, owner_name); key }
     doc "The associations, in order."
     def_class_method(:associations) { Model.own_table!(self, owner, owner_name); assocs }
-    stamps = schema.timestamp_columns
-    info = TableInfo.new(table, cols, key, stamps[0], stamps[1], assocs)
+    stamps = decl.timestamp_columns
+    info = TableInfo.new(table, cols, key, stamps[0], stamps[1], assocs, space)
     doc "The table's name, columns and primary key."
     def_class_method(:table_info) { Model.own_table!(self, owner, owner_name); info }
     doc "The table's name, columns and primary key, as the class's `table_info`."

@@ -1,0 +1,174 @@
+require "test"
+
+# Models of tables in another PostgreSQL schema (rotor#62), beside a
+# table of the same name on the search path that they must not reach.
+class QLedger < Rotor::Model
+  table "qs_ledgers", schema: "annex" do
+    column :id, Int, primary: true
+    column :title, String
+    timestamps
+    has_many QEntry
+    has_many QLabel, through: QLedgerLabel
+  end
+end
+
+class QEntry < Rotor::Model
+  table "qs_entries", schema: "annex" do
+    column :id, Int, primary: true
+    column :amount, Int
+    belongs_to QLedger
+  end
+end
+
+class QLedgerLabel < Rotor::Model
+  table "qs_ledger_labels", schema: "annex" do
+    column :id, Int, primary: true
+    belongs_to QLedger
+    belongs_to QLabel
+  end
+end
+
+class QLabel < Rotor::Model
+  table "qs_labels", schema: "annex" do
+    column :id, Int, primary: true
+    column :name, String
+  end
+end
+
+# The statements' text, without a server.
+class SchemaNameTextTest < Test::Case
+  T = Time.at(1_700_000_000).utc
+
+  def test_metadata
+    assert_equal("qs_ledgers", QLedger.table_name)
+    assert_equal("annex", QLedger.table_info.schema)
+    assert_equal("\"annex\".\"qs_ledgers\"", Rotor::Dialect.table("qs_ledgers", "annex"))
+    assert_equal("\"a\"\"b\".\"c\"", Rotor::Dialect.table("c", "a\"b"))
+  end
+
+  def test_queries_and_statements
+    assert_equal("SELECT \"id\", \"title\", \"created_at\", \"updated_at\" FROM \"annex\".\"qs_ledgers\" WHERE \"title\" = $1", QLedger.where { title == "x" }.to_sql[0])
+    l = QLedger.load({id: 3, title: "t", created_at: T, updated_at: T})
+    assert_equal("INSERT INTO \"annex\".\"qs_labels\" (\"name\") VALUES ($1)", Rotor::Statement.insert(QLabel.new(name: "n")).to_sql[0])
+    assert_equal("UPDATE \"annex\".\"qs_ledgers\" SET \"title\" = $1 WHERE \"id\" = $2", (Rotor::Statement.update(l.with(title: "u")) || raise "no update").to_sql[0])
+    assert_equal("DELETE FROM \"annex\".\"qs_ledgers\" WHERE \"id\" = $1", Rotor::Statement.delete(l).to_sql[0])
+    assert_equal("UPDATE \"annex\".\"qs_entries\" SET \"amount\" = 0 WHERE \"amount\" > 1", QEntry.where { amount > 1 }.update { |e| {amount: 0} }.to_sql[0])
+    assert_equal("DELETE FROM \"annex\".\"qs_entries\" WHERE \"amount\" > 1", QEntry.where { amount > 1 }.delete.to_sql[0])
+    assert_match(/ FROM "annex"\."qs_ledgers" AS "q0" INNER JOIN "annex"\."qs_entries" AS "q1" ON /, QLedger.query.join { q_entries }.to_sql[0])
+    assert_match(/ FROM "annex"\."qs_ledgers" AS "q0" INNER JOIN "annex"\."qs_labels" AS "q1" ON /, QLedger.query.join(QLabel) { |a, b| a.id == b.id }.to_sql[0])
+    assert_equal("SELECT \"id\", \"name\" FROM \"annex\".\"qs_labels\" WHERE \"id\" IN (SELECT \"q_label_id\" FROM \"annex\".\"qs_ledger_labels\" WHERE \"q_ledger_id\" = $1)", l.q_labels.query.to_sql[0])
+  end
+
+  def test_schema_create_operations
+    models: Array[Type[Rotor::Model]] = [QLedger, QEntry, QLedgerLabel, QLabel]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert(sql.any? { |s| s.start_with?("CREATE TABLE \"annex\".\"qs_ledgers\" (") }, sql.inspect)
+    # The index's name is bare: PostgreSQL makes it in its table's schema.
+    assert(sql.include?("CREATE INDEX \"qs_entries_q_ledger_id_index\" ON \"annex\".\"qs_entries\" (\"q_ledger_id\")"), sql.inspect)
+    assert(sql.include?("ALTER TABLE \"annex\".\"qs_entries\" ADD FOREIGN KEY (\"q_ledger_id\") REFERENCES \"annex\".\"qs_ledgers\" (\"id\")"), sql.inspect)
+  end
+end
+
+# Against a real server: every statement reaches the schema's tables,
+# never the search path's table of the same name.
+class SchemaNameTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  # (Dropped first: PG_TEST_URL's server outlives a run.)
+  SETUP = <<~SQL
+    DROP SCHEMA IF EXISTS annex CASCADE;
+    CREATE SCHEMA annex;
+    DROP TABLE IF EXISTS qs_ledgers;
+    CREATE TABLE qs_ledgers (id bigserial PRIMARY KEY, title text NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);
+    INSERT INTO qs_ledgers (title, created_at, updated_at) VALUES ('decoy', now(), now())
+  SQL
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        c.exec_all(SETUP)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def test_every_statement_reaches_the_schema
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      models: Array[Type[Rotor::Model]] = [QLedger, QEntry, QLedgerLabel, QLabel]
+      decoy = ->() { repo.query("SELECT count(*), min(title) FROM public.qs_ledgers", []) { |r| [r.int(0), r.string(1)] } }
+      Rotor::Schema.create(repo, models)
+      Rotor::Schema.create(repo, models, if_not_exists: true)
+      tables = repo.query("SELECT tablename FROM pg_tables WHERE schemaname = 'annex' ORDER BY tablename", []) { |r| r.string(0) }
+      assert_equal(["qs_entries", "qs_labels", "qs_ledger_labels", "qs_ledgers"], tables)
+      indexes = repo.query("SELECT indexname FROM pg_indexes WHERE schemaname = 'annex' AND tablename = 'qs_entries' ORDER BY indexname", []) { |r| r.string(0) }
+      assert(indexes.include?("qs_entries_q_ledger_id_index"), indexes.inspect)
+
+      # insert, update, touch, get.
+      l = repo.insert(QLedger.new(title: "a"))
+      assert_equal(1, l.id)
+      l = repo.update(l.with(title: "b"))
+      l = repo.touch(l)
+      assert_equal("b", (repo.get(QLedger, l.id) || raise "not found").title)
+      assert_equal(1, repo.count(QLedger.query))
+
+      # A join, a preload, update_all and delete_all.
+      [5, 7].each { |n| repo.insert(QEntry.new(amount: n, q_ledger_id: l.id)) }
+      assert_equal(2, repo.count(QLedger.query.join { q_entries }))
+      assert_equal([5, 7], repo.preload(l) { q_entries }.q_entries.map { |e| e.amount }.sort)
+      assert_equal(1, repo.update_all(QEntry.where { amount > 6 }) { |e| {amount: 6} })
+      assert_equal(2, repo.delete_all(QEntry.where { amount > 0 }))
+
+      # Through a join model: replace_through, the association's query,
+      # a preload.
+      labels = ["x", "y"].map { |n| repo.insert(QLabel.new(name: n)) }
+      saved = repo.update!(Rotor::Changeset.change(l).put_assoc(:q_labels, labels))
+      assert_equal(["x", "y"], repo.all(saved.q_labels.query).map { |x| x.name }.sort)
+      assert_equal(["x", "y"], repo.preload(saved) { q_labels }.q_labels.map { |x| x.name }.sort)
+      repo.update!(Rotor::Changeset.change(saved).put_assoc(:q_labels, [labels[1]]))
+      assert_equal(1, repo.count(QLedgerLabel.query))
+
+      # A changeset's checks: its query, and a constraint by its bare
+      # name (`<table>_<field>_index`).
+      assert(!Rotor::Changeset.cast(QLabel, {"name" => "x"}, [:name]).unsafe_validate_unique([:name], repo).valid?)
+      repo.exec("CREATE UNIQUE INDEX qs_labels_name_index ON annex.qs_labels (name)")
+      case repo.insert(Rotor::Changeset.cast(QLabel, {"name" => "y"}, [:name]).unique_constraint(:name))
+      in Rotor::Outcome::Invalid(cs) then assert_equal(:unique, cs.errors[0].validation)
+      in Rotor::Outcome::Ok then flunk("a duplicate name was saved")
+      end
+
+      # delete.
+      repo.delete_all(QLedgerLabel.query)
+      repo.delete(l)
+      assert_equal(0, repo.count(QLedger.query))
+      # The search path's table was never touched.
+      assert_equal([[1, "decoy"]], decoy.call)
+
+      Rotor::Schema.drop(repo, models)
+      left = repo.query("SELECT count(*) FROM pg_tables WHERE schemaname = 'annex'", []) { |r| r.int(0) }
+      assert_equal([0], left)
+      assert_equal([[1, "decoy"]], decoy.call)
+    ensure
+      c.close
+    end
+  end
+end

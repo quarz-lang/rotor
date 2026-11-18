@@ -1,6 +1,7 @@
 # What a model's table is, for the statements made from its values and
-# the repository that sets its timestamps.
-data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [])
+# the repository that sets its timestamps: its name, and the schema
+# that qualifies it (nil: the connection's `search_path` finds it).
+data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [], schema: String? = nil)
 
 # A table a query reads: the first, or one joined to it, with the
 # conditions of its JOIN (`INNER JOIN ... ON` them, `CROSS JOIN` for
@@ -123,8 +124,8 @@ class Query[T]
   def where_through(k: ThroughKeys, value: Value) -> Query[T]
     rows!("where_through")
     single!("where_through")
-    j = k.join.table_name
-    sub = " IN (SELECT #{Dialect.quote(k.target_key.to_s)} FROM #{Dialect.quote(j)} WHERE #{Dialect.quote(k.owner_key.to_s)} = "
+    jt = k.join.table_info
+    sub = " IN (SELECT #{Dialect.quote(k.target_key.to_s)} FROM #{Dialect.table(jt.name, jt.schema)} WHERE #{Dialect.quote(k.owner_key.to_s)} = "
     pieces: Array[Piece] = [Piece::Column.new(0, k.target_pk), Piece::Text.new(sub), Piece::Param.new(Binds.parameter(value)), Piece::Text.new(")")]
     copy(wheres: @wheres + [Sql.new(pieces, Translator::LIKE, nil, nil, false)])
   end
@@ -415,7 +416,7 @@ class Query[T]
   # say which rows).
   def delete -> Statement
     plain!("delete")
-    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.quote(table.name)}")] + where_pieces, nil)
+    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.table(table.name, table.schema)}")] + where_pieces, nil)
   end
 
   # The rows' update: the block gives a hash literal of columns and their
@@ -564,7 +565,7 @@ class Query[T]
             in _ then t.untranslatable("an `update` block that is not a hash literal", Translator.line_of(e))
             end
     t.untranslatable("an `update` of no column", Translator.line_of(e)) if pairs.empty?
-    sets: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(table.name)} SET ")]
+    sets: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.table(table.name, table.schema)} SET ")]
     seen: Array[Symbol] = []
     pairs.each_with_index do |pair, i|
       key, value = pair
@@ -657,12 +658,12 @@ class Query[T]
   # ` FROM` its tables: in a join, each with its alias, joined by its
   # conditions.
   private def from_pieces -> Array[Piece]
-    first = Dialect.quote(table.name)
+    first = Dialect.table(table.name, table.schema)
     return [Piece::Text.new(" FROM #{first}").as(Piece)] if @sources.size == 1
     out: Array[Piece] = [Piece::Text.new(" FROM #{first} AS #{alias_of(0)}")]
     @sources.each_with_index do |s, i|
       next if i == 0
-      name = "#{Dialect.quote(s.table.name)} AS #{alias_of(i)}"
+      name = "#{Dialect.table(s.table.name, s.table.schema)} AS #{alias_of(i)}"
       out = if s.on.empty?
               out + [Piece::Text.new(" CROSS JOIN #{name}")]
             else

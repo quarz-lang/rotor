@@ -430,7 +430,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
                 conds = conds + ["#{Dialect.quote(k.to_s)} <> #{Dialect.param(fields.size + 1)}"]
                 params = params + [own]
               end
-              found = repo.query("SELECT 1 FROM #{Dialect.quote(info.name)} WHERE #{conds.join(" AND ")} LIMIT 1", params) { |r| r.int(0) }
+              found = repo.query("SELECT 1 FROM #{Dialect.table(info.name, info.schema)} WHERE #{conds.join(" AND ")} LIMIT 1", params) { |r| r.int(0) }
               !found.empty?
             end
     taken ? add_error(fields[0], message, validation: :unsafe_unique) : self

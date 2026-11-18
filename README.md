@@ -44,6 +44,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   for `null: true`), a getter for each association (Associations, below), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
   `primary_key` (`Symbol?`) and `associations`
   (`Array[Rotor::Association]`).
+- `table "orders", schema: "archive"` names a table in another
+  PostgreSQL schema: every statement rotor writes qualifies it
+  (`"archive"."orders"`), queries, joins, preloads, `through`
+  associations, `Rotor::Schema.create` and `drop` included; without
+  `schema:` the connection's `search_path` finds the table.
+  `table_name` is the name alone (`"orders"`; `table_info.schema` is
+  `"archive"`), and so are the names derived from it, a changeset's
+  constraint names (`orders_email_index`) and `Rotor::Schema.create`'s
+  indexes, as PostgreSQL names indexes and constraints without the
+  schema (#62).
 - A model holds its values in one hash (`to_h`) and remembers the
   columns assigned since it was made or loaded (`changed`, `changed?`;
   `clear_changes` gives it without them). `new` takes each column as

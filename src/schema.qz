@@ -220,16 +220,17 @@ class Schema
       if if_not_exists
         ops.each do |op|
           if op.is_a?(Operation::CreateTable)
-            name = op.as(Operation::CreateTable).name
-            found = tx.query("SELECT to_regclass($1) IS NOT NULL", [Dialect.quote(name)]) { |r| r.bool(0) }
+            ct = op.as(Operation::CreateTable)
+            name = Dialect.table(ct.name, ct.schema)
+            found = tx.query("SELECT to_regclass($1) IS NOT NULL", [name]) { |r| r.bool(0) }
             skip = skip + [name] if found[0]? == true
           end
         end
       end
       ops.each do |op|
         table = case op
-                in Operation::CreateTable(name:) then name
-                in Operation::AddForeignKey(table:) then table
+                in Operation::CreateTable(name:, schema:) then Dialect.table(name, schema)
+                in Operation::AddForeignKey(table:, schema:) then Dialect.table(table, schema)
                 else ""
                 end
         Migrator.render(op).each { |sql| tx.exec(sql) } unless skip.include?(table)
@@ -244,7 +245,7 @@ class Schema
   # missing table is no error.
   def self.drop(repo: Repo, models: Array[Type[Model]], *, if_exists: Bool = false) -> Void
     return if models.empty?
-    names = models.map { |m| Dialect.quote(m.table_name) }
+    names = models.map { |m| Dialect.table(m.table_name, m.table_info.schema) }
     repo.exec("DROP TABLE #{if_exists ? "IF EXISTS " : ""}#{names.join(", ")}")
   end
 
@@ -272,10 +273,10 @@ class Schema
         next unless a.kind == :belongs_to
         key = a.target.primary_key || raise ArgumentError.new("#{m.name} belongs to #{a.target.name}, which has no primary key")
         fk = Columns.ident(a.foreign_key.to_s)
-        indexes = indexes + [Columns.index(info.name, [fk], nil, false, nil, false)]
-        keys = keys + [Operation::AddForeignKey.new(info.name, fk, Reference.new(a.target.table_name, key.to_s, nil)).as(Operation)]
+        indexes = indexes + [Columns.index(info.name, [fk], nil, false, nil, false, schema: info.schema)]
+        keys = keys + [Operation::AddForeignKey.new(info.name, fk, Reference.new(a.target.table_name, key.to_s, nil, a.target.table_info.schema), info.schema).as(Operation)]
       end
-      tables = tables + [Operation::CreateTable.new(Columns.ident(info.name), cols, indexes, false).as(Operation)]
+      tables = tables + [Operation::CreateTable.new(Columns.ident(info.name), cols, indexes, false, info.schema).as(Operation)]
     end
     tables + keys
   end
