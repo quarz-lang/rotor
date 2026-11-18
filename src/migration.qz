@@ -16,13 +16,15 @@ data ColumnDef = (name: String, type: String, null: Bool, default: Default?, pri
 
 # A column's foreign key: the table and column it references, and its
 # `ON DELETE` action (`:cascade`, `:set_null`, `:restrict`,
-# `:no_action`; nil: none written).
-data Reference = (table: String, column: String, on_delete: Symbol?)
+# `:no_action`; nil: none written), and the referenced table's schema
+# (nil: none written).
+data Reference = (table: String, column: String, on_delete: Symbol?, schema: String? = nil)
 
 # An index: its table, columns, name, whether it is unique, its
 # condition (SQL, for a partial index), and whether it is built
-# CONCURRENTLY.
-data IndexDef = (table: String, columns: Array[String], name: String, unique: Bool, where: String?, concurrently: Bool)
+# CONCURRENTLY, and its table's schema (nil: none written; the index is
+# made in its table's schema, and its name is never qualified).
+data IndexDef = (table: String, columns: Array[String], name: String, unique: Bool, where: String?, concurrently: Bool, schema: String? = nil)
 
 # What a column was, for `change_column` to be reversible: its NULL
 # admission and its default (`Rotor::Migration::NO_DEFAULT` for none); nil for what the
@@ -31,9 +33,10 @@ data Was = (null: Bool? = nil, default: DefaultChange? = nil)
 
 # What a migration does, one step: its DSL records these, and
 # `Rotor::Migrator.render` writes their SQL (the one place a dialect is
-# rendered).
+# rendered). A `schema` qualifies a table's name (nil: none written):
+# `Rotor::Schema.create` gives the models' own.
 enum Operation
-  variant CreateTable(name: String, columns: Array[ColumnDef], indexes: Array[IndexDef], if_not_exists: Bool)
+  variant CreateTable(name: String, columns: Array[ColumnDef], indexes: Array[IndexDef], if_not_exists: Bool, schema: String? = nil)
   # (`columns` nil: not given, so not reversible.)
   variant DropTable(name: String, columns: Array[ColumnDef]?, indexes: Array[IndexDef], if_exists: Bool)
   variant RenameTable(name: String, to: String)
@@ -45,7 +48,7 @@ enum Operation
   variant CreateIndex(index: IndexDef)
   # (`index` nil: named alone, so not reversible.)
   variant DropIndex(name: String, index: IndexDef?, concurrently: Bool)
-  variant AddForeignKey(table: String, column: String, reference: Reference)
+  variant AddForeignKey(table: String, column: String, reference: Reference, schema: String? = nil)
   variant Execute(sql: String, down: String?)
 
   # The call that records it, for messages: `create_table :users`.
@@ -243,7 +246,7 @@ module Columns
   end
 
   # An index, named `<table>_<columns>_index` unless `name` is given.
-  def self.index(table: String, columns: Array[String], name: Symbol?, unique: Bool, where: String?, concurrently: Bool) -> IndexDef
+  def self.index(table: String, columns: Array[String], name: Symbol?, unique: Bool, where: String?, concurrently: Bool, *, schema: String? = nil) -> IndexDef
     raise ArgumentError.new("an index of #{table} on no column") if columns.empty?
     n = if given = name
           ident(given.to_s)
@@ -254,7 +257,7 @@ module Columns
           end
           auto
         end
-    IndexDef.new(table, columns, n, unique, where, concurrently)
+    IndexDef.new(table, columns, n, unique, where, concurrently, schema)
   end
 end
 

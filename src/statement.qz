@@ -33,9 +33,9 @@ class Statement
     values = model.to_h
     cols = t.columns.select { |c| values.key?(c.name) }
     if cols.empty?
-      return Statement.new(t, [Piece::Text.new("INSERT INTO #{Dialect.quote(t.name)} DEFAULT VALUES")], nil)
+      return Statement.new(t, [Piece::Text.new("INSERT INTO #{Dialect.table(t.name, t.schema)} DEFAULT VALUES")], nil)
     end
-    pieces: Array[Piece] = [Piece::Text.new("INSERT INTO #{Dialect.quote(t.name)} (#{cols.map { |c| Dialect.quote(c.name.to_s) }.join(", ")}) VALUES (")]
+    pieces: Array[Piece] = [Piece::Text.new("INSERT INTO #{Dialect.table(t.name, t.schema)} (#{cols.map { |c| Dialect.quote(c.name.to_s) }.join(", ")}) VALUES (")]
     cols.each_with_index do |c, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + [Piece::Param.new(values[c.name])]
@@ -51,7 +51,7 @@ class Statement
     changed = model.changed
     return nil if changed.empty?
     values = model.to_h
-    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(t.name)} SET ")]
+    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.table(t.name, t.schema)} SET ")]
     changed.each_with_index do |name, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + [Piece::Text.new("#{Dialect.quote(name.to_s)} = "), Piece::Param.new(values[name]?)]
@@ -62,7 +62,7 @@ class Statement
   # The deletion of `model`'s row, by its primary key.
   def self.delete(model: Model) -> Statement
     t = model.table_info
-    Statement.new(t, [Piece::Text.new("DELETE FROM #{Dialect.quote(t.name)}")] + by_key(model), nil)
+    Statement.new(t, [Piece::Text.new("DELETE FROM #{Dialect.table(t.name, t.schema)}")] + by_key(model), nil)
   end
 
   # The statement, returning the given columns of the rows it changes

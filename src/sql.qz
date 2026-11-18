@@ -81,6 +81,19 @@ module Dialect
   # An identifier, double-quoted: `"user"`, with `"` doubled.
   def self.quote(name: String) -> String = "\"#{name.gsub("\"", "\"\"")}\""
 
+  # A table's name in a statement: `name`, qualified by `schema` when
+  # one is given, each part quoted (`"archive"."orders"`). Every
+  # statement rotor writes names a table through this.
+  #
+  # ```
+  # Rotor::Dialect.table("orders")             # => "\"orders\""
+  # Rotor::Dialect.table("orders", "archive")  # => "\"archive\".\"orders\""
+  # ```
+  def self.table(name: String, schema: String? = nil) -> String
+    s = schema
+    s ? "#{quote(s)}.#{quote(name)}" : quote(name)
+  end
+
   # The `n`-th parameter (from 1): `$n`.
   def self.param(n: Int) -> String = "$#{n}"
 end

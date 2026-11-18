@@ -214,13 +214,14 @@ class Repo
     ids: Array[Value] = targets.map do |t|
       t.to_h[k.target_pk]? || raise ArgumentError.new("`put_assoc` of a #{t.class.name} without its #{k.target_pk}: save it first")
     end
-    join = k.join.table_name
+    ji = k.join.table_info
+    join = Dialect.table(ji.name, ji.schema)
     q = ->(n: Symbol) { Dialect.quote(n.to_s) }
     key_type = k.join.table_info.columns.find { |c| c.name == k.target_key }.as(Column).type
-    have = query("SELECT #{q.call(k.target_key)} FROM #{Dialect.quote(join)} WHERE #{q.call(k.owner_key)} = $1", [id]) { |r| r.value(0, key_type) }
+    have = query("SELECT #{q.call(k.target_key)} FROM #{join} WHERE #{q.call(k.owner_key)} = $1", [id]) { |r| r.value(0, key_type) }
     have.uniq.each do |t|
       next if ids.include?(t.as(Value))
-      exec("DELETE FROM #{Dialect.quote(join)} WHERE #{q.call(k.owner_key)} = $1 AND #{q.call(k.target_key)} = $2", [id, t])
+      exec("DELETE FROM #{join} WHERE #{q.call(k.owner_key)} = $1 AND #{q.call(k.target_key)} = $2", [id, t])
     end
     ids.uniq.each do |t|
       next if have.include?(t)
@@ -271,7 +272,7 @@ class Repo
     values: Hash[Symbol, Object?] = {}
     names.each { |n| values = values.put(n, now) }
     touched = model.with_values(values)
-    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.quote(t.name)} SET ")]
+    pieces: Array[Piece] = [Piece::Text.new("UPDATE #{Dialect.table(t.name, t.schema)} SET ")]
     names.each_with_index do |n, i|
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + [Piece::Text.new("#{Dialect.quote(n.to_s)} = "), Piece::Param.new(now)]
