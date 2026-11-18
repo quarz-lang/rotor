@@ -127,7 +127,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -149,7 +149,8 @@ class RepoTest < Test::Case
     CREATE TABLE volume_genres (id bigserial PRIMARY KEY, volume_id bigint NOT NULL REFERENCES volumes, genre_id bigint NOT NULL REFERENCES genres, position bigint NOT NULL DEFAULT 0);
     CREATE TABLE legacy (id integer PRIMARY KEY, n integer NOT NULL);
     CREATE INDEX legacy_n ON legacy (n);
-    CREATE TABLE documents (id bigserial PRIMARY KEY, body jsonb NOT NULL, raw json, day date NOT NULL)
+    CREATE TABLE documents (id bigserial PRIMARY KEY, body jsonb NOT NULL, raw json, day date NOT NULL);
+    CREATE TABLE arrays (id bigserial PRIMARY KEY, tags text[], counts bigint[], ratios double precision[], flags boolean[], stamps timestamptz[], grid bigint[][])
   SQL
 
   def self.startup
@@ -183,7 +184,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -454,6 +455,32 @@ class RepoTest < Test::Case
       more = "{\"z\": 3}"
       repo.update_all(Document.where { |x| x.id == d.id }) { |x| {body: x.body + more} }
       assert_equal("[1, 2, {\"z\": 3}]", (repo.get(Document, d.id) || raise "not found").body)
+    end
+  end
+
+  # rotor#65: array columns through `Rotor::Row`'s plural readers.
+  def test_array_columns_in_raw_sql
+    with_repo do |repo|
+      repo.exec("INSERT INTO arrays (tags, counts, ratios, flags, stamps, grid) VALUES ('{a,NULL,\"b c\"}', '{1,2}', '{0.5}', '{t,f,NULL}', '{\"2026-11-18 01:02:03+00\"}', '{{1,2},{3,4}}'), (NULL, '{}', NULL, NULL, NULL, NULL)")
+      rows = repo.query("SELECT tags, counts, ratios, flags, stamps FROM arrays ORDER BY id", []) { |r| r }
+      r = rows[0]
+      strings: Array[String?] = ["a", nil, "b c"]
+      ints: Array[Int?] = [1, 2]
+      floats: Array[Float?] = [0.5]
+      bools: Array[Bool?] = [true, false, nil]
+      times: Array[Time?] = [Time.at(1_794_963_723).utc]
+      assert_equal(strings, r.strings(0))
+      assert_equal(ints, r.ints(1))
+      assert_equal(floats, r.floats(2))
+      assert_equal(bools, r.bools(3))
+      assert_equal(times, r.times(4).map { |t| t&.utc })
+      empty = rows[1]
+      assert_nil(empty.strings?(0))
+      assert_equal(Array[Int?].new, empty.ints(1))
+      e = assert_raise(ArgumentError) { empty.strings(0) }
+      assert_equal("column 0 is NULL", e.message)
+      # One dimension only.
+      assert_raise(ArgumentError) { repo.query("SELECT grid FROM arrays ORDER BY id LIMIT 1", []) { |x| x.ints(0) } }
     end
   end
 

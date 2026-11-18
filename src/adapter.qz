@@ -35,7 +35,9 @@ abstract class Rows
 end
 
 # A row's values, read by column index with the column's type: nil for
-# NULL.
+# NULL. An array column (`bigint[]`, `text[]`...) is read by the plural
+# readers (`ints?`, `strings?`...), its elements nil for NULL (one
+# dimension: a deeper array raises `ArgumentError`).
 abstract class Row
   abstract def int?(i: Int) -> Int?
   abstract def float?(i: Int) -> Float?
@@ -43,6 +45,11 @@ abstract class Row
   abstract def bool?(i: Int) -> Bool?
   abstract def time?(i: Int) -> Time?
   abstract def bytes?(i: Int) -> Bytes?
+  abstract def ints?(i: Int) -> Array[Int?]?
+  abstract def floats?(i: Int) -> Array[Float?]?
+  abstract def strings?(i: Int) -> Array[String?]?
+  abstract def bools?(i: Int) -> Array[Bool?]?
+  abstract def times?(i: Int) -> Array[Time?]?
 
   # The `i`-th value, which may not be NULL.
   def int(i: Int) -> Int = int?(i) || null(i)
@@ -59,6 +66,16 @@ abstract class Row
   def time(i: Int) -> Time = time?(i) || null(i)
   # :ditto:
   def bytes(i: Int) -> Bytes = bytes?(i) || null(i)
+  # :ditto:
+  def ints(i: Int) -> Array[Int?] = ints?(i) || null(i)
+  # :ditto:
+  def floats(i: Int) -> Array[Float?] = floats?(i) || null(i)
+  # :ditto:
+  def strings(i: Int) -> Array[String?] = strings?(i) || null(i)
+  # :ditto:
+  def bools(i: Int) -> Array[Bool?] = bools?(i) || null(i)
+  # :ditto:
+  def times(i: Int) -> Array[Time?] = times?(i) || null(i)
 
   # The value of `i` as `type` wants it (`Int`, `Float`, `String`,
   # `Bool`, `Time` or `Bytes`).
@@ -160,5 +177,10 @@ module Adapters
     def bool?(i: Int) -> Bool? = @row.bool?(i)
     def time?(i: Int) -> Time? = @row.time?(i)
     def bytes?(i: Int) -> Bytes? = @row.bytes?(i)
+    def ints?(i: Int) -> Array[Int?]? = @row.ints?(i)
+    def floats?(i: Int) -> Array[Float?]? = @row.floats?(i)
+    def strings?(i: Int) -> Array[String?]? = @row.strings?(i)
+    def bools?(i: Int) -> Array[Bool?]? = @row.bools?(i)
+    def times?(i: Int) -> Array[Time?]? = @row.times?(i)
   end
 end
