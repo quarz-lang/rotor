@@ -179,6 +179,8 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in Bool => b then t == Bool ? [true, b] : [false, nil]
     in Time => tm then t == Time ? [true, tm.utc] : [false, nil]
     in Bytes => bs then t == Bytes ? [true, bs] : [false, nil]
+    # (A document as it is: a `String` is not parsed into one.)
+    in JSON::Value => j then t == JSON::Value ? [true, j] : [false, nil]
     else [false, nil]
     end
   end
@@ -568,6 +570,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in Bool then c.type == Bool
     in Time then c.type == Time
     in Bytes then c.type == Bytes
+    in JSON::Value then c.type == JSON::Value
     # (An array column's value: of the column's element, nils where it
     # admits them.)
     in Array then Model.fits_array?(c, v)

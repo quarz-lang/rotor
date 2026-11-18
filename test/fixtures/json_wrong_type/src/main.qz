@@ -1,0 +1,13 @@
+class Doc < Rotor::Model
+  table "docs" do
+    column :id, Int, primary: true
+    column :body, JSON::Value
+  end
+end
+
+d = Doc.new(body: JSON.parse("{}"))
+p Doc.new(body: "{}")
+p Doc.where { |x| x.body < d.body }
+p Doc.where { |x| x.body + d.body == d.body }
+p Doc.where { |x| x.body == d.body }
+p d.with(body: JSON::Value::Null)

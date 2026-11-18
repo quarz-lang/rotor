@@ -70,6 +70,41 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   an `update`'s value (`{tags: xs}`, a captured array, checked by the
   element); comparing it and element tests (`tags == xs`,
   `tags.include?(x)`, `size`) are a later issue, refused for now.
+- A JSON document column (#93): `column :body, JSON::Value` (`jsonb`;
+  a `json` column of a table rotor did not create is declared the same
+  way). It reads as a `JSON::Value`, parsed from the text the server
+  sends (pg's `row.json`: every row read parses the document; a
+  `select` that leaves the column out, or a `String` column, does not),
+  and is written as its compact text, a parameter left untyped so that
+  it takes the column's type. With `null: true` it is `JSON::Value?`:
+  nil is SQL's NULL and `JSON::Value::Null` the document `null`, apart
+  in values, parameters and `== nil`. A number reads as an `Int`, an
+  exact `Integer` beyond an `Int`, or a `Float` for a fraction or an
+  exponent, while `jsonb` keeps any decimal exactly: a fraction read
+  and written back may change (a `Float` keeps about 17 digits); a
+  column that needs the document's exact text is declared `String`
+  (item 5 of [Parameter types](#parameter-types)). In query blocks:
+  `==` and `!=` against a document (captured, or `JSON::Value::Null`),
+  nil or another column, `nil?`, an `update`'s value (an `if` of two
+  documents is a `CASE` whose branches are cast `::jsonb`, which a
+  `json` column takes too). On a `json` column, which has no equality,
+  `==` and `!=` are an error from the server. On a `jsonb` column the
+  server's equality decides, not Quarz's `JSON::Value#==`: both ignore
+  the members' order and compare numbers by value (`1` and `1.0`,
+  `100` and `1e2` are equal to both), but jsonb keeps a number's
+  decimal exactly where Quarz reads a `Float`: a stored
+  `0.1000000000000000001`, read as `0.1`, does not match `0.1` in a
+  query, though Quarz finds the document read back equal to it. (Today
+  an `Int` beyond 2**53 also equals the `Float` nearest it in Quarz,
+  `9007199254740993` and `9007199254740992.0`, where jsonb finds them
+  different: quarz-lang/quarz#888.) A changeset's change tracking is
+  Quarz's `==`, so putting such a document is no change
+  (test/json_column_test.qz, `PAIRS`). Reading a
+  member (`body["kind"]`) is a later issue; everything else is refused
+  (the document's own methods, an order by it: a `JSON::Value` has no
+  order in Quarz), or does not compile (`<`, `+`). A
+  changeset takes a `JSON::Value` (`put_change`, `cast`), not text to
+  parse. No `default:`.
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`
@@ -503,7 +538,8 @@ that type would not be Quarz's. What follows from it:
    precision is one, so an `Int` row differs from Quarz beyond 2**53
    (#31); its `/` and `%` are refused (above).
 5. **`jsonb`, `json` and `date` columns of tables rotor did not
-   create** are declared `String` (#64). pg reads every column as
+   create** are declared `String` (#64), or a document column
+   `JSON::Value` (#93, above). pg reads every column as
    text, and a parameter beside such a column takes the column's
    type: a model reads and writes the document as JSON text and the
    date as `YYYY-MM-DD` (pg asks the server for ISO dates), and the
@@ -547,7 +583,8 @@ end
 ```
 
 - `repo.query`'s block reads a row with `Rotor::Row`'s typed readers:
-  `int`, `float`, `string`, `bool`, `time`, `bytes`, and for an array
+  `int`, `float`, `string`, `bool`, `time`, `bytes`, `json` (a `json`
+  or `jsonb` value as a `JSON::Value`), and for an array
   column `ints`, `floats`, `strings`, `bools`, `times` (its elements
   nil for NULL; one dimension), each with a `?` form that gives nil
   for a NULL value; the others raise `ArgumentError` on one.

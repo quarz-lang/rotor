@@ -1,6 +1,6 @@
 # What a parameter of a statement may be: the values PostgreSQL is
 # given (a symbol as its name).
-type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol | Items | Array[Int?] | Array[String?]
+type Bindable = Int | Float | String | Bool | Time | Bytes | Symbol | Items | Array[Int?] | Array[String?] | JSON::Value
 
 # An array parameter: one class's values (pg sends it as one array).
 type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Time] | Array[Bytes] | Array[Symbol]
@@ -324,8 +324,20 @@ class Translator
     untranslatable("`#{Translator.show(e)}`, #{what}, as a value", Translator.line_of(e))
   end
 
-  # `one_type` of `e` as a value (an order key).
-  def valued_check(e: Meta::Expr) -> Void = valued(true) { one_type(e) }
+  # `one_type` of `e` as a value (an order key), and `orderable`.
+  def valued_check(e: Meta::Expr) -> Void
+    valued(true) { one_type(e) }
+    orderable(e)
+  end
+
+  # Refuses `e` as an order key when it may be a document: a
+  # `JSON::Value` has no order in Quarz (`jsonb`'s would be the
+  # server's own).
+  def orderable(e: Meta::Expr) -> Void
+    if valued(true) { classes(e) }.include?(JSON::Value)
+      untranslatable("an order by a `JSON::Value`", Translator.line_of(e))
+    end
+  end
 
   # Whether values of the classes `ls` and of `rs` (nil aside) can be
   # equal: a class in both, `Int` and `Float`, nil only or a class the
@@ -817,6 +829,8 @@ class Translator
     # (Beyond an `integer`'s range PostgreSQL types it as a bigint.)
     in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true, nil, nil, nil, i >= -2147483648 && i <= 2147483647)
     in Float | String | Time | Bytes | Symbol then param(value, line)
+    # (`JSON::Value::Null`, the document `null`: a parameter, not NULL.)
+    in JSON::Value then param(value, line)
     else untranslatable("the literal #{value.inspect}", line)
     end
   end
@@ -851,6 +865,9 @@ class Translator
     in Time => x then x
     in Bytes => x then x
     in Symbol => x then x
+    # (A document: its compact text, untyped beside a column, which
+    # gives it the column's type, `jsonb` or `json`.)
+    in JSON::Value => x then x
     else untranslatable("a value of class #{value.class.name}", line)
     end
   end
@@ -1217,7 +1234,7 @@ class Translator
       s = sql(e)
       if s.known
         v = s.value
-        [v.nil? ? Nil : v.class]
+        [v.nil? ? Nil : Binds.class_of(v)]
       elsif c = s.column
         # (Nil too where it can be NULL, past the `nil?` facts.)
         s.nulls ? [c.type, Nil] : [c.type]
@@ -1383,6 +1400,8 @@ class Translator
            in Bool then "boolean"
            in Time then "timestamptz"
            in Bytes then "bytea"
+           # (Only where no column gives it a type: two documents.)
+           in JSON::Value then "jsonb"
            else return s
            end
     Sql.new(s.pieces + [Piece::Text.new("::#{type}")], ATOM, s.column, s.value, s.known, s.bind, s.nulls, s.tri)

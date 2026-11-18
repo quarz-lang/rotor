@@ -66,6 +66,18 @@ class Schema
     add(name, "bytea", Bytes, null, default, primary, redact)
   end
 
+  # A JSON document column (`jsonb`, or a `json` column of a table
+  # rotor did not create), read as a `JSON::Value` (parsed from the text
+  # the server sends: every row read parses it) and written as its
+  # compact text. `null: true` makes it `JSON::Value?`: nil is SQL's
+  # NULL, `JSON::Value::Null` the document `null`. A number reads as an
+  # `Int`, an exact `Integer` or a `Float`, while `jsonb` keeps any
+  # decimal exactly: a fraction read and written back may change (a
+  # column that needs the exact text is declared `String`).
+  def column(name: Symbol, type: Type[JSON::Value], *, null: Bool = false, redact: Bool = false) -> Void
+    add(name, "jsonb", JSON::Value, null, nil, false, redact)
+  end
+
   # An array column of `String`s (`text[]`), its elements never NULL: a
   # NULL element read raises `ArgumentError` (declare `Array[String?]`
   # for one that may hold them).

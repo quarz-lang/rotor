@@ -123,6 +123,7 @@ module Joins
       in :order
         by = bt.operand(body)
         t.untranslatable("an order by a constant", Translator.line_of(body)) if by.known
+        bt.orderable(body)
         # (Rebuilt for each outer row, it would be by a constant there.)
         if bt.reads(body)[n] == Array[Column].new
           t.untranslatable("an order of a `for`'s source by the outer rows alone (order the outer query)", Translator.line_of(body))

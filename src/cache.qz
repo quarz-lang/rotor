@@ -111,6 +111,17 @@ module Binds
     ms * 1000 + ((d - ms.ms).to_f * 1_000_000).round.to_i
   end
 
+  # The class of `v` as a translation sees it: `JSON::Value` for a
+  # document of any variant (whose class is its variant's: a translation
+  # depends on none of them; the document `null` is a value, not SQL's
+  # NULL), else its own.
+  def self.class_of(v: Object) -> Type[Object]
+    case v
+    in JSON::Value then JSON::Value
+    else v.class
+    end
+  end
+
   # The kind of `v`.
   def self.kind(v: Object?) -> Kind
     case v
@@ -121,7 +132,7 @@ module Binds
     # queries of a non-null and of a nullable column: a generic
     # method's `Query[T]`, `T >: String`.)
     in Subquery => q then Kind.new(v.class, nil, q.subquery_nullable?)
-    else Kind.new(v.class)
+    else Kind.new(Binds.class_of(v))
     end
   end
 
@@ -242,6 +253,7 @@ module Binds
     in Time => x then x
     in Bytes => x then x
     in Symbol => x then x
+    in JSON::Value => x then x
     else raise ArgumentError.new("a value of class #{v.class.name} as a parameter")
     end
   end
