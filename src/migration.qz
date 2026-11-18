@@ -149,6 +149,12 @@ class TableBuilder
     add(Columns.make(name, "timestamptz", null, default, primary))
   end
 
+  # A `Decimal` column (`numeric`): its default only as SQL
+  # (`Rotor::SQL.raw("0")`).
+  def column(name: Symbol, type: Type[Decimal], *, null: Bool = false, default: SQL::Raw? = nil, primary: Bool = false) -> Void
+    add(Columns.make(name, "numeric", null, default, primary))
+  end
+
   # A `Date` column (`date`): its default only as SQL
   # (`Rotor::SQL.raw("CURRENT_DATE")`).
   def column(name: Symbol, type: Type[Date], *, null: Bool = false, default: SQL::Raw? = nil, primary: Bool = false) -> Void
@@ -236,6 +242,8 @@ module Columns
       "timestamptz"
     elsif type == Date
       "date"
+    elsif type == Decimal
+      "numeric"
     elsif type == Bytes
       "bytea"
     else

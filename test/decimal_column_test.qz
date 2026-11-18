@@ -1,0 +1,191 @@
+require "test"
+
+# `Decimal` columns (rotor#102): `numeric`, exact.
+class Invoice < Rotor::Model
+  table "invoices" do
+    column :id, Int, primary: true
+    column :total, Decimal
+    column :rate, Decimal, null: true, precision: 5, scale: 2
+    column :approx, Float, null: true
+  end
+end
+
+class DecimalColumnTextTest < Test::Case
+  COLS = "SELECT \"id\", \"total\", \"rate\", \"approx\" FROM \"invoices\""
+
+  def dec(text: String) -> Decimal = Decimal.parse(text)
+
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*decimal_column_test\.qz:\d+\)/, "")
+    end
+  end
+
+  def test_columns
+    assert_equal(["bigint", "numeric", "numeric(5, 2)", "double precision"], Invoice.columns.map { |c| c.sql })
+    i = Invoice.new(total: dec("19.990"))
+    assert_equal("19.990", i.total.to_s)
+    assert_nil(i.rate)
+    e = assert_raise(ArgumentError) { Invoice.load({id: 1, total: 19.99, rate: nil, approx: nil}) }
+    assert_equal("Invoice#total takes Decimal, not Float", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Schema.new("X").column(:x, Decimal, precision: 5) }
+    assert_equal("X's column `x`: give `precision:` and `scale:` together", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Schema.new("X").column(:x, Decimal, precision: 2, scale: 3) }
+    assert_equal("X's column `x`: numeric(2, 3) needs 1 <= precision <= 1000 and 0 <= scale <= precision", e.message)
+  end
+
+  def test_query_blocks
+    d = dec("19.99")
+    sql, params = Invoice.where { |x| x.total >= d }.to_sql
+    assert_equal("#{COLS} WHERE \"total\" >= $1", sql)
+    expected: Array[Object?] = [d]
+    assert_equal(expected, params)
+    assert_equal("#{COLS} WHERE \"total\" = $1", Invoice.where { |x| x.total == d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"rate\" IS DISTINCT FROM $1", Invoice.where { |x| x.rate != d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"rate\" IS NULL", Invoice.where { |x| x.rate.nil? }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"rate\" < $1", Invoice.where { |x| x.rate < d }.to_sql[0])
+    ds = [d, dec("0.5")]
+    assert_equal("#{COLS} WHERE \"total\" = ANY($1)", Invoice.where { |x| ds.include?(x.total) }.to_sql[0])
+    assert_equal("#{COLS} ORDER BY \"total\"", Invoice.query.order { |x| x.total }.to_sql[0])
+    assert_equal("UPDATE \"invoices\" SET \"rate\" = $1", Invoice.query.update { |x| {rate: d} }.to_sql[0])
+    # Arithmetic: exact in `numeric` as in Quarz.
+    assert_equal("#{COLS} WHERE \"total\" + $1::numeric > $2", Invoice.where { |x| x.total + d > d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"total\" * 3 > $1", Invoice.where { |x| x.total * 3 > d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"total\" - \"total\" = $1", Invoice.where { |x| x.total - x.total == d }.to_sql[0])
+    assert_equal("UPDATE \"invoices\" SET \"total\" = \"total\" * 2", Invoice.query.update { |x| {total: x.total * 2} }.to_sql[0])
+    assert_equal("UPDATE \"invoices\" SET \"total\" = \"total\" + 1", Invoice.query.update { |x| {total: x.total + 1} }.to_sql[0])
+    # Unary minus: the operand as it is, never cast to a bigint (which
+    # would round a fraction).
+    assert_equal("#{COLS} WHERE - \"total\" < $1", Invoice.where { |x| -x.total < d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"total\" > - $1::numeric", Invoice.where { |x| x.total > -d }.to_sql[0])
+  end
+
+  def test_refused
+    d = dec("19.99")
+    f = 19.99
+    # Against an `Int` or a `Float`: never equal, as in Quarz
+    # (quarz-lang/quarz#891); `<` does not compile.
+    assert_equal("`x.total == 100` is always false: a `Decimal` and an `Int` are never equal", refusal { Invoice.where { |x| x.total == 100 } })
+    assert_equal("`x.total == f` is always false: a `Decimal` and a `Float` are never equal", refusal { Invoice.where { |x| x.total == f } })
+    assert_equal("`x.approx == x.total` is always false: a `Float` and a `Decimal` are never equal", refusal { Invoice.where { |x| !x.approx.nil? && x.approx == x.total } }.sub("`!x.approx.nil? && ", "`"))
+    # `round` and the other methods: later. (`div` takes keywords, which
+    # a quoted block cannot hold: it does not compile.)
+    assert_equal("`Decimal#round` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.round(1) == d } })
+    assert_equal("`Decimal#abs` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.abs == d } })
+    assert_equal("`Decimal#zero?` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.zero? } })
+    assert_equal("`Decimal#scale` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.scale == 2 } })
+    assert_equal("`Decimal#to_f` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.to_f == f } })
+    # An `Int` into a `Decimal` column: refused, as `with(total: 5)` does
+    # not compile (no `Int` widens to a `Decimal` in Quarz).
+    assert_equal("Invoice#total takes Decimal, not Int", refusal { Invoice.query.update { |x| {total: 5} } })
+  end
+
+  def test_changeset
+    a = Invoice.load({id: 1, total: dec("1.00"), rate: nil, approx: nil})
+    params: Hash[String, Object?] = {"rate" => "0.125"}
+    c = Rotor::Changeset.cast(a, params, [:rate])
+    assert(c.valid?)
+    assert(c.changes[:rate]? == dec("0.125"))
+    ["abc", "1,5", "1e10000", "NaN"].each do |text|
+      bad: Hash[String, Object?] = {"rate" => text}
+      assert(Rotor::Changeset.cast(a, bad, [:rate]).errors.any? { |x| x.field == :rate }, text)
+    end
+    # Change tracking by `==`: `1.0` is `1.00`, so a scale alone is not
+    # written.
+    assert(Rotor::Changeset.change(a).put_change(:total, dec("1.0")).changes.empty?)
+    assert(Rotor::Changeset.change(a).put_change(:total, dec("1.000")).changes.empty?)
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(a).put_change(:total, 1.0) }
+    assert_equal("1.0 is not a value of Invoice#total", e.message)
+  end
+
+  def test_schema
+    models: Array[Type[Rotor::Model]] = [Invoice]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"invoices\" (\"id\" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \"total\" numeric NOT NULL, \"rate\" numeric(5, 2), \"approx\" double precision)"], sql)
+  end
+end
+
+# Against a real server.
+class DecimalColumnTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS invoices")
+        models: Array[Type[Rotor::Model]] = [Invoice]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def dec(text: String) -> Decimal = Decimal.parse(text)
+
+  def test_round_trip
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE invoices RESTART IDENTITY")
+      a = repo.insert(Invoice.new(total: dec("0.1000000000000000001"), rate: dec("0.125")))
+      got = repo.get(Invoice, a.id) || raise "not found"
+      assert_equal("0.1000000000000000001", got.total.to_s)
+      # A `numeric(5, 2)` column rounds on assignment (the server's).
+      assert_equal("0.13", got.rate.as(Decimal).to_s)
+      b = repo.insert(Invoice.new(total: dec("19.990")))
+      assert_equal("19.990", (repo.get(Invoice, b.id) || raise "not found").total.to_s)
+      # Exact comparison on the server.
+      d = dec("0.1")
+      assert_equal([], repo.all(Invoice.where { |x| x.total == d }).map { |x| x.id })
+      e = dec("0.1000000000000000001")
+      assert_equal([a.id], repo.all(Invoice.where { |x| x.total == e }).map { |x| x.id })
+      ds = [e, dec("19.99")]
+      assert_equal([a.id, b.id], repo.all(Invoice.where { |x| ds.include?(x.total) }.order { |x| x.id }).map { |x| x.id })
+      # Arithmetic on the server, exact.
+      t = dec("59.97")
+      assert_equal([b.id], repo.all(Invoice.where { |x| x.total * 3 == t }).map { |x| x.id })
+      repo.run(Invoice.where { |x| x.id == a.id }.update { |x| {total: x.total * 2} })
+      assert_equal("0.2000000000000000002", (repo.get(Invoice, a.id) || raise "not found").total.to_s)
+      # Unary minus of a fraction, on the server: not rounded.
+      neg = dec("-0.2000000000000000002")
+      assert_equal([a.id], repo.all(Invoice.where { |x| -x.total == neg }).map { |x| x.id })
+      # SQL goes on where Quarz stops: `numeric` holds more fraction
+      # digits than a `Decimal`, so an update computing in SQL can write
+      # a value the model cannot read.
+      small = Decimal.new(1, scale: 600)
+      far = repo.insert(Invoice.new(total: small))
+      repo.run(Invoice.where { |x| x.id == far.id }.update { |x| {total: x.total * x.total} })
+      deep = assert_raise(ArgumentError) { repo.get(Invoice, far.id) }
+      assert_match(/: a Decimal's scale is 0 to 1000 \(read the column as a string\)\z/, deep.message)
+      c.exec("DELETE FROM invoices WHERE id = #{far.id}")
+      # NaN in a `numeric` column: the row cannot be read (pg's reader).
+      c.exec("UPDATE invoices SET total = 'NaN' WHERE id = #{b.id}")
+      err = assert_raise(ArgumentError) { repo.get(Invoice, b.id) }
+      assert_equal("NaN: a Decimal cannot hold it (read the column as a string)", err.message)
+    ensure
+      c.close
+    end
+  end
+end
