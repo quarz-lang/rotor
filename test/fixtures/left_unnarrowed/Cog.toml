@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/query_test.qz): a LEFT JOIN's
+# right row is an `R?`, read only where a condition says it is there.
+# It is checked against this checkout of rotor.
+[cog]
+name = "left_unnarrowed"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

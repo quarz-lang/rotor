@@ -1,0 +1,16 @@
+class Shop < Rotor::Model
+  table "shops" do
+    column :id, Int, primary: true
+    has_many Sale
+  end
+end
+
+class Sale < Rotor::Model
+  table "sales" do
+    column :id, Int, primary: true
+    column :shop_id, Int
+    column :kind, String
+  end
+end
+
+p Shop.query.left_join { sales }.where { |s, x| x.kind == "a" }

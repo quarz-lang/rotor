@@ -280,7 +280,15 @@ class Translator
       Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil), narrow, th.test || (el ? el.test : nil))
     in Meta::Expr::Call(recv, m, ms, args, block, line) then call(recv, m, ms, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
-    in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
+    in Meta::Expr::Arg(name, _, line)
+      # (A LEFT JOIN's row, tested for presence where a condition is
+      # (`if c`, `c && ...`, `!c`): its key IS NOT NULL. Anywhere a value
+      # is taken it would be a number the block does not mean.)
+      if (i = left_row(e)) >= 0
+        untranslatable("the row `#{name}` as a value (test it with `#{name}.nil?`, or read a column of it)", line) if @value
+        return present(i)
+      end
+      untranslatable("the parameter `#{name}` by itself", line)
     in Meta::Expr::ArrayLit(_, line) then untranslatable("an array literal", line)
     in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
@@ -935,7 +943,12 @@ class Translator
         return interval(wrap(n, MUL + 1), unit)
       end
       case name
-      in "nil?" then return is_null(operand(r), "IS NULL")
+      in "nil?"
+        # (A LEFT JOIN's row: missing where its key is NULL.)
+        if (i = left_row(r)) >= 0
+          return missing(i)
+        end
+        return is_null(operand(r), "IS NULL")
       in "-@"
         # (`- $1` is ambiguous to PostgreSQL: the parameter cast.)
         # (Of an `integer`, a bigint: `-(-2147483648)` would overflow.)
@@ -961,7 +974,15 @@ class Translator
     # `Time + Duration`, `Time - Duration`: on a `timestamptz`, exact
     # for a `Duration`'s hours to microseconds, as in Quarz.
     if m.owner == Time && (name == "+" || name == "-")
-      untranslatable(name == "-" ? "`Time - Time`" : "`Time + Time`", line) unless duration?(a)
+      # (What cannot be: `Time - Time`, the argument's own (`at + (t1 -
+      # t2)`) or this one's.)
+      unless duration?(a)
+        times = case a
+                in Meta::Expr::Call(Meta::Expr, am, _, [_], nil, _) then am.owner == Time && am.name == :-
+                else false
+                end
+        untranslatable(name == "-" || times ? "`Time - Time`" : "a `Duration` of this form", line)
+      end
       l = cast(operand(r))
       rr = operand(a)
       return with_nulls(binary(l, name, rr, ADD, name == "+"), [l])
@@ -1034,6 +1055,16 @@ class Translator
   # NOT DISTINCT FROM`, as Quarz's `==` takes nil for equal to nil, and
   # `=` when neither can (`n = CASE WHEN ... END`, which an index serves).
   private def compare(le: Meta::Expr, op: String, re: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
+    # (A LEFT JOIN's row against nil: `c == nil` is `c.nil?`; against
+    # anything else it would compare its key, which the block does not
+    # mean: refused as a value below.)
+    if op == "=" || op == "<>"
+      [[le, re], [re, le]].each do |pair|
+        if (i = left_row(pair[0])) >= 0 && pair[1].is_a?(Meta::Expr::Lit) && always_nil?(pair[1])
+          return op == "=" ? missing(i) : present(i)
+        end
+      end
+    end
     l = operand(le)
     r = operand(re)
     untranslatable("a comparison of `Duration`s", line) if duration?(le) || duration?(re)
@@ -1146,6 +1177,8 @@ class Translator
     in Meta::Expr::And(l, r, _) then logical_classes(l, r, true, facts(l, true))
     in Meta::Expr::Or(l, r, _) then logical_classes(l, r, false, facts(l, false))
     in Meta::Expr::Not(_, _, _) then [Bool]
+    # (A LEFT JOIN's row in a condition: whether it is there.)
+    in Meta::Expr::Arg(_, _, _) if left_row(e) >= 0 then [Bool]
     in Meta::Expr::Call(_, m, _, [a], nil, _) if m.singleton && m.owner == SQL && m.name == :not_nil
       classes(a).reject { |k| k == Nil }
     in Meta::Expr::Call(_, m, _, _, nil, _) if m.singleton && m.owner == SQL && (m.name == :lower || m.name == :upper)
@@ -1452,6 +1485,21 @@ class Translator
     else false
     end
   end
+
+  # The table of a LEFT JOIN whose row `e` is, or -1.
+  private def left_row(e: Meta::Expr) -> Int
+    return -1 unless e.is_a?(Meta::Expr::Arg)
+    i = row_of(e)
+    i >= 0 && @sources[i].left ? i : -1
+  end
+
+  # A LEFT JOIN's row `i` missing: its key IS NULL. (One column is
+  # enough: a matched row has every column of its key, which is never
+  # NULL; the loader tests them all, to the same effect.)
+  private def missing(i: Int) -> Sql = postfix(node([Piece::Column.new(i, @sources[i].table.primary_keys[0])], ATOM), "IS NULL", IS)
+
+  # A LEFT JOIN's row `i` there: its key IS NOT NULL.
+  private def present(i: Int) -> Sql = postfix(node([Piece::Column.new(i, @sources[i].table.primary_keys[0])], ATOM), "IS NOT NULL", IS)
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
   # of literals or a captured array).

@@ -29,10 +29,11 @@ end
 
 # A table a query reads: the first, or one joined to it, with the
 # conditions of its JOIN (`INNER JOIN ... ON` them, `CROSS JOIN` for
-# none), the columns it fetches (nil for all of them), and those it
+# none), the columns it fetches (nil for all of them), those it
 # fetches whatever a `select` reads (the key an association's join
-# needs).
-data Source = (table: TableInfo, model: Type[Object], on: Array[Sql], fetch: Array[Column]?, keep: Array[Symbol] = [])
+# needs), and whether its JOIN is a LEFT one (`Rotor::Query#left_join`:
+# its row may be missing, its key then NULL).
+data Source = (table: TableInfo, model: Type[Object], on: Array[Sql], fetch: Array[Column]?, keep: Array[Symbol] = [], left: Bool = false)
 
 # The values of a row's columns from one of a query's tables, and
 # whether those are all of the table's columns.
@@ -597,6 +598,84 @@ class Query[T]
                       })
   end
 
+  # Its rows paired with the rows of an association of theirs (as
+  # `join`), or with nil where a row has none: a LEFT JOIN. The blocks
+  # after it take the right row as `R?`: `c.nil?` is the missing row
+  # (its primary key NULL), and its columns are read where a condition
+  # says it is there (`!c.nil? && c.code == "x"`, `c.nil? ? nil :
+  # c.code`, `if c then c.code end`; `&.` cannot be quoted). `preload`
+  # stays the way to load an association's models; a `has_many`'s LEFT
+  # JOIN repeats the row for each of its models.
+  #
+  # ```
+  # class LCustomer < Rotor::Model
+  #   table "customers" do
+  #     column :id, Int, primary: true
+  #     column :name, String
+  #     has_many LOrder, foreign_key: :customer_id
+  #   end
+  # end
+  #
+  # class LOrder < Rotor::Model
+  #   table "orders" do
+  #     column :id, Int, primary: true
+  #     column :customer_id, Int
+  #   end
+  # end
+  #
+  # LCustomer.query.left_join { l_orders }.where { |c, o| o.nil? }.to_sql[0]
+  # # => "SELECT \"c0\".\"id\", \"c0\".\"name\", \"o1\".\"id\", \"o1\".\"customer_id\" FROM \"customers\" AS \"c0\" LEFT JOIN \"orders\" AS \"o1\" ON \"o1\".\"customer_id\" = \"c0\".\"id\" WHERE \"o1\".\"id\" IS NULL"
+  # ```
+  def left_join[R <: Model](&assoc: Quoted[shareable T.() -> HasMany[R]] using Compare) -> Query[[T, R?]]
+    proc = assoc.proc
+    left_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { t.instance_exec(&proc) })
+  end
+
+  # :ditto:
+  def left_join[R <: Model](&assoc: Quoted[shareable (T) -> HasMany[R]] using Compare) -> Query[[T, R?]]
+    proc = assoc.proc
+    left_association(assoc.expr, assoc.file, assoc.site, ->(t: T) { proc.call(t) })
+  end
+
+  # Its rows paired with the rows of `other` for which the block is true,
+  # or with nil where none is: a LEFT JOIN on the condition (as `join`'s),
+  # the right row an `R?` in the blocks after it (`left_join` of an
+  # association says how to read it).
+  def left_join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool] using Compare) -> Query[[T, R?]]
+    joining!
+    keys = Query.left_keys(other.table_info, other.name)
+    joined = @sources + [Source.new(other.table_info, other, [], nil)]
+    captures = cond.captures
+    on = Binds.fill_sql(Cache.fetch(Cache::CONDITIONS, Cache.key(cond.site, joined), captures) do
+      t, e = Translator.of(joined, cond.expr, captures, cond.file)
+      [t.sql(e), t.guards]
+    end, captures)
+    base = @loader
+    Query[[T, R?]].new(@sources + [Source.new(other.table_info, other, [on], nil, keys, true)], @wheres, @orders, false, nil, nil, Shape::Rows,
+                       ->(rows: Array[Array[Fetched]]) {
+                         ts = base.call(rows.map { |r| [r[0]] })
+                         out: Array[[T, R?]] = []
+                         ts.each_with_index { |x, i| out = out + [[x, Query.left_row(other, keys, rows[i][1])]] }
+                         out
+                       })
+  end
+
+  # :nodoc:
+  # The key of a LEFT JOIN's right table, which says whether its row is
+  # there: `ArgumentError` for a table without one.
+  def self.left_keys(t: TableInfo, name: String) -> Array[Symbol]
+    keys = t.primary_keys
+    raise ArgumentError.new("`left_join` of #{name}, which has no primary key: a missing row is told by it") if keys.empty?
+    keys
+  end
+
+  # :nodoc:
+  # The right model of a LEFT JOIN's row, or nil where it has none (its
+  # key NULL).
+  def self.left_row[R <: Model](target: Type[R], keys: Array[Symbol], f: Fetched) -> R?
+    keys.all? { |k| f.values[k]?.nil? } ? nil : Joins.load(target, f)
+  end
+
   # The number of rows: `SELECT count(*)`.
   def count -> Query[Int]
     unshaped!("count")
@@ -654,6 +733,28 @@ class Query[T]
             [Piece::Text.new("SELECT ")] + select_list + from + where_pieces + order_pieces + window + locking
           end
     qualified(out)
+  end
+
+  private def left_association[R <: Model](expr: Meta::Expr, file: String, site: Int, get: shareable (T) -> HasMany[R]) -> Query[[T, R?]]
+    joining!
+    first = @sources[0]
+    a, key = Cache.fetch(Cache::ASSOCIATIONS, Cache.key(site, @sources), Array[Object].new) do
+      t, e = translator(expr, Array[Object].new, file)
+      [Joins.association(t, e, 0, first), Array[Guard].new]
+    end
+    keys = Query.left_keys(a.target.table_info, a.target.name)
+    target = Source.new(a.target.table_info, a.target, [Joins.key_condition(1, a.foreign_key, 0, key)], nil, keys, true)
+    base = @loader
+    Query[[T, R?]].new([Source.new(first.table, first.model, first.on, first.fetch, first.keep + [key]), target], @wheres, @orders, false, nil, nil, Shape::Rows,
+                       ->(rows: Array[Array[Fetched]]) {
+                         ts = base.call(rows.map { |r| [r[0]] })
+                         out: Array[[T, R?]] = []
+                         if one = ts.first?
+                           model = get.call(one).target
+                           ts.each_with_index { |x, i| out = out + [[x, Query.left_row(model, keys, rows[i][1])]] }
+                         end
+                         out
+                       })
   end
 
   private def join_association[R <: Model](expr: Meta::Expr, file: String, site: Int, get: shareable (T) -> HasMany[R]) -> Query[[T, R]]
@@ -855,7 +956,7 @@ class Query[T]
       out = if s.on.empty?
               out + [Piece::Text.new(" CROSS JOIN #{name}")]
             else
-              out + [Piece::Text.new(" INNER JOIN #{name} ON ")] + conjunction(s.on)
+              out + [Piece::Text.new(" #{s.left ? "LEFT" : "INNER"} JOIN #{name} ON ")] + conjunction(s.on)
             end
     end
     out

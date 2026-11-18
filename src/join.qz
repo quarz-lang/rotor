@@ -25,7 +25,7 @@ module Joins
       [InnerPlan.new(t.reads(e), inner.sources.drop(sources.size), inner.orders), t.guards]
     end
     outer = sources.each_with_index.map { |s, i| fetching(s, kept.reads[i]) }
-    joined = kept.joined.map { |s| Source.new(s.table, s.model, s.on.map { |x| Binds.fill_sql(x, captures) }, s.fetch, s.keep) }
+    joined = kept.joined.map { |s| Source.new(s.table, s.model, s.on.map { |x| Binds.fill_sql(x, captures) }, s.fetch, s.keep, s.left) }
     Plan.new(outer + joined, kept.orders.map { |o| [Binds.fill_sql(o[0], captures), o[1]] })
   end
 
@@ -33,7 +33,7 @@ module Joins
   # for nil.
   def self.fetching(s: Source, reads: Array[Column]?) -> Source
     fetch = reads ? s.table.columns.select { |c| reads.include?(c) || s.keep.include?(c.name) } : nil
-    Source.new(s.table, s.model, s.on, fetch, s.keep)
+    Source.new(s.table, s.model, s.on, fetch, s.keep, s.left)
   end
 
   # The `has_many` association whose getter `e` calls on the row of
@@ -119,7 +119,7 @@ module Joins
       case name
       in :where | :filter
         s = sources[n]
-        sources = sources.take(n) + [Source.new(s.table, s.model, s.on + [bt.sql(body)], s.fetch, s.keep)] + sources.drop(n + 1)
+        sources = sources.take(n) + [Source.new(s.table, s.model, s.on + [bt.sql(body)], s.fetch, s.keep, s.left)] + sources.drop(n + 1)
       in :order
         by = bt.operand(body)
         t.untranslatable("an order by a constant", Translator.line_of(body)) if by.known
