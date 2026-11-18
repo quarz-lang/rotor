@@ -1,0 +1,209 @@
+require "test"
+
+# Array columns (rotor#66): `text[]` and `bigint[]`, elements non-null
+# unless declared `T?`.
+class Tagged < Rotor::Model
+  table "tagged" do
+    column :id, Int, primary: true
+    column :tags, Array[String]
+    column :scores, Array[Int?], null: true
+  end
+end
+
+class ArrayColumnTextTest < Test::Case
+  def test_columns
+    assert_equal(["bigint", "text[]", "bigint[]"], Tagged.columns.map { |c| c.sql })
+    tags = Tagged.columns[1]
+    assert(tags.element == String && !tags.nils)
+    scores = Tagged.columns[2]
+    assert(scores.element == Int && scores.nils && scores.null)
+  end
+
+  def test_values
+    t = Tagged.new(tags: ["a", "b"])
+    expected: Array[String] = ["a", "b"]
+    assert_equal(expected, t.tags)
+    assert_nil(t.scores)
+    s = t.with(scores: [1, nil])
+    ints: Array[Int?] = [1, nil]
+    assert_equal(ints, s.scores)
+    sql, params = Rotor::Statement.insert(s).to_sql
+    assert_equal("INSERT INTO \"tagged\" (\"tags\", \"scores\") VALUES ($1, $2)", sql)
+    assert_equal(2, params.size)
+    # A loaded row is checked by the column's element.
+    e = assert_raise(ArgumentError) { Tagged.load({id: 1, tags: ["a", nil], scores: nil}) }
+    assert_match(/Tagged#tags takes an Array of String, not/, e.message)
+  end
+
+  # A query's blocks on array columns: what translates, and what is
+  # refused (element tests are a later issue, #66).
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*array_column_test\.qz:\d+\)/, "")
+    end
+  end
+
+  # One site of an array column's new value: the translation kept for it
+  # serves a later call only for a captured array of the same kind (its
+  # element class and whether it holds a nil: `Binds.kind`), so the
+  # element check runs again for another kind.
+  def retag(xs: Array[String?] | Array[Int]) -> Rotor::Changes[Tagged] = Tagged.where { |t| t.id == 1 }.update { |t| {tags: xs} }
+
+  def test_an_update_site_checks_each_kind
+    first: Array[String?] = ["a"]
+    assert_equal(1, retag(first).to_sql[1].size)
+    nils: Array[String?] = ["a", nil]
+    e = assert_raise(ArgumentError) { retag(nils) }
+    assert_match(/\ATagged#tags takes an Array of String, not \["a", nil\]/, e.message)
+    ints: Array[Int] = [1]
+    e = assert_raise(ArgumentError) { retag(ints) }
+    assert_match(/\ATagged#tags takes an Array of String, not \[1\]/, e.message)
+    # The same kind again: the kept translation, and it still fits.
+    again: Array[String?] = ["b", "c"]
+    sql, params = retag(again).to_sql
+    assert_equal("UPDATE \"tagged\" SET \"tags\" = $1 WHERE \"id\" = 1", sql)
+    expected: Array[Object?] = [["b", "c"]]
+    assert_equal(expected, params)
+  end
+
+  def test_query_blocks
+    xs = ["a"]
+    cols = "SELECT \"id\", \"tags\", \"scores\" FROM \"tagged\""
+    assert_equal("`Array#==` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags == xs } })
+    assert_equal("`Array#include?` on an array SQL does not have cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.include?("x") } })
+    assert_equal("`Array#size` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.size > 0 } })
+    assert_equal("`Array#empty?` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.empty? } })
+    assert_equal("an array literal cannot be translated to SQL", refusal { Tagged.query.update { |t| {tags: t.tags + ["x"]} } })
+    # (An order by an array column is PostgreSQL's array order.)
+    assert_equal("#{cols} ORDER BY \"tags\"", Tagged.query.order { |t| t.tags }.to_sql[0])
+    # NULL of a `null: true` array column: translated.
+    assert_equal("#{cols} WHERE \"scores\" IS NULL", Tagged.where { |t| t.scores.nil? }.to_sql[0])
+    assert_equal("#{cols} WHERE \"scores\" IS NULL", Tagged.where { |t| t.scores == nil }.to_sql[0])
+    # `select` (in Quarz, of the columns it reads) and an update's value.
+    assert_equal("SELECT \"tags\" FROM \"tagged\"", Tagged.query.select { |t| t.tags }.to_sql[0])
+    sql, params = Tagged.where { |t| t.id == 1 }.update { |t| {tags: xs} }.to_sql
+    assert_equal("UPDATE \"tagged\" SET \"tags\" = $1 WHERE \"id\" = 1", sql)
+    assert_equal(1, params.size)
+    # A captured array is a value only as an array column's new value:
+    # elsewhere refused, as rotor refuses it.
+    names = ["a", "b"]
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.name == names } })
+    ids = [1, 2]
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.id == ids } })
+    assert_equal("a value of class Array cannot be translated to SQL", refusal { Person.where { |p| p.name == Rotor::SQL.not_nil(names) } })
+    wrong = [1]
+    assert_equal("Tagged#tags takes an Array of String, not [1]", refusal { Tagged.query.update { |t| {tags: wrong} } })
+  end
+
+  # A changeset's change of an array column is tested as the model's
+  # value is (`Rotor::Model.fits_array?`).
+  def test_changeset
+    t = Tagged.load({id: 1, tags: ["a"], scores: nil})
+    ok: Array[String] = ["b"]
+    Rotor::Changeset.change(t).put_change(:tags, ok)
+    ints: Array[Int?] = [1, nil]
+    Rotor::Changeset.change(t).put_change(:scores, ints)
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(t).put_change(:tags, [1, 2]) }
+    assert_equal("[1, 2] is not a value of Tagged#tags", e.message)
+    nils: Array[String?] = ["a", nil]
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(t).put_change(:tags, nils) }
+    assert_equal("[\"a\", nil] is not a value of Tagged#tags", e.message)
+  end
+
+  def test_schema
+    models: Array[Type[Rotor::Model]] = [Tagged]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"tagged\" (\"id\" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \"tags\" text[] NOT NULL, \"scores\" bigint[])"], sql)
+  end
+
+  def test_wrong_types_do_not_compile
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/array_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:9:\d+: error/, out.stderr)
+    assert_match(/main\.qz:10:\d+: error/, out.stderr)
+    assert_match(/main\.qz:11:\d+: error/, out.stderr)
+    refute_match(/main\.qz:1[23]:\d+: error/, out.stderr)
+  end
+end
+
+# Against a real server.
+class ArrayColumnTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS tagged")
+        models: Array[Type[Rotor::Model]] = [Tagged]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def test_round_trip
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE tagged RESTART IDENTITY")
+      t = repo.insert(Tagged.new(tags: ["a", "b c", ""], scores: [3, nil]))
+      got = repo.get(Tagged, t.id) || raise "not found"
+      tags: Array[String] = ["a", "b c", ""]
+      scores: Array[Int?] = [3, nil]
+      assert_equal(tags, got.tags)
+      assert_equal(scores, got.scores)
+      u = repo.update(got.with(tags: Array[String].new, scores: nil))
+      again = repo.get(Tagged, u.id) || raise "not found"
+      assert_equal(Array[String].new, again.tags)
+      assert_nil(again.scores)
+      # `insert_all` of rows with an array, one empty and one with a NULL
+      # element (each parameter's type inferred in a multi-row VALUES).
+      c.exec("TRUNCATE tagged RESTART IDENTITY")
+      empty = Tagged.new(tags: Array[String].new, scores: [1, nil])
+      made = repo.insert_all([empty, Tagged.new(tags: ["x", "y"], scores: Array[Int?].new)])
+      byid = made.sort_by { |m| m.id }
+      assert_equal([Array[String].new, ["x", "y"]], byid.map { |m| m.tags })
+      ints: Array[Int?] = [1, nil]
+      assert_equal(ints, byid[0].scores)
+      # `upsert` with a DO UPDATE of the array, and `returning` rows.
+      c.exec("CREATE UNIQUE INDEX IF NOT EXISTS tagged_tags_key ON tagged (tags)")
+      up = repo.upsert(Rotor::Statement.insert(Tagged.new(tags: ["x", "y"], scores: [9])).on_conflict(:tags).do_update { |old, new| {scores: new.scores} }) || raise "skipped"
+      nine: Array[Int?] = [9]
+      assert_equal(nine, up.scores)
+      zs = ["z"]
+      back = repo.all(Tagged.where { |x| x.id == up.id }.update { |x| {tags: zs} }.returning)
+      z: Array[String] = ["z"]
+      assert_equal(z, back[0].tags)
+      c.exec("DROP INDEX tagged_tags_key")
+      # A NULL element in a column whose elements are not nilable.
+      c.exec("UPDATE tagged SET tags = ARRAY['x', NULL]")
+      e = assert_raise(ArgumentError) { repo.get(Tagged, t.id) }
+      assert_equal("column `tags` holds a NULL element: declare it Array[String?]", e.message)
+    ensure
+      c.close
+    end
+  end
+end

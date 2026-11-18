@@ -1,12 +1,12 @@
 # A value a column holds: what `Rotor::Column#default` may be.
-type Value = Int | Float | String | Bool | Time | Bytes
+type Value = Int | Float | String | Bool | Time | Bytes | Array[Int] | Array[String] | Array[Int?] | Array[String?]
 
 # A column of a model's table, as its `table` block declares it.
 data Column = (
   # The column's name, which is also its getter's.
   name: Symbol,
   # Its SQL type (`bigint`, `double precision`, `text`, `boolean`,
-  # `timestamptz`, `bytea`).
+  # `timestamptz`, `bytea`, `text[]`, `bigint[]`).
   sql: String,
   # Its Quarz type: `Int`, `Float`, `String`, `Bool`, `Time` or `Bytes`.
   type: Type[Object],
@@ -18,7 +18,13 @@ data Column = (
   default: Value?,
   # Whether its value is hidden from `inspect` (a password, a token):
   # `**redacted**` shows instead.
-  redact: Bool = false
+  redact: Bool = false,
+  # For an array column (`type` `Array`): its elements' class (`Int`,
+  # `String`), and whether they may be nil (`Array[String?]`); nil for
+  # another column. (A `Type` value carries no type arguments: the
+  # column keeps its declared element here.)
+  element: Type[Object]? = nil,
+  nils: Bool = false
 )
 
 # An association of a model, as its `table` block declares it: what the

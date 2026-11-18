@@ -14,6 +14,9 @@ enum Bind
   variant Like(of: Bind, name: String)
   # A captured `Duration` as its microseconds, an `interval`'s unit.
   variant Micros(of: Bind)
+  # A captured array as one parameter, an array column's new value
+  # (`update { {tags: xs} }`); nowhere else is an array a value.
+  variant Whole(index: Int)
   # A captured query, as a subquery (`col IN (SELECT ...)`): its pieces,
   # its parameters among them, in the place of the one piece.
   variant Subquery(index: Int)
@@ -91,6 +94,7 @@ module Binds
       else v
       end
     in Bind::Subquery(i) then captures[i]
+    in Bind::Whole(i) then captures[i]
     in Bind::Micros(x)
       case v = value(x, captures)
       in Duration => d then micros(d)
@@ -150,6 +154,7 @@ module Binds
     pieces.flat_map do |p|
       case p
       in Piece::Bound(Bind::Items => b) then [Piece::Param.new(items(value(b, captures).as(Array[Object?]))).as(Piece)]
+      in Piece::Bound(Bind::Whole => b) then [Piece::Param.new(Model.value(value(b, captures))).as(Piece)]
       in Piece::Bound(Bind::Subquery => b)
         case q = value(b, captures)
         in Subquery => sub then sub.subquery

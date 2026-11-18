@@ -438,7 +438,7 @@ class Repo
     rows.rows.map do |r|
       values: Hash[Symbol, Object?] = {}
       found.each_with_index do |c, i|
-        values = values.put(c.name, r.value(i, c.type)) if c
+        values = values.put(c.name, r.column_value(i, c)) if c
       end
       all ? model.load(values) : model.load_partial(values)
     end
@@ -485,7 +485,7 @@ class Repo
   # A row's values by column, read with each column's type.
   def self.values(row: Row, columns: Array[Column]) -> Hash[Symbol, Object?]
     values: Hash[Symbol, Object?] = {}
-    columns.each_with_index { |c, i| values = values.put(c.name, row.value(i, c.type)) }
+    columns.each_with_index { |c, i| values = values.put(c.name, row.column_value(i, c)) }
     values
   end
 end
