@@ -307,6 +307,38 @@ class Query[T]
     raise ArgumentError.new("`include?` of a query outside a query's block: a query is not a collection; run it (`repo.all(query)`), or test a column against it in a block (`where { q.include?(col) }`)")
   end
 
+  # Whether it has a row: only in another query's block, the query
+  # built there, as `EXISTS (SELECT 1 ...)`, its block reading the outer
+  # row (a correlated subquery):
+  #
+  # ```
+  # class EPost < Rotor::Model
+  #   table "posts" do
+  #     column :id, Int, primary: true
+  #     column :title, String
+  #   end
+  # end
+  #
+  # class EEvent < Rotor::Model
+  #   table "events" do
+  #     column :id, Int, primary: true
+  #     column :post_id, Int
+  #     column :kind, String
+  #   end
+  # end
+  #
+  # EPost.where { |p| !EEvent.where { |e| e.post_id == p.id && e.kind == "removed" }.exists? }.to_sql
+  # # => ["SELECT \"id\", \"title\" FROM \"posts\" WHERE NOT EXISTS (SELECT 1 FROM \"events\" AS \"e1\" WHERE \"e1\".\"post_id\" = \"posts\".\"id\" AND \"e1\".\"kind\" = $1)", ["removed"]]
+  # ```
+  #
+  # The query is a model's (`Event.where { ... }`, or its `query`) or an
+  # association's of the outer row (`p.events.query`), with `where` and
+  # `filter` only. Called outside a query's block, it raises
+  # `ArgumentError`: run the query (`Rotor::Repo#exists?`).
+  def exists? -> Bool
+    raise ArgumentError.new("`exists?` of a query outside a query's block: run it, `repo.exists?(query)`, or test it in a block (`where { |p| Event.where { |e| e.post_id == p.id }.exists? }`)")
+  end
+
   # :nodoc:
   # The column it gives as a subquery; `Rotor::UntranslatableError` for
   # a query that cannot be one.
@@ -329,7 +361,7 @@ class Query[T]
   def subquery -> Array[Piece]
     subquery_column
     unlocked!("include?")
-    pieces.map do |p|
+    outer_named(pieces).map do |p|
       case p
       in Piece::Column(_, n) then Piece::Text.new(Dialect.quote(n.to_s)).as(Piece)
       else p
@@ -558,7 +590,7 @@ class Query[T]
   # say which rows).
   def delete -> Statement
     plain!("delete")
-    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.table(table.name, table.schema)}")] + where_pieces, nil)
+    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.table(table.name, table.schema)}")] + outer_named(where_pieces), nil)
   end
 
   # The rows' update: the block gives a hash literal of columns and their
@@ -707,7 +739,9 @@ class Query[T]
       t, e = translator(expr, captures, file)
       [set_pieces(t, e, file), t.guards]
     end
-    Statement.new(table, Binds.fill(sets, captures) + where_pieces, nil)
+    # (A value may read the row in a subquery too: `{flagged: Event.where
+    # { |e| e.post_id == p.id }.exists?}`.)
+    Statement.new(table, outer_named(Binds.fill(sets, captures) + where_pieces), nil)
   end
 
   # The `UPDATE ... SET` of `update`'s block `e`.
@@ -807,10 +841,24 @@ class Query[T]
 
   # `pieces` with each column qualified by its table's alias in a join.
   private def qualified(pieces: Array[Piece]) -> Array[Piece]
-    return pieces if @sources.size == 1
+    return outer_named(pieces) if @sources.size == 1
     pieces.map do |p|
       case p
       in Piece::Column(i, n) then Piece::Text.new("#{alias_of(i)}.#{Dialect.quote(n.to_s)}")
+      in Piece::Outer(i, n) then Piece::Text.new("#{alias_of(i)}.#{Dialect.quote(n.to_s)}")
+      else p
+      end
+    end
+  end
+
+  # `pieces` of a query of one table (not aliased), with the columns a
+  # subquery reads of its row (`exists?`) qualified by the table.
+  private def outer_named(pieces: Array[Piece]) -> Array[Piece]
+    return pieces unless pieces.any? { |p| p.is_a?(Piece::Outer) }
+    t = table
+    pieces.map do |p|
+      case p
+      in Piece::Outer(_, n) then Piece::Text.new("#{Dialect.table(t.name, t.schema)}.#{Dialect.quote(n.to_s)}").as(Piece)
       else p
       end
     end

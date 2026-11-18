@@ -109,6 +109,8 @@ class Statement
       case p
       in Piece::Column(0, n) then Piece::Text.new("#{table}.#{Dialect.quote(n.to_s)}").as(Piece)
       in Piece::Column(_, n) then Piece::Text.new("EXCLUDED.#{Dialect.quote(n.to_s)}").as(Piece)
+      in Piece::Outer(0, n) then Piece::Text.new("#{table}.#{Dialect.quote(n.to_s)}").as(Piece)
+      in Piece::Outer(_, n) then Piece::Text.new("EXCLUDED.#{Dialect.quote(n.to_s)}").as(Piece)
       else p
       end
     end
@@ -243,6 +245,8 @@ class Statement
         in Piece::Text(s) then b << s
         # (Unqualified: a query qualifies its columns in a join.)
         in Piece::Column(_, n) then b << Dialect.quote(n.to_s)
+        # (Named by the query that has the row: `Rotor::Query`.)
+        in Piece::Outer(_, _) then raise ArgumentError.new("an outer row's column outside its query")
         in Piece::Param(v)
           params = params + [v]
           b << Dialect.param(params.size)
