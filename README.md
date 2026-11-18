@@ -332,6 +332,20 @@ Rotor::Statement.delete(u)                    # by the primary key (refused once
   method of the row or passes it on), and each row, loaded with those
   only, gives the block's value. Reading a column it did not fetch
   raises `Rotor::NotLoadedError`. Counting is `count`, a query's shape.
+- Row locks (#68): `for_update`, `for_no_key_update`, `for_share` and
+  `for_key_share` lock the query's rows until the transaction ends
+  (`FOR UPDATE`...), each with `skip_locked: true` (rows another
+  transaction locked are left out: a queue's workers each claim one,
+  `Job.where { !done }.order { id }.limit(1).for_update(skip_locked:
+  true)`) or `nowait: true` (a locked row raises `PG::ServerError`,
+  SQLSTATE 55P03), not both. The clause is written last, whatever is
+  refined after it. A lock is of a query's rows themselves: it is
+  refused after `select`, `count` and `exists`, and `count`, `exists`,
+  `select`, `map`, a join, `update` and `delete` of a locked query are
+  refused too. **Outside a transaction** the lock ends with the
+  statement, which is almost never meant: run it in
+  `repo.transaction`. (`FOR UPDATE OF` a join's table is not
+  provided.)
 
 ### Parameter types
 

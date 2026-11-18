@@ -625,6 +625,40 @@ class QueryTest < Test::Case
     assert_equal("a negative limit: -1", e.message)
   end
 
+  # rotor#68: row locks, written last.
+  def test_row_locks
+    check(Person.where { admin }.order { id }.limit(1).for_update, "#{COLS} WHERE \"admin\" ORDER BY \"id\" LIMIT 1 FOR UPDATE", [])
+    check(Person.query.for_update(skip_locked: true), "#{COLS} FOR UPDATE SKIP LOCKED", [])
+    check(Person.query.for_update(nowait: true), "#{COLS} FOR UPDATE NOWAIT", [])
+    check(Person.query.for_no_key_update, "#{COLS} FOR NO KEY UPDATE", [])
+    check(Person.query.for_share(skip_locked: true), "#{COLS} FOR SHARE SKIP LOCKED", [])
+    check(Person.query.for_key_share(nowait: true), "#{COLS} FOR KEY SHARE NOWAIT", [])
+    # A query refined after the lock keeps it, written last.
+    check(Person.query.for_update.where { admin }.order { id }.limit(2).offset(1), "#{COLS} WHERE \"admin\" ORDER BY \"id\" LIMIT 2 OFFSET 1 FOR UPDATE", [])
+    e = assert_raise(ArgumentError) { Person.query.for_update(skip_locked: true, nowait: true) }
+    assert_equal("`for_update` with both `skip_locked` and `nowait`: one or the other", e.message)
+    e = assert_raise(ArgumentError) { Person.query.for_update.for_share }
+    assert_equal("`for_share` of a query that already locks its rows", e.message)
+    e = assert_raise(ArgumentError) { Person.select { name }.for_update }
+    assert_equal("`for_update` after `select`, `count` or `exists`: write it before", e.message)
+    e = assert_raise(ArgumentError) { Person.query.count.for_share }
+    assert_equal("`for_share` after `select`, `count` or `exists`: write it before", e.message)
+    locked = Person.query.for_update
+    refusal = "of a query that locks its rows (`for_update`...): write the lock last, on the rows themselves"
+    e = assert_raise(ArgumentError) { locked.count }
+    assert_equal("`count` #{refusal}", e.message)
+    e = assert_raise(ArgumentError) { locked.exists }
+    assert_equal("`exists` #{refusal}", e.message)
+    e = assert_raise(ArgumentError) { locked.select { name } }
+    assert_equal("`select` #{refusal}", e.message)
+    e = assert_raise(ArgumentError) { locked.join(Flagged) { |p, f| p.id == f.id } }
+    assert_equal("`join` #{refusal}", e.message)
+    e = assert_raise(ArgumentError) { locked.delete }
+    assert_equal("`delete` #{refusal}", e.message)
+    e = assert_raise(ArgumentError) { locked.update { |p| {admin: true} } }
+    assert_equal("`update` #{refusal}", e.message)
+  end
+
   def test_select
     check(Person.select { name }, "SELECT \"name\" FROM \"people\"", [])
     # The columns the block reads; its value is computed in Quarz.
