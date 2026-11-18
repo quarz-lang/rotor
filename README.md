@@ -187,9 +187,11 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   the same two rows. `repo.upsert(insert)` runs one, the model's
   timestamps set as `insert` sets them, and gives the row as it is
   after it (inserted or updated), or nil when the conflict left it as
-  it was (`do_nothing`, or a false `where`). `do_update` sets only what
-  its block says: an update time too when it says so
-  (`updated_at: new.updated_at`).
+  it was (`do_nothing`, or a false `where`). With `upsert`, `do_update`
+  also sets the table's update time to the proposed row's
+  (`"updated_at" = EXCLUDED."updated_at"`) unless the block sets it, as
+  `update` always moves it; a statement run as written (`repo.run`)
+  sets what its block says only.
 
 - The row is the block's receiver (`where { age > 18 }`) or its
   parameter (`where { |u| u.age > 18 }`, the form `for` comprehensions

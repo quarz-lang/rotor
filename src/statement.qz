@@ -29,7 +29,7 @@ class Statement
   # The insertion of `model`'s row, with the columns it has values for
   # (`DEFAULT VALUES` when none): a `Rotor::Insert`, which may say what
   # to do on a conflict (`on_conflict`).
-  def self.insert[M <: Model](model: M) -> Insert[M] = Insert[M].new(model, [], false, false)
+  def self.insert[M <: Model](model: M) -> Insert[M] = Insert[M].new(model, [], [], false, nil)
 
   # :nodoc:
   # The INSERT of `model`'s row, without a conflict clause.
@@ -120,6 +120,25 @@ class Statement
       sets = sets + [Piece::Text.new("#{Dialect.quote(name.to_s)} = ")] + v.pieces
     end
     sets
+  end
+
+  # :nodoc:
+  # The columns an update's block sets (its hash literal's keys), the
+  # block translated already (`set_list`).
+  def self.set_columns(expr: Meta::Expr, file: String) -> Array[Symbol]
+    _, e = Translator.body(expr, file)
+    out: Array[Symbol] = []
+    case e
+    in Meta::Expr::HashLit(ps, _)
+      ps.each do |pair|
+        case pair[0]
+        in Meta::Expr::Lit(Symbol => s, _) then out = out + [s]
+        else nil
+        end
+      end
+    else nil
+    end
+    out
   end
 
   # The update of `model`'s row, by its primary key, with the columns
@@ -248,16 +267,18 @@ end
 # ```
 class Insert[M <: Model] < Statement
   @model: M
-  # The conflict clause (none: empty).
-  @tail: Array[Piece]
-  # Whether it has a conflict clause, and whether that is a `do_update`
-  # that may still take a `where`.
+  # The conflict clause, its action (`... DO NOTHING`, `... DO UPDATE
+  # SET ...`) and its `where` (none: empty).
+  @action: Array[Piece]
+  @where: Array[Piece]
+  # Whether it has a conflict clause.
   @conflict: Bool
-  @open: Bool
+  # The columns `do_update`'s block sets (nil: no `do_update`).
+  @update: Array[Symbol]?
 
   # (Made by `Rotor::Statement.insert` and the methods below.)
-  def initialize(@model: M, @tail: Array[Piece], @conflict: Bool, @open: Bool)
-    super(@model.table_info, Statement.insert_pieces(@model) + @tail, nil)
+  def initialize(@model: M, @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?)
+    super(@model.table_info, Statement.insert_pieces(@model) + @action + @where, nil)
   end
 
   # The model whose row it inserts.
@@ -269,7 +290,20 @@ class Insert[M <: Model] < Statement
   # :nodoc:
   # The same insert of `model`'s row (the repository's, its timestamps
   # set).
-  def with_model(model: M) -> Insert[M] = Insert[M].new(model, @tail, @conflict, @open)
+  def with_model(model: M) -> Insert[M] = Insert[M].new(model, @action, @where, @conflict, @update)
+
+  # :nodoc:
+  # The same insert, its `do_update` setting the table's update time to
+  # the proposed row's (`"updated_at" = EXCLUDED."updated_at"`) when the
+  # table has one and the block does not set it: what
+  # `Rotor::Repo#upsert` runs.
+  def with_update_time -> Insert[M]
+    u = @model.table_info.updated_at
+    cols = @update
+    return self if u.nil? || cols.nil? || cols.include?(u)
+    name = Dialect.quote(u.to_s)
+    Insert[M].new(@model, @action + [Piece::Text.new(", #{name} = EXCLUDED.#{name}").as(Piece)], @where, @conflict, cols + [u])
+  end
 
   # On a conflict of these columns (`ON CONFLICT ("a", "b")`: the
   # columns of a unique index, or of the primary key), or of any unique
@@ -301,7 +335,7 @@ class Insert[M <: Model] < Statement
   # left as it is, and the insert gives no row (`Rotor::Repo#upsert`:
   # nil).
   def where(&cond: Quoted[shareable (M, M) -> Bool] using Compare) -> Insert[M]
-    raise ArgumentError.new("`where` of an insert: write it after `do_update`, once, as its condition") unless @open
+    raise ArgumentError.new("`where` of an insert: write it after `do_update`, once, as its condition") if @update.nil? || !@where.empty?
     t = @model.table_info
     sources = Statement.conflict_rows(@model)
     kept = Cache.fetch(Cache::CONDITIONS, Cache.key(cond.site, sources), cond.captures) do
@@ -309,7 +343,7 @@ class Insert[M <: Model] < Statement
       [tr.sql(e), tr.guards]
     end
     s = Binds.fill_sql(kept, cond.captures)
-    Insert[M].new(@model, @tail + [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, false)
+    Insert[M].new(@model, @action, [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, @update)
   end
 
   private def conflicting! -> Void
@@ -332,13 +366,15 @@ class Conflict[M <: Model]
 
   # Nothing: the conflicting row is left as it is, and the insert gives
   # no row (`Rotor::Repo#upsert`: nil). `ON CONFLICT ... DO NOTHING`.
-  def do_nothing -> Insert[M] = Insert[M].new(@model, [Piece::Text.new("#{@target} DO NOTHING").as(Piece)], true, false)
+  def do_nothing -> Insert[M] = Insert[M].new(@model, [Piece::Text.new("#{@target} DO NOTHING").as(Piece)], [], true, nil)
 
   # The conflicting row updated as the block says, a hash literal of
   # columns as `Rotor::Query#update`'s, of the table's row (`old`) and
   # the proposed one (`new`, PostgreSQL's EXCLUDED):
-  # `{ |old, new| {name: new.name, hits: old.hits + 1} }`. A timestamp
-  # is set only when the block sets it (`updated_at: new.updated_at`).
+  # `{ |old, new| {name: new.name, hits: old.hits + 1} }`.
+  # `Rotor::Repo#upsert` sets the table's update time too, to the
+  # proposed row's, unless the block sets it; a statement run as written
+  # (`Rotor::Repo#run`) sets what the block says only.
   # Needs the conflict's columns or constraint (PostgreSQL's rule).
   def do_update(&set: Quoted[shareable (M, M) -> Hash[Symbol, Object]] using Compare) -> Insert[M]
     raise ArgumentError.new("`do_update` of a conflict that names no columns or constraint: name them in `on_conflict`") if @any
@@ -349,6 +385,6 @@ class Conflict[M <: Model]
       tr, e = Translator.of(sources, set.expr, set.captures, set.file)
       [Statement.conflict_columns(t, Statement.set_list(tr, e, set.file, t, name, "do_update")), tr.guards]
     end
-    Insert[M].new(@model, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), true, true)
+    Insert[M].new(@model, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), [], true, Statement.set_columns(set.expr, set.file))
   end
 end
