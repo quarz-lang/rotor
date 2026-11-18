@@ -695,7 +695,22 @@ User.query.join(Post) { |u, p| p.editor_id == u.id }
   parameter per table.
 - A column's getter of a model a block captured is its value:
   `Post.where { user_id == u.id }`.
-- Joins are INNER only; LEFT joins and `through` associations come later.
+- `left_join` (#77) is a LEFT JOIN, by an association
+  (`Customer.query.left_join { orders }`) or by a condition
+  (`left_join(Coupon) { |o, c| c.id == o.coupon_id }`): a
+  `Query[[T, R?]]`, the right model nil where nothing matched (its
+  primary key NULL; a model without one is refused). The blocks after
+  it read the right row where a condition says it is there, as Quarz
+  narrows a nilable value: `c.nil?` (the anti-join,
+  `where { |o, c| c.nil? }`), `!c.nil? && c.code == "X"`,
+  `c.nil? ? "" : c.code` and `if c then ... end` (a `CASE`); `&.`
+  cannot be quoted (quarz-lang/quarz#886), and reading `c.code` without
+  such a condition does not compile. `select`, `order`, `count` and
+  `exists` work on it; `update` and `delete` do not (of one table's
+  query). `preload` stays the way to load an association's models: a
+  `has_many`'s LEFT JOIN repeats the row for each of them.
+- Joins are INNER or LEFT; RIGHT and FULL joins, LATERAL, and `through`
+  associations in a join come later.
 
 ## Migrations
 

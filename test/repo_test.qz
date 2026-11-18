@@ -573,6 +573,24 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#77: a LEFT JOIN against the server, with a row that has no
+  # match.
+  def test_left_join
+    with_repo do |repo|
+      ann = repo.insert(Author.new(name: "Ann"))
+      repo.insert(Author.new(name: "Bob"))
+      repo.insert(Volume.new(title: "Quarz", author_id: ann.id))
+      q = Author.query.left_join { volumes }.order { |a, v| a.id }
+      pairs = repo.all(q).map { |p| [p[0].name, p[1].nil? ? nil : p[1].as(Volume).title] }
+      expected: Array[[String, String?]] = [["Ann", "Quarz"], ["Bob", nil]]
+      assert_equal(expected, pairs)
+      assert_equal(["Bob"], repo.all(q.where { |a, v| v.nil? }).map { |p| p[0].name })
+      assert_equal(2, repo.count(q))
+      titles = repo.all(q.select { |a, v| v.nil? ? "-" : v.title })
+      assert_equal(["Quarz", "-"], titles)
+    end
+  end
+
   # rotor#73: the rows a statement changed, as models.
   def test_rows_a_statement_returns
     with_repo do |repo|

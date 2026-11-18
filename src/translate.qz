@@ -280,7 +280,15 @@ class Translator
       Sql.new(pieces + [Piece::Text.new(" END")], ATOM, nil, nil, false, nil, nulls, th.tri || (el ? el.tri : nil), narrow, th.test || (el ? el.test : nil))
     in Meta::Expr::Call(recv, m, ms, args, block, line) then call(recv, m, ms, args, block, line)
     in Meta::Expr::SelfRef(_, line) then untranslatable("the row itself", line)
-    in Meta::Expr::Arg(name, _, line) then untranslatable("the parameter `#{name}` by itself", line)
+    in Meta::Expr::Arg(name, _, line)
+      # (A LEFT JOIN's row as a value, `if c then ... end`: its key,
+      # NULL where it is missing.)
+      if (i = row_of(e)) >= 0 && @sources[i].left
+        key = @sources[i].table.primary_keys[0]
+        c = @sources[i].table.columns.find { |x| x.name == key }.as(Column)
+        return Sql.new([Piece::Column.new(i, key)], ATOM, Column.new(c.name, c.sql, c.type, true, c.primary, c.default, c.redact), nil, false, nil, name.to_s)
+      end
+      untranslatable("the parameter `#{name}` by itself", line)
     in Meta::Expr::ArrayLit(_, line) then untranslatable("an array literal", line)
     in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
@@ -935,7 +943,13 @@ class Translator
         return interval(wrap(n, MUL + 1), unit)
       end
       case name
-      in "nil?" then return is_null(operand(r), "IS NULL")
+      in "nil?"
+        # (A LEFT JOIN's row: missing where its key is NULL.)
+        if (i = row_of(r)) >= 0 && @sources[i].left
+          key = @sources[i].table.primary_keys[0]
+          return postfix(node([Piece::Column.new(i, key)], ATOM), "IS NULL", IS)
+        end
+        return is_null(operand(r), "IS NULL")
       in "-@"
         # (`- $1` is ambiguous to PostgreSQL: the parameter cast.)
         # (Of an `integer`, a bigint: `-(-2147483648)` would overflow.)

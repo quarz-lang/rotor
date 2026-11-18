@@ -726,6 +726,48 @@ class QueryTest < Test::Case
     assert_match(/a comparison of `Duration`s/, e.message)
   end
 
+  # rotor#77: a LEFT JOIN, the right row an `R?`.
+  def test_left_join
+    pe = "SELECT \"x0\".\"id\", \"x0\".\"title\", \"x1\".\"id\", \"x1\".\"post_id\", \"x1\".\"kind\" FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\""
+    q = XPost.query.left_join { x_events }
+    check(q, pe, [])
+    # The missing row: its key NULL.
+    check(q.where { |p, e| e.nil? }, "#{pe} WHERE \"x1\".\"id\" IS NULL", [])
+    # Its columns where a condition says it is there.
+    check(q.where { |p, e| !e.nil? && e.kind == "x" }, "#{pe} WHERE NOT \"x1\".\"id\" IS NULL AND \"x1\".\"kind\" = $1", ["x"])
+    check(q.where { |p, e| if e then e.kind == "x" else false end }, "#{pe} WHERE CASE WHEN \"x1\".\"id\" IS NOT NULL THEN \"x1\".\"kind\" = $1 ELSE FALSE END", ["x"])
+    check(q.order { |p, e| e.nil? ? "" : e.kind }, "#{pe} ORDER BY CASE WHEN \"x1\".\"id\" IS NULL THEN $1::text ELSE \"x1\".\"kind\" END", [""])
+    # A condition by the join's.
+    check(Person.query.left_join(Gauge) { |p, g| g.id == p.id }.where { |p, g| g.nil? }, "SELECT \"p0\".\"id\", \"p0\".\"name\", \"p0\".\"email\", \"p0\".\"age\", \"p0\".\"score\", \"p0\".\"admin\", \"p0\".\"born\", \"p0\".\"joined\", \"g1\".\"id\", \"g1\".\"level\", \"g1\".\"cap\", \"g1\".\"ratio\", \"g1\".\"label\", \"g1\".\"at\", \"g1\".\"on\" FROM \"people\" AS \"p0\" LEFT JOIN \"gauges\" AS \"g1\" ON \"g1\".\"id\" = \"p0\".\"id\" WHERE \"g1\".\"id\" IS NULL", [])
+    # `select` (in Quarz, of the columns it reads), `count`, `exists`.
+    check(q.select { |p, e| [p.title, e.nil? ? "" : e.kind] }, "SELECT \"x0\".\"id\", \"x0\".\"title\", \"x1\".\"id\", \"x1\".\"post_id\", \"x1\".\"kind\" FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\"", [])
+    check(q.count, "SELECT count(*) FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\"", [])
+    check(q.exists, "SELECT EXISTS (SELECT 1 FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\")", [])
+    # Three-valued as rotor's rules say: `!` of a condition that can be
+    # NULL (a nullable column of the right row) is refused, of one that
+    # cannot is NOT.
+    gq = Person.query.left_join(Gauge) { |p, g| g.id == p.id }
+    e1 = assert_raise(Rotor::UntranslatableError) { gq.where { |p, g| !(!g.nil? && g.label == "x") } }
+    assert_match(/\A`!\(!g.nil\? && \(g.label == "x"\)\)` is three-valued in SQL when `g.label` can be NULL/, e1.message)
+    check(gq.where { |p, g| !(g.nil? || g.on) }, "SELECT \"p0\".\"id\", \"p0\".\"name\", \"p0\".\"email\", \"p0\".\"age\", \"p0\".\"score\", \"p0\".\"admin\", \"p0\".\"born\", \"p0\".\"joined\", \"g1\".\"id\", \"g1\".\"level\", \"g1\".\"cap\", \"g1\".\"ratio\", \"g1\".\"label\", \"g1\".\"at\", \"g1\".\"on\" FROM \"people\" AS \"p0\" LEFT JOIN \"gauges\" AS \"g1\" ON \"g1\".\"id\" = \"p0\".\"id\" WHERE NOT (\"g1\".\"id\" IS NULL OR \"g1\".\"on\")", [])
+    # Refused: a statement of a join; a right table without a key.
+    e2 = assert_raise(ArgumentError) { q.delete }
+    assert_equal("`delete` of a join: it is of one table's query", e2.message)
+    e2 = assert_raise(ArgumentError) { q.update { |p, e| {title: "x"} } }
+    assert_equal("`update` of a join: it is of one table's query", e2.message)
+    e3 = assert_raise(ArgumentError) { Person.query.left_join(Log) { |p, l| l.text == p.name } }
+    assert_equal("`left_join` of Log, which has no primary key: a missing row is told by it", e3.message)
+  end
+
+  # rotor#77: the right row read without a condition saying it is there
+  # does not compile (checked by `quarz` on the PATH, or by $QUARZ).
+  def test_left_join_row_unnarrowed
+    out = Process.sh("cd test/fixtures/left_unnarrowed && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:16:3: error: no overload of `where` on Rotor::Query\[\[Shop, Sale\?\]\]/, out.stderr)
+    assert_match(/undefined method `kind` for Nil/, out.stderr)
+  end
+
   def test_order_limit_offset
     check(Person.order { name }, "#{COLS} ORDER BY \"name\"", [])
     check(Person.order { name }.desc.order { |p| p.id }, "#{COLS} ORDER BY \"name\" DESC, \"id\"", [])
