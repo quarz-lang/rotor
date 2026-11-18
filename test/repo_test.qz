@@ -518,6 +518,20 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#74: NULLs first or last, against the server.
+  def test_order_nulls
+    with_repo do |repo|
+      repo.insert(Note.new(body: "a", seen: Time.at(1_700_000_000).utc))
+      repo.insert(Note.new(body: "b"))
+      repo.insert(Note.new(body: "c", seen: Time.at(1_700_000_100).utc))
+      bodies = ->(q: Rotor::Query[Note]) { repo.all(q).map { |n| n.body } }
+      assert_equal(["b", "c", "a"], bodies.call(Note.query.order { |n| n.seen }.desc))
+      assert_equal(["c", "a", "b"], bodies.call(Note.query.order { |n| n.seen }.desc.nulls_last))
+      assert_equal(["a", "c", "b"], bodies.call(Note.query.order { |n| n.seen }))
+      assert_equal(["b", "a", "c"], bodies.call(Note.query.order { |n| n.seen }.asc.nulls_first))
+    end
+  end
+
   # rotor#73: the rows a statement changed, as models.
   def test_rows_a_statement_returns
     with_repo do |repo|

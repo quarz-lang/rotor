@@ -263,6 +263,32 @@ class Query[T]
     copy(orders: @orders[0...(@orders.size - 1)] + [[last[0], true]])
   end
 
+  # The last order ascending, as `order` gives it: written to say so
+  # before `nulls_first` or `nulls_last` (`order { seen_at }.asc.nulls_first`).
+  def asc -> Query[T]
+    last = @orders.last? || raise ArgumentError.new("`asc` without an `order` before it")
+    copy(orders: @orders[0...(@orders.size - 1)] + [[last[0], false]])
+  end
+
+  # The last order with its NULLs first (`NULLS FIRST`). Without it the
+  # order is PostgreSQL's: NULLs last ascending, first descending (`desc`).
+  #
+  # ```
+  # class NSensor < Rotor::Model
+  #   table "sensors" do
+  #     column :id, Int, primary: true
+  #     column :seen_at, Time, null: true
+  #   end
+  # end
+  #
+  # NSensor.query.order { |s| s.seen_at }.desc.nulls_last.to_sql[0]
+  # # => "SELECT \"id\", \"seen_at\" FROM \"sensors\" ORDER BY \"seen_at\" DESC NULLS LAST"
+  # ```
+  def nulls_first -> Query[T] = nulls("nulls_first", "FIRST")
+
+  # The last order with its NULLs last (`NULLS LAST`): as `nulls_first`.
+  def nulls_last -> Query[T] = nulls("nulls_last", "LAST")
+
   # At most `n` rows.
   def limit(n: Int) -> Query[T]
     unshaped!("limit")
@@ -886,10 +912,36 @@ class Query[T]
     out = [Piece::Text.new(" ORDER BY ")]
     @orders.each_with_index do |o, i|
       out = out + [Piece::Text.new(", ")] if i > 0
-      out = out + o[0].pieces
+      # (A key's `NULLS FIRST`/`LAST` comes after its `DESC`.)
+      key = o[0].pieces
+      tail: Array[Piece] = []
+      if Query.nulls_of(o[0])
+        tail = [key[key.size - 1]]
+        key = key[0...(key.size - 1)]
+      end
+      out = out + key
       out = out + [Piece::Text.new(" DESC")] if o[1]
+      out = out + tail
     end
     out
+  end
+
+  # `nulls_first`, `nulls_last`: the last order's key with `NULLS ...`
+  # after it.
+  private def nulls(what: String, where: String) -> Query[T]
+    last = @orders.last? || raise ArgumentError.new("`#{what}` without an `order` before it")
+    key = last[0]
+    raise ArgumentError.new("`#{what}` of an order that says where its NULLs go already") if Query.nulls_of(key)
+    copy(orders: @orders[0...(@orders.size - 1)] + [[key.with(pieces: key.pieces + [Piece::Text.new(" NULLS #{where}").as(Piece)]), last[1]]])
+  end
+
+  # :nodoc:
+  # Whether an order's key says where its NULLs go (its last piece).
+  def self.nulls_of(key: Sql) -> Bool
+    case key.pieces.last?
+    in Piece::Text(t) then t.start_with?(" NULLS ")
+    else false
+    end
   end
 
   private def window -> Array[Piece]

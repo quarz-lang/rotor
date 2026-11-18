@@ -378,6 +378,11 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   kinds of several captures multiply (four nullable ones make 16). A `where` of three
   conditions with an order and a limit builds in about 10 µs compiled
   (22 µs translating each time; 19 µs interpreted, 52 µs before).
+- Where an order's NULLs go (#74): `nulls_first` and `nulls_last` after
+  an order (`order { seen_at }.desc.nulls_last`, `.asc.nulls_first`;
+  `asc` is the order as given, written to say so). Without them the
+  order is PostgreSQL's: NULLs last ascending, first descending. Quarz
+  has no order of nil, so there is no other default to follow.
 - Queries are `Shareable` (Quarz's docs/03): a query can be a constant
   (`ACTIVE = User.where { active }`), be captured by `Task.spawn` or sent
   on a `Channel`, and run in another task; so can a `Rotor::Statement`.
