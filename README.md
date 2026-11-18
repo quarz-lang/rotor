@@ -123,7 +123,11 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `update { {day: day + 3_000_000} }` can write a date beyond 9999,
   which the model then cannot read** (`ArgumentError` from pg's reader,
   naming the value). A date built in the block (`Date.new(...)`,
-  `Date.parse(...)`) is refused, as a `Time` is: capture a variable.
+  `Date.parse(...)`) is refused, as a `Time` is: a call that reads no
+  column of the rows says so (#101); build the value before the block
+  and capture the variable, or name a constant (`SINCE = Date.new(2026,
+  1, 1)`, then `day >= SINCE`): a constant's `Date`, and one
+  `static(...)` gives, reaches the block baked and is a parameter.
   The parts and the calendar (`year`, `month`, `wday`, `next_month`,
   `next_year`, `strftime`) are refused for now. A `Time` and a `Date`
   are never equal in Quarz: comparing them is refused (`==`), or does

@@ -1,0 +1,10 @@
+class Visit < Rotor::Model
+  table "visits" do
+    column :id, Int, primary: true
+    column :day, Date
+  end
+end
+
+sql, params = Visit.where { |v| v.day >= static(DateLib::Start.date) }.to_sql
+puts sql
+p params

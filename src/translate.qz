@@ -829,7 +829,9 @@ class Translator
     in false then Sql.new([Piece::Text.new("FALSE")], ATOM, nil, false, true)
     # (Beyond an `integer`'s range PostgreSQL types it as a bigint.)
     in Int => i then Sql.new([Piece::Text.new(i.to_s)], ATOM, nil, i, true, nil, nil, nil, i >= -2147483648 && i <= 2147483647)
-    in Float | String | Time | Bytes | Symbol then param(value, line)
+    # (A `Date` a constant or `static(...)` baked: a parameter, as a
+    # captured one, quarz-lang/quarz#897.)
+    in Float | String | Time | Date | Bytes | Symbol then param(value, line)
     # (`JSON::Value::Null`, the document `null`: a parameter, not NULL.)
     in JSON::Value then param(value, line)
     else untranslatable("the literal #{value.inspect}", line)
@@ -949,7 +951,7 @@ class Translator
     # translator knows: a primitive's own, or `Rotor::Compare`'s, a
     # comparison taking nil (another extension's is the user's).
     ([m] + ms).each do |x|
-      untranslatable(Translator.label(x), line) unless !x.singleton && primitive?(x.owner)
+      unknown_call(Translator.label(x), whole, line) unless !x.singleton && primitive?(x.owner)
       if ext = x.extension
         untranslatable("#{Translator.label(x)} of #{ext.name}", line) unless ext == Compare
       end
@@ -973,10 +975,10 @@ class Translator
         # (Of an `integer`, a bigint: `-(-2147483648)` would overflow.)
         x = bigint(cast(operand(r)))
         return with_nulls(prefix("-", x, MUL + 1), [x])
-      else untranslatable(label, line)
+      else unknown_call(label, whole, line)
       end
     end
-    untranslatable(label, line) unless args.size == 1
+    unknown_call(label, whole, line) unless args.size == 1
     a = args[0]
     if name == "include?" && m.owner == Array
       return in_list(r, a, whole, line)
@@ -1061,6 +1063,41 @@ class Translator
       end
       prec = name == "+" || name == "-" ? ADD : MUL
       return with_nulls(binary(l, op, rr, prec, true), [l, rr])
+    end
+    unknown_call(label, whole, line)
+  end
+
+  # Whether `e` reads a captured variable of the block.
+  def self.captures?(e: Meta::Expr) -> Bool
+    case e
+    in Meta::Expr::Capture(_, _, _) then true
+    in Meta::Expr::Call(recv, _, _, args, block, _)
+      (recv ? Translator.captures?(recv) : false) || args.any? { |a| Translator.captures?(a) } || (block ? Translator.captures?(block) : false)
+    in Meta::Expr::And(l, r, _) then Translator.captures?(l) || Translator.captures?(r)
+    in Meta::Expr::Or(l, r, _) then Translator.captures?(l) || Translator.captures?(r)
+    in Meta::Expr::Not(x, _, _) then Translator.captures?(x)
+    in Meta::Expr::If(c, t, f, _) then Translator.captures?(c) || Translator.captures?(t) || (f ? Translator.captures?(f) : false)
+    in Meta::Expr::ArrayLit(xs, _) then xs.any? { |x| Translator.captures?(x) }
+    in Meta::Expr::HashLit(ps, _) then ps.any? { |pr| Translator.captures?(pr[0]) || Translator.captures?(pr[1]) }
+    in Meta::Expr::Interp(xs, _) then xs.any? { |x| Translator.captures?(x) }
+    in Meta::Expr::Block(_, body, _) then body.any? { |x| Translator.captures?(x) }
+    else false
+    end
+  end
+
+  # Refuses the call `whole` (`label`) the translator does not know.
+  # When it reads no column of the block's rows (its receiver and
+  # arguments included: `Date.new(2026, 1, 1)`), the message says so and
+  # what to write: build it before the block and capture the variable,
+  # or name a constant, whose value reaches the block baked or captured
+  # (rotor#101, quarz-lang/quarz#897).
+  private def unknown_call(label: String, whole: Meta::Expr, line: Int) -> Nothing
+    if reads(whole).all? { |r| !r.nil? && r.empty? }
+      shown = Translator.show(whole)
+      # (A constant only where the call reads no captured variable,
+      # which a constant could not name.)
+      constant = Translator.captures?(whole) ? "" : ", or name a constant (`SINCE = #{shown}`)"
+      raise UntranslatableError.new("`#{shown}` does not read the row: build it before the block and capture the variable (`value = #{shown}`, then `value` in the block)#{constant} (#{@file}:#{line})")
     end
     untranslatable(label, line)
   end
