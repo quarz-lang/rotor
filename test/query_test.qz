@@ -625,6 +625,10 @@ class QueryTest < Test::Case
     assert_equal("a negative limit: -1", e.message)
   end
 
+  # One site of `!q.include?(name)`, for queries of a non-null and of a
+  # nullable column (`T` is `String` or `String?`).
+  def not_listed[T >: String](q: Rotor::Query[T]) -> Rotor::Query[Person] = Person.where { |p| !q.include?(p.name) }
+
   # rotor#71: a captured query as a subquery, `x IN (SELECT ...)`.
   def test_include_of_a_query
     admins = Person.where { admin }.select { id }
@@ -655,6 +659,14 @@ class QueryTest < Test::Case
     emails = Person.select { email }
     e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| !emails.include?(p.name) } }
     assert_match(/\A`!emails.include\?\(p.name\)` is three-valued in SQL when `emails.email` can be NULL/, e.message)
+    # One site, a non-null column first, then a nullable one: the
+    # translation kept for the first is not taken for the second (the
+    # column's nullability is part of what the site's entry is for).
+    names = Person.select { name }
+    check(not_listed(names), "#{COLS} WHERE NOT \"name\" IN (SELECT \"name\" FROM \"people\")", [])
+    e = assert_raise(Rotor::UntranslatableError) { not_listed(emails) }
+    assert_match(/is three-valued in SQL when `q.email` can be NULL/, e.message)
+    check(not_listed(names), "#{COLS} WHERE NOT \"name\" IN (SELECT \"name\" FROM \"people\")", [])
     # Where nothing can be NULL, `!` is `NOT ... IN (...)` (NOT binds
     # looser than IN).
     check(Flagged.where { |f| !admins.include?(f.id) }, "SELECT \"id\", \"vip\" FROM \"flagged\" WHERE NOT \"id\" IN (SELECT \"id\" FROM \"people\" WHERE \"admin\")", [])

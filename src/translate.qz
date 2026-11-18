@@ -1324,7 +1324,9 @@ class Translator
   private def in_query(q: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
     case q
     in Meta::Expr::Capture(index, _, l)
-      sub = case v = look(Bind::Capture.new(index))
+      # (Looked at as a subquery: its column's nullability, which the
+      # translation depends on, guarded with its class.)
+      sub = case v = look(Bind::Subquery.new(index))
             in Subquery => found then found
             else untranslatable("`include?` on a #{v.class.name}", l)
             end

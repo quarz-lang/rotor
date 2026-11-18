@@ -97,6 +97,11 @@ module Binds
     case v
     in nil then Kind.new(nil)
     in Array => xs then Kind.new(Array, item_class(xs), xs.any? { |x| x.nil? })
+    # (A captured query: whether its column can be NULL, which decides
+    # whether `include?` of it is three-valued. One site may capture
+    # queries of a non-null and of a nullable column: a generic
+    # method's `Query[T]`, `T >: String`.)
+    in Subquery => q then Kind.new(v.class, nil, q.subquery_nullable?)
     else Kind.new(v.class)
     end
   end
@@ -243,7 +248,7 @@ module Cache
   CONDITIONS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
   ORDERS = Atom.new(Hash[CacheKey, Array[Cached[Sql]]].new)
   PLANS = Atom.new(Hash[CacheKey, Array[Cached[InnerPlan]]].new)
-  READS = Atom.new(Hash[CacheKey, Array[Cached[Array[Array[Column]?]]]].new)
+  READS = Atom.new(Hash[CacheKey, Array[Cached[Projection]]].new)
   ASSOCIATIONS = Atom.new(Hash[CacheKey, Array[Cached[[Association, Symbol]]]].new)
   SETS = Atom.new(Hash[CacheKey, Array[Cached[Array[Piece]]]].new)
   PRELOADS = Atom.new(Hash[CacheKey, Array[Cached[Array[Preload]]]].new)
@@ -285,3 +290,9 @@ module Cache
     value
   end
 end
+
+# What a `select`'s block is, kept for its site: the columns it reads of
+# each table (nil: all), and the column it is as it is (`select { id }`,
+# of a query of one table), or nil: what makes the query a subquery
+# (`Rotor::Query#include?`).
+data Projection = (reads: Array[Array[Column]?], single: Column?)

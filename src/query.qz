@@ -56,6 +56,9 @@ module Subquery
   abstract def subquery_column -> Column
   # Its SQL and parameters as a subquery.
   abstract def subquery -> Array[Piece]
+  # Whether the column it gives as a subquery can be NULL (false for a
+  # query that cannot be one).
+  abstract def subquery_nullable? -> Bool
 end
 
 # A query over a model's table, as a value: what `Rotor::Model.where`
@@ -312,6 +315,13 @@ class Query[T]
       raise UntranslatableError.new("`include?` of a query that is not a `select` of one column of one table (`select { id }`)")
     end
     @single || raise UntranslatableError.new("`include?` of a query whose `select` is not one column as it is (`select { id }`): its block is computed in Quarz, not SQL")
+  end
+
+  # :nodoc:
+  # Whether the column it gives as a subquery can be NULL.
+  def subquery_nullable? -> Bool
+    c = @single
+    !c.nil? && c.null
   end
 
   # :nodoc:
@@ -676,20 +686,16 @@ class Query[T]
     rows!("select")
     unlocked!("select")
     raise ArgumentError.new("`select` after `preload`: a projection has no models to preload for") unless @preloads.empty?
-    reads = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
+    projection = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
       t, e = translator(expr, Array[Object].new, file)
-      [t.reads(e), Array[Guard].new]
+      # (A block that is one column of the one table, as it is: a
+      # subquery can give it.)
+      found = @sources.size == 1 ? t.column_of(e) : nil
+      [Projection.new(t.reads(e), found ? found[1] : nil), Array[Guard].new]
     end
+    reads = projection.reads
+    single = projection.single
     base = @loader
-    # (A block that is one column of the one table, as it is: a subquery
-    # can give it.)
-    single: Column? = nil
-    if @sources.size == 1
-      t, e = translator(expr, Array[Object].new, file)
-      if found = t.column_of(e)
-        single = found[1]
-      end
-    end
     # (The row loaded with the columns fetched, then the block on it.)
     Query[R].new(@sources.each_with_index.map { |s, i| Joins.fetching(s, reads[i]) }, @wheres, @orders, true, @limit, @offset, @shape,
                  ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } }, [], nil, nil, single)
