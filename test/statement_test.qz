@@ -21,6 +21,28 @@ class StatementTest < Test::Case
     assert_equal([text, params], s.to_sql)
   end
 
+  # rotor#70: many rows in one statement.
+  def test_insert_all
+    rows = [Item.new(name: "a"), Item.new(name: "b").with(note: "n"), Item.new(name: "c")]
+    check(
+      Rotor::Statement.insert_all(rows),
+      "INSERT INTO \"items\" (\"name\", \"price\", \"note\", \"qty\") VALUES ($1, $2, DEFAULT, $3), ($4, $5, $6, $7), ($8, $9, DEFAULT, $10)",
+      ["a", 1.0, 0, "b", 1.0, "n", 0, "c", 1.0, 0]
+    )
+    # One model: as `insert`.
+    assert_equal(Rotor::Statement.insert(rows[0]).to_sql, Rotor::Statement.insert_all([rows[0]]).to_sql)
+    check(Rotor::Statement.insert_all([Log.new, Log.new]), "INSERT INTO \"logs\" (\"text\") VALUES (DEFAULT), (DEFAULT)", [])
+    # With a conflict clause, whose parameters come after the rows'.
+    extra = 2
+    check(
+      Rotor::Statement.insert_all([rows[0], rows[2]]).on_conflict(:name).do_update { |old, new| {qty: old.qty + extra} },
+      "INSERT INTO \"items\" (\"name\", \"price\", \"qty\") VALUES ($1, $2, $3), ($4, $5, $6) ON CONFLICT (\"name\") DO UPDATE SET \"qty\" = \"items\".\"qty\" + $7",
+      ["a", 1.0, 0, "c", 1.0, 0, 2]
+    )
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert_all(Array[Item].new) }
+    assert_equal("`insert_all` of no models", e.message)
+  end
+
   # rotor#69: what an insert does on a conflict.
   def test_on_conflict
     i = Item.new(name: "pen")

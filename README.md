@@ -192,6 +192,18 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   (`"updated_at" = EXCLUDED."updated_at"`) unless the block sets it, as
   `update` always moves it; a statement run as written (`repo.run`)
   sets what its block says only.
+- **Many rows at once** (#70): `repo.insert_all(models)` inserts the
+  rows of models of one class in one statement (`VALUES (...), (...)`,
+  `Rotor::Statement.insert_all`), each with the columns any of them
+  sets (`DEFAULT` where a model does not), their timestamps set as
+  `insert` sets them, one time for all; more rows than PostgreSQL's
+  65535 parameters take go in several statements, in one transaction.
+  It gives the rows as they read back, as models. `insert_all` of a
+  `Rotor::Statement.insert_all(models).on_conflict(...)` combines it
+  with a conflict clause (`do_update` setting the update time as
+  `upsert`'s does): the rows inserted or updated come back, a skipped
+  one does not. PostgreSQL does not promise that the rows come
+  back in the order given: match them by a key when it matters.
 
 - The row is the block's receiver (`where { age > 18 }`) or its
   parameter (`where { |u| u.age > 18 }`, the form `for` comprehensions

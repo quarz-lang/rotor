@@ -539,6 +539,42 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#70: many rows at once.
+  def test_insert_all
+    with_repo do |repo|
+      assert_equal(Array[Sensor].new, repo.insert_all(Array[Sensor].new))
+      made = repo.insert_all([Sensor.new(serial: "a", name: "x"), Sensor.new(serial: "b", name: "y", hits: 4)])
+      assert_equal([["a", 0], ["b", 4]], made.map { |s| [s.serial, s.hits] }.sort_by { |p| p[0] })
+      assert(made.all? { |s| s.id > 0 })
+      # One time for all.
+      assert_equal(1, made.map { |s| s.created_at }.uniq.size)
+      assert_equal(made[0].created_at, made[0].updated_at)
+      # With a conflict clause: the rows inserted, the skipped one left out.
+      more = repo.insert_all(Rotor::Statement.insert_all([Sensor.new(serial: "a", name: "z"), Sensor.new(serial: "c", name: "z")]).on_conflict(:serial).do_nothing)
+      assert_equal(["c"], more.map { |s| s.serial })
+      bumped = repo.insert_all(Rotor::Statement.insert_all([Sensor.new(serial: "a", name: "w"), Sensor.new(serial: "b", name: "w")]).on_conflict(:serial).do_update { |old, new| {hits: old.hits + 1} })
+      assert_equal([["a", 1], ["b", 5]], bumped.map { |s| [s.serial, s.hits] }.sort_by { |p| p[0] })
+      # `do_update` moved the update time, as `upsert`'s does.
+      assert(bumped.all? { |s| s.updated_at > made[0].updated_at })
+      # Run as written (`repo.run`): the update time stays.
+      at = Time.at(1_700_000_000).utc
+      written = Rotor::Statement.insert_all([Sensor.new(serial: "a", name: "v", created_at: at, updated_at: at)]).on_conflict(:serial).do_update { |old, new| {hits: old.hits + 1} }
+      assert_equal(1, repo.run(written))
+      a = repo.all(Sensor.where { serial == "a" })[0]
+      assert_equal([2, bumped.find { |s| s.serial == "a" }.as(Sensor).updated_at], [a.hits, a.updated_at])
+      # Chunked into statements of at most 12 parameters (5 a row: 2
+      # rows each), in one transaction: a failing chunk inserts nothing.
+      batch = (1..5).map { |i| Sensor.new(serial: "s#{i}", name: "n") }
+      assert_equal(5, repo.insert_chunked(Rotor::Statement.insert_all(batch), 12).size)
+      assert_equal(8, repo.count(Sensor.query))
+      bad = [Sensor.new(serial: "t1", name: "n"), Sensor.new(serial: "t2", name: "n"), Sensor.new(serial: "s1", name: "n")]
+      assert_raise(PG::ServerError) { repo.insert_chunked(Rotor::Statement.insert_all(bad), 12) }
+      assert_equal(8, repo.count(Sensor.query))
+      e = assert_raise(ArgumentError) { repo.upsert(Rotor::Statement.insert_all(batch).on_conflict.do_nothing) }
+      assert_equal("`upsert` of the rows of several models: `insert_all` runs those", e.message)
+    end
+  end
+
   # rotor#69: an insert that says what to do on a conflict.
   def test_upsert
     with_repo do |repo|
