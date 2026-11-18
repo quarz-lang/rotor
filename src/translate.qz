@@ -778,7 +778,8 @@ class Translator
 
   # Whether `e` is nil whatever it captured: a nil literal, or an `if`
   # whose branches are (a missing `else` being nil).
-  private def always_nil?(e: Meta::Expr) -> Bool
+  # :nodoc:
+  def always_nil?(e: Meta::Expr) -> Bool
     case e
     in Meta::Expr::Lit(nil, _) then true
     in Meta::Expr::If(_, t, f, _) then always_nil?(t) && (f.nil? || always_nil?(f.as(Meta::Expr)))
@@ -1079,6 +1080,11 @@ class Translator
     [le, re].each do |side|
       if (found = column_of(side)) && !found[1].element.nil? && !always_nil?(le) && !always_nil?(re)
         untranslatable("a comparison of the array column `#{found[1].name}`", line)
+      end
+      # (A document column of a type: `nil?` and `== nil` only, for now,
+      # #94.)
+      if (found = column_of(side)) && (d = found[1].document) && !always_nil?(le) && !always_nil?(re)
+        untranslatable("a comparison of the document column `#{found[1].name}` (a #{d.name})", line)
       end
     end
     # (A LEFT JOIN's row against nil: `c == nil` is `c.nil?`; against

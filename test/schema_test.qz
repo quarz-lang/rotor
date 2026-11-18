@@ -97,6 +97,9 @@ class SchemaTest < Test::Case
     assert_equal("Item's association `nest` would replace the model's own `nest`", e.message)
     e = assert_raise(ArgumentError) { s.column(:to_h, String) }
     assert_equal("Item's column `to_h` would replace the model's own `to_h`", e.message)
+    # (A document column's decoding, #94.)
+    e = assert_raise(ArgumentError) { s.column(:decode_document, Int) }
+    assert_equal("Item's column `decode_document` would replace the model's own `decode_document`", e.message)
   end
 end
 

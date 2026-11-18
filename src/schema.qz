@@ -17,14 +17,25 @@
 #   a changeset's), for a password or a token.
 class Schema
   @model: String
+  # The model's class, and the latest of its documents' decoders, which
+  # a document column generates (nil for a schema made outside `table`,
+  # which has no document column).
+  @class_def: Meta::ClassDef[Model]?
+  var @decoder: Meta::Method[Model, (Symbol, JSON::Value) -> Object]?
   var @columns: Array[Column] = []
   var @associations: Array[Association] = []
   var @created_at: Symbol? = nil
   var @updated_at: Symbol? = nil
 
-  # A schema for the model named `model` (its class name).
-  def initialize(@model: String)
+  # A schema for the model named `model` (its class name); `table`
+  # gives the model's class and its documents' first decoder too.
+  def initialize(@model: String, @class_def: Meta::ClassDef[Model]? = nil, @decoder: Meta::Method[Model, (Symbol, JSON::Value) -> Object]? = nil)
   end
+
+  # :nodoc:
+  # The latest of the documents' decoders: `Model#decode_document`
+  # calls it.
+  def decoder -> Meta::Method[Model, (Symbol, JSON::Value) -> Object]? = @decoder
 
   # The columns declared so far, in order.
   def columns -> Array[Column] = @columns
@@ -76,6 +87,51 @@ class Schema
   # column that needs the exact text is declared `String`).
   def column(name: Symbol, type: Type[JSON::Value], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "jsonb", JSON::Value, null, nil, false, redact)
+  end
+
+  # A document column (`jsonb`) holding a value of `type`, a `data`
+  # type (an `Array` or a `Hash` is a field of one: here a `Type` value
+  # carries no type arguments, which `JSON.decode` needs): written as
+  # the value's JSON (`JSON.generate`), read with `JSON.decode[T]` on
+  # each read of the getter (a decoded value is not kept, until
+  # quarz-lang/quarz#890: the cost of a read grows with the document;
+  # read it once into a local).
+  # A type `JSON.decode` cannot take is an error when the program is
+  # compiled (at the `table` block, naming the column's decoder,
+  # `__rotor_document_<name>`). A row whose document does not have the
+  # type's shape raises `JSON::DecodeError` when it is loaded, naming the
+  # table, the column and where; a field with a default takes it for a
+  # missing key. `json: true` is what says it (`false` is refused): a
+  # mistyped scalar type is not silently a document.
+  static def column[T](name: Symbol, type: Type[T], *, json: Bool, null: Bool = false, redact: Bool = false) -> Void
+    raise ArgumentError.new("#{@model}'s column `#{name}`: `json: false` declares nothing; leave it out for a scalar column") unless json
+    t = type.as(Type[Object])
+    if t == Array || t == Hash || t == Set
+      raise ArgumentError.new("#{@model}'s document column `#{name}`: its type is a `data` type; wrap the #{t.name} in one (`data Log = (entries: Array[Entry])`)")
+    end
+    cls = @class_def || raise ArgumentError.new("#{@model}'s document column `#{name}` is declared outside a model's `table`")
+    prev = @decoder || raise ArgumentError.new("#{@model}'s document column `#{name}` is declared outside a model's `table`")
+    add(name, "jsonb", JSON::Value, null, nil, false, redact, nil, false, type.as(Type[Object]))
+    n = name
+    # (A link of a chain: this column's document, or the previous
+    # link's.)
+    cls.doc ":nodoc:"
+    @decoder = cls.def_method(:"__rotor_document_#{name}", [:column, :document]) do |column: Symbol, document: JSON::Value| -> Object
+      column == n ? JSON.decode[T](document) : prev.bind(self).call(column, document)
+    end
+    cls.doc "The `#{name}` column's value, decoded from its document."
+    # (Decoded on each read: a decoded value cannot be kept typed yet, a
+    # generated `initialize` not assigning a generated field that is
+    # not `var`, quarz-lang/quarz#890.)
+    if null
+      cls.def_method(name) do -> T?
+        (d = read_nullable(n).as?(JSON::Value)) ? JSON.decode[T](d) : nil
+      end
+    else
+      cls.def_method(name) do -> T
+        JSON.decode[T](read_attr(n).as(JSON::Value))
+      end
+    end
   end
 
   # An array column of `String`s (`text[]`), its elements never NULL: a
@@ -324,9 +380,9 @@ class Schema
   end
 
   # The methods of `Rotor::Model` that a column's getter would replace.
-  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?]
+  RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?, :decode_document, :check_document, :no_document]
 
-  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false, element: Type[Object]? = nil, nils: Bool = false) -> Void
+  private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false, element: Type[Object]? = nil, nils: Bool = false, document: Type[Object]? = nil) -> Void
     if RESERVED.include?(name)
       raise ArgumentError.new("#{@model}'s column `#{name}` would replace the model's own `#{name}`")
     end
@@ -339,6 +395,6 @@ class Schema
     if primary && null
       raise ArgumentError.new("#{@model}'s primary key `#{name}` cannot be NULL")
     end
-    @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact, element, nils)]
+    @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact, element, nils, document)]
   end
 end

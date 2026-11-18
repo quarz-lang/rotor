@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/document_column_test.qz): a
+# document column's type is one `JSON.decode` takes, and `json: false`
+# declares nothing. It is checked against this checkout of rotor.
+[cog]
+name = "document_wrong_type"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }
