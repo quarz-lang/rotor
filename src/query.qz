@@ -588,18 +588,18 @@ class Query[T]
   # The rows' deletion: `DELETE ... WHERE` with the query's conditions
   # (a query with an order, a limit, an offset or a projection cannot
   # say which rows).
-  def delete -> Statement
+  def delete -> Changes[T]
     plain!("delete")
-    Statement.new(table, [Piece::Text.new("DELETE FROM #{Dialect.table(table.name, table.schema)}")] + outer_named(where_pieces), nil)
+    Changes[T].new(table, [Piece::Text.new("DELETE FROM #{Dialect.table(table.name, table.schema)}")] + outer_named(where_pieces), nil, @loader)
   end
 
   # The rows' update: the block gives a hash literal of columns and their
   # new values, expressions of the row as in `where` (`update { {age:
   # age + 1, name: "x"} }`).
-  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
+  def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Changes[T] = update_set(set.expr, set.captures, set.file, set.site)
 
   # :ditto:
-  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]] using Compare) -> Statement = update_set(set.expr, set.captures, set.file, set.site)
+  def update(&set: Quoted[shareable (T) -> Hash[Symbol, Object]] using Compare) -> Changes[T] = update_set(set.expr, set.captures, set.file, set.site)
 
   # The SQL statement and its parameters.
   def to_sql -> [String, Array[Object?]] = Statement.render(pieces)
@@ -733,7 +733,7 @@ class Query[T]
                  ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } }, [], nil, nil, single)
   end
 
-  private def update_set(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Statement
+  private def update_set(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Changes[T]
     plain!("update")
     sets = Cache.fetch(Cache::SETS, Cache.key(site, @sources), captures) do
       t, e = translator(expr, captures, file)
@@ -741,7 +741,7 @@ class Query[T]
     end
     # (A value may read the row in a subquery too: `{flagged: Event.where
     # { |e| e.post_id == p.id }.exists?}`.)
-    Statement.new(table, outer_named(Binds.fill(sets, captures) + where_pieces), nil)
+    Changes[T].new(table, outer_named(Binds.fill(sets, captures) + where_pieces), nil, @loader)
   end
 
   # The `UPDATE ... SET` of `update`'s block `e`.

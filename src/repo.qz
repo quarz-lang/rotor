@@ -61,6 +61,21 @@ class Repo
   # The query's rows: `run(query)`.
   def all[T](query: Query[T]) -> Array[T] = run(query)
 
+  # The rows a statement changed, as it gives them back (`returning`):
+  # models of the columns returned, as `select` loads them (reading
+  # another raises `Rotor::NotLoadedError`), in the order the server
+  # gives them (`repo.all(q.update { ... }.returning(:id))`).
+  # `ArgumentError` for a statement without `returning`.
+  def all[T](statement: Changes[T]) -> Array[T]
+    names = statement.returned || raise ArgumentError.new("`all` of a statement without `returning`: name the columns it gives back (`returning(:id)`), or all of them (`returning`); `run` gives the count")
+    columns = statement.table.columns
+    cols = names.map { |n| columns.find { |c| c.name == n }.as(Column) }
+    whole = columns.all? { |c| names.include?(c.name) }
+    sql, params = statement.to_sql
+    found = @adapter.query(sql, params).rows.map { |row| [Fetched.new(Repo.values(row, cols), whole)] }
+    statement.rows(found)
+  end
+
   # The query's one row, or nil; raises `Rotor::MultipleResultsError`
   # when there are more.
   def one[T](query: Query[T]) -> T?
