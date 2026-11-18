@@ -47,6 +47,20 @@ type Loader[T] = shareable (Array[Array[Fetched]]) -> Array[T]
 # associations preloaded for it.
 data ModelOps[T] = (as_model: shareable (T) -> Model, attach: shareable (T, Hash[Symbol, Array[Model]]) -> T)
 
+# :nodoc:
+# What a query is as a subquery, whatever its rows' type (`Rotor::Query`
+# includes it): what the translator and `Rotor::Binds` reach a captured
+# query by.
+module Subquery
+  # The column it gives as a subquery.
+  abstract def subquery_column -> Column
+  # Its SQL and parameters as a subquery.
+  abstract def subquery -> Array[Piece]
+  # Whether the column it gives as a subquery can be NULL (false for a
+  # query that cannot be one).
+  abstract def subquery_nullable? -> Bool
+end
+
 # A query over a model's table, as a value: what `Rotor::Model.where`
 # and the others build, and a repository runs. Each method gives a new
 # query; none changes the one it is called on. Its blocks are not run:
@@ -76,6 +90,7 @@ data ModelOps[T] = (as_model: shareable (T) -> Model, attach: shareable (T, Hash
 # query again where it was built before costs no translation.
 class Query[T]
   include Shareable
+  include Subquery
   # What a query gives: its rows, their number, or whether there is one.
   enum Shape = Rows | Count | Exists
 
@@ -97,9 +112,12 @@ class Query[T]
   @ops: ModelOps[T]?
   # Its locking clause (` FOR UPDATE SKIP LOCKED`), or nil.
   @lock: String?
+  # The column a `select` of one column as it is (`select { id }`)
+  # gives, or nil: what makes it a subquery (`include?`).
+  @single: Column?
 
   # (Made by `Rotor::Model.query` and the methods of this class.)
-  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil, @lock: String? = nil)
+  def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil, @lock: String? = nil, @single: Column? = nil)
   end
 
   # The table (the first, in a join).
@@ -257,6 +275,66 @@ class Query[T]
     unshaped!("offset")
     raise ArgumentError.new("a negative offset: #{n}") if n < 0
     copy(offset: n)
+  end
+
+  # Whether `x` is one of its rows: only in another query's block, as a
+  # subquery (`x IN (SELECT ...)`), the query a `select` of one column as
+  # it is, captured by the block:
+  #
+  # ```
+  # class SOrder < Rotor::Model
+  #   table "orders" do
+  #     column :id, Int, primary: true
+  #     column :status, String
+  #   end
+  # end
+  #
+  # class SLine < Rotor::Model
+  #   table "line_items" do
+  #     column :id, Int, primary: true
+  #     column :order_id, Int
+  #   end
+  # end
+  #
+  # paid = SOrder.where { status == "paid" }.select { id }
+  # SLine.where { paid.include?(order_id) }.to_sql
+  # # => ["SELECT \"id\", \"order_id\" FROM \"line_items\" WHERE \"order_id\" IN (SELECT \"id\" FROM \"orders\" WHERE \"status\" = $1)", ["paid"]]
+  # ```
+  #
+  # Called outside a query's block, it raises `ArgumentError`: a query
+  # is not a collection (run it: `Rotor::Repo#all`).
+  def include?(x: T) -> Bool
+    raise ArgumentError.new("`include?` of a query outside a query's block: a query is not a collection; run it (`repo.all(query)`), or test a column against it in a block (`where { q.include?(col) }`)")
+  end
+
+  # :nodoc:
+  # The column it gives as a subquery; `Rotor::UntranslatableError` for
+  # a query that cannot be one.
+  def subquery_column -> Column
+    if @sources.size != 1 || @shape != Shape::Rows || !@projected
+      raise UntranslatableError.new("`include?` of a query that is not a `select` of one column of one table (`select { id }`)")
+    end
+    @single || raise UntranslatableError.new("`include?` of a query whose `select` is not one column as it is (`select { id }`): its block is computed in Quarz, not SQL")
+  end
+
+  # :nodoc:
+  # Whether the column it gives as a subquery can be NULL.
+  def subquery_nullable? -> Bool
+    c = @single
+    !c.nil? && c.null
+  end
+
+  # :nodoc:
+  # Its SQL and parameters as a subquery (`Rotor::Bind::Subquery`).
+  def subquery -> Array[Piece]
+    subquery_column
+    unlocked!("include?")
+    pieces.map do |p|
+      case p
+      in Piece::Column(_, n) then Piece::Text.new(Dialect.quote(n.to_s)).as(Piece)
+      else p
+      end
+    end
   end
 
   # Its rows locked for update, `FOR UPDATE`, until the transaction
@@ -555,7 +633,7 @@ class Query[T]
   end
 
   private def copy(*, wheres: Array[Sql] = @wheres, orders: Array[[Sql, Bool]] = @orders, limit: Int? = @limit, offset: Int? = @offset) -> Query[T]
-    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, ops, @lock)
+    Query[T].new(@sources, wheres, orders, @projected, limit, offset, @shape, @loader, @preloads, ops, @lock, @single)
   end
 
   private def translator(expr: Meta::Expr, captures: Array[Object], file: String) -> [Translator, Meta::Expr]
@@ -608,14 +686,19 @@ class Query[T]
     rows!("select")
     unlocked!("select")
     raise ArgumentError.new("`select` after `preload`: a projection has no models to preload for") unless @preloads.empty?
-    reads = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
+    projection = Cache.fetch(Cache::READS, Cache.key(site, @sources), Array[Object].new) do
       t, e = translator(expr, Array[Object].new, file)
-      [t.reads(e), Array[Guard].new]
+      # (A block that is one column of the one table, as it is: a
+      # subquery can give it.)
+      found = @sources.size == 1 ? t.column_of(e) : nil
+      [Projection.new(t.reads(e), found ? found[1] : nil), Array[Guard].new]
     end
+    reads = projection.reads
+    single = projection.single
     base = @loader
     # (The row loaded with the columns fetched, then the block on it.)
     Query[R].new(@sources.each_with_index.map { |s, i| Joins.fetching(s, reads[i]) }, @wheres, @orders, true, @limit, @offset, @shape,
-                 ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } })
+                 ->(rows: Array[Array[Fetched]]) { base.call(rows).map { |x| f.call(x) } }, [], nil, nil, single)
   end
 
   private def update_set(expr: Meta::Expr, captures: Array[Object], file: String, site: Int) -> Statement

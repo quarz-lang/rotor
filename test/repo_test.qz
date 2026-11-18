@@ -506,6 +506,23 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#71: a subquery, against the server.
+  def test_include_of_a_query
+    with_repo do |repo|
+      ann = repo.insert(Author.new(name: "Ann"))
+      bob = repo.insert(Author.new(name: "Bob"))
+      repo.insert(Author.new(name: "Cy"))
+      repo.insert(Volume.new(title: "Quarz", author_id: ann.id))
+      repo.insert(Volume.new(title: "Other", author_id: bob.id))
+      repo.insert(Volume.new(title: "Quiet"))
+      prefix = "Q"
+      wrote = Volume.where { title.start_with?(prefix) }.select { author_id }
+      assert_equal(["Ann"], repo.all(Author.where { |a| wrote.include?(a.id) }.order { |a| a.id }).map { |a| a.name })
+      everyone = Volume.query.select { title }
+      assert_equal(["Quarz", "Other", "Quiet"].sort, repo.all(Volume.where { |v| everyone.include?(v.title) }).map { |v| v.title }.sort)
+    end
+  end
+
   # rotor#68: a row locked in one transaction, seen from another.
   def test_row_locks
     with_repo do |repo|

@@ -321,6 +321,18 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   the source, so it makes no statement per length (the reason a captured
   array is one parameter, `= ANY($1)`), and `IN` is the form every SQL
   dialect has, where `= ANY(array)` is PostgreSQL's.
+- A captured query's `include?` is a subquery (#71): with `paid =
+  Order.where { status == "paid" }.select { id }`, `LineItem.where {
+  paid.include?(order_id) }` is `"order_id" IN (SELECT "id" FROM
+  "orders" WHERE "status" = $1)`, the subquery's parameters numbered
+  with the outer query's, and the subquery the one captured at each
+  build. The query is a `select` of one column as it is (a block
+  computed in Quarz, `select { id + 1 }`, or of several columns is
+  refused), built outside the block (one built in it is refused), and
+  unlocked. Where its column or the tested one can be NULL, the test is
+  three-valued (`NOT IN` finds nothing beside a NULL), and `!` of it
+  refused. Outside a query's block `include?` raises `ArgumentError`: a
+  query is not a collection.
 - Comparing a nullable column: `where { age > 18 }` is allowed in query
   blocks, with `age` an `Int?`. Every query block is checked with `using
   Rotor::Compare` (Quarz's docs/01 §7), whose extensions give `nil` and
