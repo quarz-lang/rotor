@@ -194,6 +194,10 @@ class Translator
     in Meta::Expr::HashLit(_, l) then l
     in Meta::Expr::Interp(_, l) then l
     in Meta::Expr::Block(_, _, l) then l
+    # (Temporary, rotor#108: a node this `case` does not name yet,
+    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
+    # goes when it is named, and the `case` is exhaustive again.)
+    else 0
     end
   end
 
@@ -293,6 +297,10 @@ class Translator
     in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
     in Meta::Expr::Block(_, _, line) then untranslatable("a block", line)
+    # (Temporary, rotor#108: a node this `case` does not name yet,
+    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
+    # goes when it is named, and the `case` is exhaustive again.)
+    else untranslatable("`&.`", 0)
     end
   end
 
@@ -444,6 +452,10 @@ class Translator
     in Meta::Expr::HashLit(_, _) then "{...}"
     in Meta::Expr::Interp(_, _) then "\"...\""
     in Meta::Expr::Block(_, _, _) then "{ ... }"
+    # (Temporary, rotor#108: a node this `case` does not name yet,
+    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
+    # goes when it is named, and the `case` is exhaustive again.)
+    else "..."
     end
   end
 
@@ -573,6 +585,12 @@ class Translator
       rows: Array[Int?] = []
       params.each { |_| rows = rows + [nil] }
       all(body, scopes + [Scope.new(params, rows, false, nil, false)])
+    # (Temporary, rotor#108: a node this `case` does not name yet,
+    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
+    # goes when it is named, and the `case` is exhaustive again.)
+    # (Nothing read: safe only because `translate` refuses the node
+    # first.)
+    else none
     end
   end
 
