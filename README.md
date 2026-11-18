@@ -114,6 +114,16 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `update`'s value, and the arithmetic of days: `day + 7` and `day - 7`
   (SQL's `date + integer`, a `Date`; an `Int` that is not a literal is
   cast `::integer`) and `day - other` (`date - date`, an `Int` of days).
+  There SQL and Quarz part: Quarz's `Date` raises `RangeError` past the
+  year 9999, while PostgreSQL's `date + integer` goes on to the year
+  5874897 and `::integer` raises past 2**31. So `where { day + n > x }`
+  with a huge `n` is an error from the server (`22003`, "value … is
+  out of range for type integer", as an `integer` column's overflow
+  is, "Parameter types" 2), and **an
+  `update { {day: day + 3_000_000} }` can write a date beyond 9999,
+  which the model then cannot read** (`ArgumentError` from pg's reader,
+  naming the value). A date built in the block (`Date.new(...)`,
+  `Date.parse(...)`) is refused, as a `Time` is: capture a variable.
   The parts and the calendar (`year`, `month`, `wday`, `next_month`,
   `next_year`, `strftime`) are refused for now. A `Time` and a `Date`
   are never equal in Quarz: comparing them is refused (`==`), or does

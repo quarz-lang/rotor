@@ -77,6 +77,10 @@ class DateColumnTextTest < Test::Case
     assert_equal("`Date#next_month` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.next_month == d } })
     assert_equal("`Date#wday` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.wday == 1 } })
     assert_equal("`Date#strftime` cannot be translated to SQL", refusal { DayStat.where { |x| x.day.strftime("%Y") == s } })
+    # A date built in the block: refused, as a `Time` is (capture a
+    # variable instead).
+    assert_equal("`Date.new` cannot be translated to SQL", refusal { DayStat.where { |x| x.day >= Date.new(2026, 1, 1) }.to_sql[0] })
+    assert_equal("`Date.parse` cannot be translated to SQL", refusal { DayStat.where { |x| x.day >= Date.parse("2026-01-01") }.to_sql[0] })
   end
 
   def test_wrong_types_do_not_compile
@@ -171,6 +175,18 @@ class DateColumnTest < Test::Case
       repo.run(DayStat.where { |x| x.hits == 2 }.update { |x| {ends: x.day + 30} })
       assert_equal(d + 31, (repo.get(DayStat, {site: "a", day: d + 1}) || raise "not found").ends)
       # An update of the model, and an upsert keyed by the date.
+      # Where SQL and Quarz part: PostgreSQL's `date + integer` goes on
+      # past the year 9999 (where Quarz's `Date` raises), and `::integer`
+      # raises past 2**31. A huge `n` is an error from the server; an
+      # update can write a date beyond 9999, which the model then cannot
+      # read.
+      huge = 3_000_000_000
+      e = assert_raise(PG::ServerError) { repo.all(DayStat.where { |x| x.day + huge > d }) }
+      assert_match(/ERROR 22003: value "3000000000" is out of range for type integer/, e.message)
+      repo.run(DayStat.where { |x| x.site == "b" }.update { |x| {ends: x.day + 3_000_000} })
+      far = assert_raise(ArgumentError) { repo.get(DayStat, {site: "b", day: d}) }
+      assert_match(/\A10240-\d\d-\d\d: a Date holds the years 1 to 9999/, far.message)
+      repo.run(DayStat.where { |x| x.site == "b" }.update { |x| {ends: nil} })
       u = repo.update(got.with(ends: nil))
       assert_nil((repo.get(DayStat, {site: "a", day: d}) || raise "not found").ends)
       up = repo.upsert(Rotor::Statement.insert(DayStat.new(site: "a", day: d, hits: 9)).on_conflict(:site, :day).do_update { |old, new| {hits: new.hits} }) || raise "skipped"
