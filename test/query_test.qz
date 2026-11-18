@@ -716,6 +716,9 @@ class QueryTest < Test::Case
     check(Person.where { joined < at + (d1 - d2) }, "#{COLS} WHERE \"joined\" < $1::timestamptz + (($2::bigint * interval '1 microsecond') - ($3::bigint * interval '1 microsecond'))", [at, 3_600_000_000, 1_800_000_000])
     e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| 1.hours + 1.minutes > span } }
     assert_match(/a comparison of `Duration`s/, e.message)
+    # The database's clock minus a duration (rotor#75 with #76).
+    check(Person.where { joined > now - 5.minutes }, "#{COLS} WHERE \"joined\" > now() - (5 * interval '1 minute')", [])
+    check(Gauge.where { |g| g.at > Rotor::SQL.now - span }, "#{GS} WHERE \"at\" > now() - ($1::bigint * interval '1 microsecond')", [90_500_000])
     # Out: `Time - Time`, and comparing `Duration`s.
     e = assert_raise(Rotor::UntranslatableError) { Person.where { joined - at > span } }
     assert_match(/`Time - Time`/, e.message)
