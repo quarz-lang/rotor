@@ -87,6 +87,17 @@ class Document < Rotor::Model
   end
 end
 
+# A unique column besides the key (rotor#69).
+class Sensor < Rotor::Model
+  table "sensors" do
+    column :id, Int, primary: true
+    column :serial, String
+    column :name, String
+    column :hits, Int, default: 0
+    timestamps
+  end
+end
+
 class Remark < Rotor::Model
   table "remarks" do
     column :id, Int, primary: true
@@ -127,7 +138,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -150,7 +161,8 @@ class RepoTest < Test::Case
     CREATE TABLE legacy (id integer PRIMARY KEY, n integer NOT NULL);
     CREATE INDEX legacy_n ON legacy (n);
     CREATE TABLE documents (id bigserial PRIMARY KEY, body jsonb NOT NULL, raw json, day date NOT NULL);
-    CREATE TABLE arrays (id bigserial PRIMARY KEY, tags text[], counts bigint[], ratios double precision[], flags boolean[], stamps timestamptz[], grid bigint[][])
+    CREATE TABLE arrays (id bigserial PRIMARY KEY, tags text[], counts bigint[], ratios double precision[], flags boolean[], stamps timestamptz[], grid bigint[][]);
+    CREATE TABLE sensors (id bigserial PRIMARY KEY, serial text NOT NULL UNIQUE, name text NOT NULL, hits bigint NOT NULL DEFAULT 0, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL)
   SQL
 
   def self.startup
@@ -184,7 +196,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -514,6 +526,40 @@ class RepoTest < Test::Case
       ensure
         c.close
       end
+    end
+  end
+
+  # rotor#69: an insert that says what to do on a conflict.
+  def test_upsert
+    with_repo do |repo|
+      bump = ->(s: Sensor) { Rotor::Statement.insert(s).on_conflict(:serial).do_update { |old, new| {name: new.name, hits: old.hits + 1, updated_at: new.updated_at} } }
+      first = repo.upsert(bump.call(Sensor.new(serial: "a1", name: "north"))) || raise "skipped"
+      assert_equal([1, "north", 0], [first.id, first.name, first.hits])
+      second = repo.upsert(bump.call(Sensor.new(serial: "a1", name: "south"))) || raise "skipped"
+      # The row as updated: its key and creation time kept.
+      assert_equal([1, "south", 1], [second.id, second.name, second.hits])
+      assert_equal(first.created_at, second.created_at)
+      assert(second.updated_at >= first.updated_at)
+      # DO NOTHING, by the column, by the constraint, by any: nil.
+      assert_nil(repo.upsert(Rotor::Statement.insert(Sensor.new(serial: "a1", name: "x")).on_conflict(:serial).do_nothing))
+      assert_nil(repo.upsert(Rotor::Statement.insert(Sensor.new(serial: "a1", name: "x")).on_conflict(constraint: "sensors_serial_key").do_nothing))
+      assert_nil(repo.upsert(Rotor::Statement.insert(Sensor.new(serial: "a1", name: "x")).on_conflict.do_nothing))
+      # A `where` that is false leaves the row: nil.
+      most = 0
+      kept = Rotor::Statement.insert(Sensor.new(serial: "a1", name: "y")).on_conflict(:serial).do_update { |old, new| {name: new.name} }.where { |old, new| old.hits < most }
+      assert_nil(repo.upsert(kept))
+      assert_equal(["south"], repo.all(Sensor.query).map { |s| s.name })
+      # A row that does not conflict is inserted, whatever the clause.
+      other = repo.upsert(Rotor::Statement.insert(Sensor.new(serial: "b2", name: "east")).on_conflict(:serial).do_nothing) || raise "skipped"
+      # (A conflicting insert takes a sequence value too: the id is not 2.)
+      assert_equal("east", other.name)
+      assert(other.id > second.id)
+      # `run` gives the count, as for any statement (setting no
+      # timestamps: given here).
+      now = Time.now.utc
+      assert_equal(0, repo.run(Rotor::Statement.insert(Sensor.new(serial: "b2", name: "x", created_at: now, updated_at: now)).on_conflict(:serial).do_nothing))
+      e = assert_raise(ArgumentError) { repo.upsert(Rotor::Statement.insert(Sensor.new(serial: "c3", name: "x"))) }
+      assert_equal("`upsert` of an insert that says nothing on a conflict: `on_conflict` first, or `insert` the model", e.message)
     end
   end
 
