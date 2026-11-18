@@ -94,7 +94,7 @@ module Preloads
   # Each model's `a` (a `has_many`): those it has preloaded, else the
   # target's rows whose foreign key is its key.
   private def self.has_many(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
-    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{a.name}` needs")
+    pk = info.single_key("`#{info.name}`", "`#{a.name}`")
     HasMany.foreign_key!(a.target, a.foreign_key, models[0].class.name, a.name)
     keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
     by_key: Hash[Value, Array[Model]] = {}
@@ -113,7 +113,7 @@ module Preloads
   # one query joining the join model, each target once per owner (in the
   # order of its primary key) however many join rows pair them.
   private def self.through(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
-    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{a.name}` needs")
+    pk = info.single_key("`#{info.name}`", "`#{a.name}`")
     k = Through.keys(models[0].class, a)
     keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
     by_key: Hash[Value, Array[Model]] = {}
@@ -138,7 +138,7 @@ module Preloads
   # target's row its foreign key names, or none.
   private def self.belongs_to(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
     target = a.target.table_info
-    pk = target.primary_key || raise SchemaError.new("#{a.target.name} has no primary key, which #{models[0].class.name}##{a.name} needs")
+    pk = target.single_key(a.target.name, "#{models[0].class.name}##{a.name}")
     keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, a.foreign_key) })
     by_key: Hash[Value, Model] = {}
     fetch(repo, a.target, pk, keys).each do |row|

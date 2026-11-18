@@ -267,7 +267,15 @@ class Migrator
     q = ->(s: String) { Dialect.quote(s) }
     case op
     in Operation::CreateTable(name:, columns:, indexes:, if_not_exists:, schema:)
-      ["CREATE TABLE #{if_not_exists ? "IF NOT EXISTS " : ""}#{Dialect.table(name, schema)} (#{columns.map { |c| column(c) }.join(", ")})"] +
+      # (Several primary columns: one composite key, `PRIMARY KEY (a,
+      # b)` after the columns, in their order.)
+      keys = columns.select { |c| c.primary }
+      defs = if keys.size > 1
+               columns.map { |c| column(c.primary ? c.with(primary: false, null: false) : c) } + ["PRIMARY KEY (#{keys.map { |c| q.call(c.name) }.join(", ")})"]
+             else
+               columns.map { |c| column(c) }
+             end
+      ["CREATE TABLE #{if_not_exists ? "IF NOT EXISTS " : ""}#{Dialect.table(name, schema)} (#{defs.join(", ")})"] +
         indexes.map { |i| index(i, if_not_exists) }
     in Operation::DropTable(name:, if_exists:) then ["DROP TABLE #{if_exists ? "IF EXISTS " : ""}#{q.call(name)}"]
     in Operation::RenameTable(name:, to:) then ["ALTER TABLE #{q.call(name)} RENAME TO #{q.call(to)}"]

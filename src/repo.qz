@@ -80,11 +80,32 @@ class Repo
   # The query's first row, or nil.
   def first[T](query: Query[T]) -> T? = run(query.first).first?
 
-  # The `model` whose primary key is `id`, or nil.
+  # The `model` whose primary key is `id`, or nil. For a composite key
+  # `id` is a Hash of every key column's value (`{sensor_id: "a",
+  # taken_at: t}`), which a single key may take too; `ArgumentError`
+  # for a Hash that names a column not in the key or leaves one out,
+  # and for a value that is not a Hash with a composite key.
   def get[M <: Model](model: Type[M], id: Object) -> M?
     q = model.query
-    key = q.table.primary_key || raise ArgumentError.new("`#{q.table.name}` has no primary key")
-    one(q.where_key(key, id))
+    t = q.table
+    keys = t.keys!
+    case id
+    in Hash => given
+      named = given.keys.map { |k| k.as?(Symbol) || raise ArgumentError.new("`get` of #{model.name}: a key's column is named by a Symbol, not #{k.inspect}") }
+      if (extra = named.find { |k| !keys.include?(k) })
+        raise ArgumentError.new("`get` of #{model.name}: `#{extra}` is not a column of its primary key (#{keys.join(", ")})")
+      end
+      if (missing = keys.find { |k| !named.include?(k) })
+        raise ArgumentError.new("`get` of #{model.name}: no value for `#{missing}` of its primary key (#{keys.join(", ")})")
+      end
+      keys.each { |k| q = q.where_key(k, given[k]?) }
+      one(q)
+    else
+      if keys.size > 1
+        raise ArgumentError.new("`get` of #{model.name}, whose primary key is composite: give a Hash of #{keys.join(", ")}")
+      end
+      one(q.where_key(keys[0], id))
+    end
   end
 
   # The models with the associations the block names preloaded: one
@@ -209,7 +230,7 @@ class Repo
     info = owner.table_info
     a = info.associations.find { |x| x.name == name } || raise SchemaError.new("#{owner.class.name} has no association `#{name}`")
     k = Through.keys(owner.class, a)
-    pk = info.primary_key || raise SchemaError.new("`#{info.name}` has no primary key, which `#{name}` needs")
+    pk = info.single_key("`#{info.name}`", "`#{name}`")
     id = owner.to_h[pk]? || raise MissingAttributeError.new("#{owner.class.name}##{pk} is not set")
     ids: Array[Value] = targets.map do |t|
       t.to_h[k.target_pk]? || raise ArgumentError.new("`put_assoc` of a #{t.class.name} without its #{k.target_pk}: save it first")
@@ -262,11 +283,7 @@ class Repo
       names = names + [u] unless names.include?(u)
     end
     raise ArgumentError.new("`#{t.name}` has no update time, and no column was named") if names.empty?
-    key = t.primary_key || raise ArgumentError.new("`#{t.name}` has no primary key")
-    if model.changed.include?(key)
-      raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
-    end
-    id = model.to_h[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
+    by_key = Statement.by_key(model)
     pending = model.changed - names
     now = Repo.now
     values: Hash[Symbol, Object?] = {}
@@ -277,7 +294,7 @@ class Repo
       pieces = pieces + [Piece::Text.new(", ")] if i > 0
       pieces = pieces + [Piece::Text.new("#{Dialect.quote(n.to_s)} = "), Piece::Param.new(now)]
     end
-    pieces = pieces + [Piece::Text.new(" WHERE #{Dialect.quote(key.to_s)} = "), Piece::Param.new(id)]
+    pieces = pieces + by_key
     stale!(model) if changed(Statement.new(t, pieces, nil)) == 0
     touched.keep_changes(pending)
   end
@@ -349,9 +366,8 @@ class Repo
 
   # (A statement by the model's key changed no row.)
   private def stale!(model: Model) -> Nothing
-    t = model.table_info
-    key = t.primary_key
-    named = key ? " #{key}: #{model.to_h[key]?.inspect}" : ""
+    values = model.to_h
+    named = model.table_info.primary_keys.map { |k| " #{k}: #{values[k]?.inspect}" }.join(",")
     raise StaleError.new("#{model.class.name}#{named}: its row no longer exists")
   end
 

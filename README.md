@@ -42,8 +42,21 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
 - `table` runs its block at compile time on a `Rotor::Schema`, then
   generates, for each column, a getter typed by the column (`T`, or `T?`
   for `null: true`), a getter for each association (Associations, below), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
-  `primary_key` (`Symbol?`) and `associations`
-  (`Array[Rotor::Association]`).
+  `primary_key` (`Symbol?`), `primary_keys` (`Array[Symbol]`) and
+  `associations` (`Array[Rotor::Association]`).
+- `primary: true` on several columns makes a composite primary key, of
+  those columns in the order declared (`primary_keys`; `primary_key`
+  raises `ArgumentError` for one): `repo.get(Reading, {sensor_id: "a",
+  taken_at: t})` takes a Hash of every key column (one left out or not
+  in the key raises `ArgumentError`, as does a value that is not a
+  Hash); `update`, `touch`, `delete` and `Rotor::Statement.update` and
+  `delete` write `WHERE` on every key column; `Rotor::StaleError` names
+  the whole key; `Rotor::Schema.create` writes `PRIMARY KEY (a, b)`
+  (an identity only for a single `Int` key). Associations take a
+  single key: a model with a composite key has no `has_many` (refused
+  when the program is compiled), and a `belongs_to`, a `through` or a
+  preload that targets one raises `Rotor::SchemaError` when used
+  (#63).
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`

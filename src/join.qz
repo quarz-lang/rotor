@@ -47,7 +47,7 @@ module Joins
       if j = a.through
         t.untranslatable("`#{m.owner.name}##{m.name}`, through #{j.name}, in a join (join #{j.name} itself)", line)
       end
-      key = source.table.primary_key || raise SchemaError.new("#{source.model.name} has no primary key, which `#{a.name}` needs")
+      key = source.table.single_key(source.model.name, "`#{a.name}`")
       HasMany.foreign_key!(a.target, a.foreign_key, source.model.name, a.name)
       [a, key]
     else

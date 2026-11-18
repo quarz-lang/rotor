@@ -112,13 +112,32 @@ class Statement
     [text, params]
   end
 
-  private def self.by_key(model: Model) -> Array[Piece]
-    t = model.table_info
-    key = t.primary_key || raise ArgumentError.new("`#{t.name}` has no primary key")
-    if model.changed.include?(key)
-      raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
+  # :nodoc:
+  # ` WHERE` each of the primary key's columns is the model's value
+  # (`"id" = $1`, or `"a" = $1 AND "b" = $2` for a composite key).
+  # Raises `ArgumentError` for a table without a key and for a model
+  # whose key column was assigned (the row it named is not known),
+  # `Rotor::MissingAttributeError` for one whose key is not set.
+  def self.by_key(model: Model) -> Array[Piece]
+    pieces: Array[Piece] = []
+    Statement.key_values(model).each_with_index do |kv, i|
+      pieces = pieces + [Piece::Text.new("#{i == 0 ? " WHERE " : " AND "}#{Dialect.quote(kv[0].to_s)} = "), Piece::Param.new(kv[1])]
     end
-    v = model.to_h[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
-    [Piece::Text.new(" WHERE #{Dialect.quote(key.to_s)} = "), Piece::Param.new(v)]
+    pieces
+  end
+
+  # :nodoc:
+  # The model's primary key columns and values, in the key's order,
+  # checked as `by_key` says.
+  def self.key_values(model: Model) -> Array[[Symbol, Value]]
+    t = model.table_info
+    values = model.to_h
+    t.keys!.map do |key|
+      if model.changed.include?(key)
+        raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
+      end
+      v = values[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
+      [key, v.as(Value)]
+    end
   end
 end

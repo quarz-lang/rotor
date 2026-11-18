@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/composite_key_test.qz): a model
+# with a composite primary key has no `has_many`. It is checked against
+# this checkout of rotor.
+[cog]
+name = "composite_has_many"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

@@ -6,7 +6,10 @@
 # - `null: true`: the column admits NULL, and its getter returns `T?`.
 # - `default:`: the value a model made with `new` starts with (not for
 #   `Time`).
-# - `primary: true`: the primary key (at most one; never NULL).
+# - `primary: true`: the primary key, never NULL; on several columns,
+#   a composite key of them, in the order declared (a model with one
+#   has no `has_many`, and no `belongs_to` or `through` association
+#   may target it).
 # - `redact: true`: the value is hidden from `inspect` (the model's and
 #   a changeset's), for a password or a token.
 class Schema
@@ -266,12 +269,13 @@ class Schema
                             in Bytes then d
                             else nil
                             end
-        ColumnDef.new(Columns.ident(c.name.to_s), c.sql, c.null, default, c.primary, c.primary && c.type == Int, nil)
+        # (An identity for a single `Int` key only.)
+        ColumnDef.new(Columns.ident(c.name.to_s), c.sql, c.null, default, c.primary, c.primary && c.type == Int && info.primary_keys.size == 1, nil)
       end
       indexes: Array[IndexDef] = []
       info.associations.each do |a|
         next unless a.kind == :belongs_to
-        key = a.target.primary_key || raise ArgumentError.new("#{m.name} belongs to #{a.target.name}, which has no primary key")
+        key = a.target.table_info.single_key(a.target.name, "#{m.name}'s `belongs_to`")
         fk = Columns.ident(a.foreign_key.to_s)
         indexes = indexes + [Columns.index(info.name, [fk], nil, false, nil, false, schema: info.schema)]
         keys = keys + [Operation::AddForeignKey.new(info.name, fk, Reference.new(a.target.table_name, key.to_s, nil, a.target.table_info.schema), info.schema).as(Operation)]
@@ -296,9 +300,6 @@ class Schema
     end
     if primary && null
       raise ArgumentError.new("#{@model}'s primary key `#{name}` cannot be NULL")
-    end
-    if primary && @columns.any? { |c| c.primary }
-      raise ArgumentError.new("#{@model} declares a second primary key, `#{name}`")
     end
     @columns = @columns + [Column.new(name, sql, type, null, primary, default, redact)]
   end

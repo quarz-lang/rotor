@@ -1,0 +1,188 @@
+require "test"
+
+# A composite primary key (rotor#63): a `String` and a `Time` column.
+class CReading < Rotor::Model
+  table "c_readings" do
+    column :sensor_id, String, primary: true
+    column :taken_at, Time, primary: true
+    column :value, Int
+    timestamps
+  end
+end
+
+# A `belongs_to` whose target has a composite key: refused when used.
+class CNote < Rotor::Model
+  table "c_notes" do
+    column :id, Int, primary: true
+    belongs_to CReading
+  end
+end
+
+class CompositeKeyTextTest < Test::Case
+  T = Time.at(1_700_000_000).utc
+
+  def reading -> CReading
+    CReading.load({sensor_id: "a", taken_at: T, value: 1, created_at: T, updated_at: T})
+  end
+
+  def test_metadata
+    assert_equal([:sensor_id, :taken_at], CReading.primary_keys)
+    e = assert_raise(ArgumentError) { CReading.primary_key }
+    assert_equal("CReading has a composite primary key (sensor_id, taken_at): see `primary_keys`", e.message)
+    assert_equal([:id], CNote.primary_keys)
+    assert_equal(:id, CNote.primary_key)
+  end
+
+  def test_statements_by_every_key_column
+    r = reading.with(value: 2)
+    sql, params = (Rotor::Statement.update(r) || raise "no update").to_sql
+    assert_equal("UPDATE \"c_readings\" SET \"value\" = $1 WHERE \"sensor_id\" = $2 AND \"taken_at\" = $3", sql)
+    expected: Array[Object?] = [2, "a", T]
+    assert_equal(expected, params)
+    sql, params = Rotor::Statement.delete(reading).to_sql
+    assert_equal("DELETE FROM \"c_readings\" WHERE \"sensor_id\" = $1 AND \"taken_at\" = $2", sql)
+    expected = ["a", T]
+    assert_equal(expected, params)
+  end
+
+  def test_a_key_column_assigned
+    # The row the model named is not known: refused, as for a single key.
+    moved = reading.with(taken_at: T + 1.seconds, value: 2)
+    e = assert_raise(ArgumentError) { Rotor::Statement.update(moved) }
+    assert_equal("CReading#taken_at, the primary key, was assigned: the row it named is not known", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.delete(moved) }
+    assert_equal("CReading#taken_at, the primary key, was assigned: the row it named is not known", e.message)
+    e2 = assert_raise(Rotor::MissingAttributeError) { Rotor::Statement.delete(CReading.load_partial({sensor_id: "a", value: 1})) }
+    assert_equal("CReading#taken_at is not set", e2.message)
+  end
+
+  def test_schema_create
+    models: Array[Type[Rotor::Model]] = [CReading]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"c_readings\" (\"sensor_id\" text NOT NULL, \"taken_at\" timestamptz NOT NULL, \"value\" bigint NOT NULL, \"created_at\" timestamptz NOT NULL, \"updated_at\" timestamptz NOT NULL, PRIMARY KEY (\"sensor_id\", \"taken_at\"))"], sql)
+    notes: Array[Type[Rotor::Model]] = [CNote]
+    e = assert_raise(Rotor::SchemaError) { Rotor::Schema.operations(notes) }
+    assert_equal("CReading has a composite primary key (sensor_id, taken_at), and CNote's `belongs_to` needs a single one", e.message)
+  end
+
+  def test_has_many_refused_at_compile_time
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/composite_has_many && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/Sensor has a composite primary key \(site, serial\), and its `has_many` `samples` needs a single one/, out.stderr)
+  end
+end
+
+# Against a real server.
+class CompositeKeyTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+  T = Time.at(1_700_000_000).utc
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS c_notes, c_readings")
+        models: Array[Type[Rotor::Model]] = [CReading]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+        c.exec("CREATE TABLE c_notes (id bigserial PRIMARY KEY, c_reading_id bigint NOT NULL)")
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def with_repo(&: (Rotor::Repo) -> Void) -> Void
+    c = PG.connect(url)
+    begin
+      c.exec("TRUNCATE c_readings, c_notes")
+      yield Rotor::Repo.new(connection: c)
+    ensure
+      c.close
+    end
+  end
+
+  def test_the_key_schema_create_made
+    with_repo do |repo|
+      found = repo.query("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'c_readings'::regclass AND contype = 'p'", []) { |r| r.string(0) }
+      assert_equal(["PRIMARY KEY (sensor_id, taken_at)"], found)
+    end
+  end
+
+  def test_one_row_changes
+    with_repo do |repo|
+      r = repo.insert(CReading.new(sensor_id: "a", taken_at: T, value: 1))
+      repo.insert(CReading.new(sensor_id: "a", taken_at: T + 1.seconds, value: 2))
+      repo.update(r.with(value: 10))
+      values = repo.all(CReading.query.order { |x| x.taken_at }).map { |x| x.value }
+      assert_equal([10, 2], values)
+      touched = repo.touch(r)
+      assert(touched.updated_at > r.updated_at)
+      other = repo.get(CReading, {sensor_id: "a", taken_at: T + 1.seconds}) || raise "not found"
+      assert(other.updated_at < touched.updated_at)
+      repo.delete(r)
+      assert_equal([2], repo.all(CReading.query).map { |x| x.value })
+      e = assert_raise(Rotor::StaleError) { repo.delete(r) }
+      assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
+      e = assert_raise(Rotor::StaleError) { repo.update(r.with(value: 3)) }
+      assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
+    end
+  end
+
+  def test_get
+    with_repo do |repo|
+      repo.insert(CReading.new(sensor_id: "a", taken_at: T, value: 1))
+      assert_equal(1, (repo.get(CReading, {sensor_id: "a", taken_at: T}) || raise "not found").value)
+      assert_nil(repo.get(CReading, {sensor_id: "b", taken_at: T}))
+      # Key order in the Hash does not matter.
+      assert_equal(1, (repo.get(CReading, {taken_at: T, sensor_id: "a"}) || raise "not found").value)
+      e = assert_raise(ArgumentError) { repo.get(CReading, {sensor_id: "a"}) }
+      assert_equal("`get` of CReading: no value for `taken_at` of its primary key (sensor_id, taken_at)", e.message)
+      e = assert_raise(ArgumentError) { repo.get(CReading, {sensor_id: "a", taken_at: T, value: 1}) }
+      assert_equal("`get` of CReading: `value` is not a column of its primary key (sensor_id, taken_at)", e.message)
+      e = assert_raise(ArgumentError) { repo.get(CReading, "a") }
+      assert_equal("`get` of CReading, whose primary key is composite: give a Hash of sensor_id, taken_at", e.message)
+      # A single key takes a Hash too.
+      n = repo.insert(CNote.new(c_reading_id: 1))
+      assert_equal(n.id, (repo.get(CNote, {id: n.id}) || raise "not found").id)
+    end
+  end
+
+  def test_a_belongs_to_target_with_a_composite_key
+    with_repo do |repo|
+      n = repo.insert(CNote.new(c_reading_id: 1))
+      e = assert_raise(Rotor::SchemaError) { repo.preload(n) { c_reading } }
+      assert_equal("CReading has a composite primary key (sensor_id, taken_at), and CNote#c_reading needs a single one", e.message)
+    end
+  end
+
+  def test_unsafe_validate_unique_leaves_out_its_own_row
+    with_repo do |repo|
+      r = repo.insert(CReading.new(sensor_id: "a", taken_at: T, value: 1))
+      repo.insert(CReading.new(sensor_id: "a", taken_at: T + 1.seconds, value: 2))
+      # Its own row has value 1: not taken.
+      assert(Rotor::Changeset.cast(r.with(value: 5), {"value" => "1"}, [:value]).unsafe_validate_unique([:value], repo).valid?)
+      assert(Rotor::Changeset.cast(r.with(value: 5), {"value" => "1"}, [:value]).unsafe_validate_unique([:value], repo, query: CReading.query).valid?)
+      # The other row has value 2: taken.
+      assert(!Rotor::Changeset.cast(r, {"value" => "2"}, [:value]).unsafe_validate_unique([:value], repo).valid?)
+      assert(!Rotor::Changeset.cast(r, {"value" => "2"}, [:value]).unsafe_validate_unique([:value], repo, query: CReading.query).valid?)
+    end
+  end
+end
