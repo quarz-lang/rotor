@@ -365,6 +365,20 @@ that type would not be Quarz's. What follows from it:
    double precision for both, as SQL's `CASE` of a bigint and a double
    precision is one, so an `Int` row differs from Quarz beyond 2**53
    (#31); its `/` and `%` are refused (above).
+5. **`jsonb`, `json` and `date` columns of tables rotor did not
+   create** are declared `String` (#64). pg reads every column as
+   text, and a parameter beside such a column takes the column's
+   type: a model reads and writes the document as JSON text and the
+   date as `YYYY-MM-DD` (pg asks the server for ISO dates), and the
+   server checks the value (invalid JSON, or a date like `2026-02-30`,
+   raises `PG::ServerError`). A value reads back as the server writes
+   it, not as it was given: `jsonb` normalizes the document
+   (`{"b":2,"a":1}` reads `{"a": 1, "b": 2}`), `json` keeps the text.
+   The server compares them, not Quarz: on a `jsonb` column `body ==
+   doc` is jsonb equality, where key order and spacing do not count
+   (Quarz's `String#==` would compare the text); a `json` column has
+   no equality (an error from the server); `day >= "2026-11-01"` and
+   `order { day }` compare dates. (test/repo_test.qz checks these.)
 
 ## Running them: `Rotor::Repo`
 

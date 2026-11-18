@@ -77,6 +77,16 @@ class Legacy < Rotor::Model
   end
 end
 
+# `jsonb`, `json` and `date` columns, declared `String`.
+class Document < Rotor::Model
+  table "documents" do
+    column :id, Int, primary: true
+    column :body, String
+    column :raw, String, null: true
+    column :day, String
+  end
+end
+
 class Remark < Rotor::Model
   table "remarks" do
     column :id, Int, primary: true
@@ -117,7 +127,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -138,7 +148,8 @@ class RepoTest < Test::Case
     CREATE TABLE genres (id bigserial PRIMARY KEY, name text NOT NULL);
     CREATE TABLE volume_genres (id bigserial PRIMARY KEY, volume_id bigint NOT NULL REFERENCES volumes, genre_id bigint NOT NULL REFERENCES genres, position bigint NOT NULL DEFAULT 0);
     CREATE TABLE legacy (id integer PRIMARY KEY, n integer NOT NULL);
-    CREATE INDEX legacy_n ON legacy (n)
+    CREATE INDEX legacy_n ON legacy (n);
+    CREATE TABLE documents (id bigserial PRIMARY KEY, body jsonb NOT NULL, raw json, day date NOT NULL)
   SQL
 
   def self.startup
@@ -172,7 +183,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -406,6 +417,34 @@ class RepoTest < Test::Case
       # error, and so is arithmetic that overflows an `integer`.
       assert_raise(PG::ServerError) { repo.count(Legacy.where { n == big }) }
       assert_raise(PG::ServerError) { repo.count(Legacy.where { n * 100000000 > 0 }) }
+    end
+  end
+
+  # rotor#64: `jsonb`, `json` and `date` columns declared `String`.
+  def test_jsonb_and_date_columns_as_strings
+    with_repo do |repo|
+      d = repo.insert(Document.new(body: "{\"b\":2,\"a\":1}", raw: "{\"b\":2}", day: "2026-11-18"))
+      # Read back as the server writes them: jsonb normalized, json kept
+      # as given, a date in ISO form.
+      assert_equal("{\"a\": 1, \"b\": 2}", d.body)
+      assert_equal("{\"b\":2}", d.raw)
+      assert_equal("2026-11-18", d.day)
+      d = repo.update(d.with(body: "[1, 2]", day: "2026-11-19"))
+      got = repo.get(Document, d.id) || raise "not found"
+      assert_equal(["[1, 2]", "2026-11-19"], [got.body, got.day])
+      # jsonb `==` is the server's: key order and spacing do not count.
+      repo.insert(Document.new(body: "{\"x\": 1, \"y\": 2}", day: "2026-10-01"))
+      doc = "{\"y\":2,\"x\":1}"
+      assert_equal(1, repo.count(Document.where { body == doc }))
+      # A date compares and orders as a date.
+      from = "2026-11-01"
+      assert_equal([d.id], repo.all(Document.where { day >= from }).map { |x| x.id })
+      assert_equal(["2026-10-01", "2026-11-19"], repo.all(Document.query.order { |x| x.day }).map { |x| x.day })
+      # The server checks the values; `json` has no equality.
+      assert_raise(PG::ServerError) { repo.insert(Document.new(body: "not json", day: "2026-11-18")) }
+      assert_raise(PG::ServerError) { repo.insert(Document.new(body: "{}", day: "2026-02-30")) }
+      text = "{}"
+      assert_raise(PG::ServerError) { repo.count(Document.where { |x| x.raw == text }) }
     end
   end
 
