@@ -506,6 +506,18 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#72: a correlated `exists?` of the table itself, in a condition
+  # and in an update's value.
+  def test_exists_of_the_same_table
+    with_repo do |repo|
+      [30, 20, 30, 10].each_with_index { |a, i| repo.insert(Member.new(name: "m#{i}", age: a)) }
+      younger = repo.all(Member.where { |m| Member.where { |o| o.age > m.age }.exists? }.order { |m| m.id }).map { |m| m.name }
+      assert_equal(["m1", "m3"], younger)
+      assert_equal(4, repo.update_all(Member.query) { |m| {admin: Member.where { |o| o.age > m.age }.exists?} })
+      assert_equal(["m1", "m3"], repo.all(Member.where { admin }.order { |m| m.id }).map { |m| m.name })
+    end
+  end
+
   # rotor#72: a correlated `exists?`, against the server.
   def test_exists_of_a_query
     with_repo do |repo|

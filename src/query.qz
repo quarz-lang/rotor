@@ -739,7 +739,9 @@ class Query[T]
       t, e = translator(expr, captures, file)
       [set_pieces(t, e, file), t.guards]
     end
-    Statement.new(table, Binds.fill(sets, captures) + outer_named(where_pieces), nil)
+    # (A value may read the row in a subquery too: `{flagged: Event.where
+    # { |e| e.post_id == p.id }.exists?}`.)
+    Statement.new(table, outer_named(Binds.fill(sets, captures) + where_pieces), nil)
   end
 
   # The `UPDATE ... SET` of `update`'s block `e`.

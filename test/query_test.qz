@@ -663,6 +663,17 @@ class QueryTest < Test::Case
       Person.where { |p| !Person.where { |q| q.age > p.age }.exists? },
       "#{COLS} WHERE NOT EXISTS (SELECT 1 FROM \"people\" AS \"p1\" WHERE \"p1\".\"age\" > \"people\".\"age\")", []
     )
+    # The same table inside and outside, whatever its column names:
+    # the inner one's alias hides the table's own name inside.
+    check(
+      XPost.where { |p| XPost.where { |q| q.id > p.id && q.title == p.title }.exists? },
+      "#{posts} WHERE EXISTS (SELECT 1 FROM \"x_posts\" AS \"x1\" WHERE \"x1\".\"id\" > \"x_posts\".\"id\" AND \"x1\".\"title\" = \"x_posts\".\"title\")", []
+    )
+    # An update's value.
+    assert_equal(
+      "UPDATE \"people\" SET \"admin\" = EXISTS (SELECT 1 FROM \"people\" AS \"p1\" WHERE \"p1\".\"age\" > \"people\".\"age\")",
+      Person.query.update { |p| {admin: Person.where { |q| q.age > p.age }.exists?} }.to_sql[0]
+    )
     # Nested: each subquery's table its own alias.
     check(
       XPost.where { |p| XEvent.where { |e| e.post_id == p.id && !XEvent.where { |f| f.id > e.id && f.post_id == p.id }.exists? }.exists? },
