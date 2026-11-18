@@ -49,7 +49,8 @@ class ExtensionTest < Test::Case
   def test_a_negation_of_its_own_is_refused
     f = Flag.new(true)
     e = assert_raise(Rotor::UntranslatableError) { Tally.where { |_t| !f } }
-    assert_match(/\A`Flag#!` cannot be translated to SQL/, e.message)
+    # (A call of a captured value, reading no row: rotor#101's message.)
+    assert_match(/\A`f\.!` does not read the row: build it before the block and capture the variable \(`value = f\.!`, then `value` in the block\) \(/, e.message)
     # A union with such a member: not SQL's NOT either.
     fs: Array[Bool | Flag] = [true, f]
     b = fs[0]
@@ -93,6 +94,7 @@ class ExtensionTest < Test::Case
     assert_match(/\A`Tally#n` cannot be translated to SQL/, e.message)
     t = Tally.load({id: 1, n: 5})
     e = assert_raise(Rotor::UntranslatableError) { Tally.where { id == t.n } }
-    assert_match(/\A`Tally#n` cannot be translated to SQL/, e.message)
+    # (Of a captured model, reading no row: rotor#101's message.)
+    assert_match(/\A`t\.n` does not read the row: build it before the block and capture the variable \(`value = t\.n`, then `value` in the block\) \(/, e.message)
   end
 end

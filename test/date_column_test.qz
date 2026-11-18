@@ -90,7 +90,9 @@ class DateColumnTextTest < Test::Case
     assert_equal("`Date.parse(\"2026-01-01\")` does not read the row: build it before the block and capture the variable (`value = Date.parse(\"2026-01-01\")`, then `value` in the block), or name a constant (`SINCE = Date.parse(\"2026-01-01\")`)", refusal { DayStat.where { |x| x.day >= Date.parse("2026-01-01") }.to_sql[0] })
     assert_equal("`Time.utc(2026, 1, 1)` does not read the row: build it before the block and capture the variable (`value = Time.utc(2026, 1, 1)`, then `value` in the block), or name a constant (`SINCE = Time.utc(2026, 1, 1)`)", refusal { DayStat.where { |x| x.seen_at.nil? || Rotor::SQL.not_nil(x.seen_at) >= Time.utc(2026, 1, 1) }.to_sql[0] })
     y = 2026
-    assert_equal("`Date.new(y, 1, 1)` does not read the row: build it before the block and capture the variable (`value = Date.new(y, 1, 1)`, then `value` in the block), or name a constant (`SINCE = Date.new(y, 1, 1)`)", refusal { DayStat.where { |x| x.day >= Date.new(y, 1, 1) }.to_sql[0] })
+    # (Of a captured variable: no constant offered, which could not name
+    # it.)
+    assert_equal("`Date.new(y, 1, 1)` does not read the row: build it before the block and capture the variable (`value = Date.new(y, 1, 1)`, then `value` in the block)", refusal { DayStat.where { |x| x.day >= Date.new(y, 1, 1) }.to_sql[0] })
     assert_equal("`Date.new` cannot be translated to SQL", refusal { DayStat.where { |x| x.day >= Date.new(x.hits, 1, 1) }.to_sql[0] })
     # A constant: a `Date` baked into the block (a `Lit`), a parameter.
     assert_equal("#{COLS} WHERE \"day\" >= $1", DayStat.where { |x| x.day >= DATE_SINCE }.to_sql[0])
