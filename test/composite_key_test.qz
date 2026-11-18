@@ -18,6 +18,33 @@ class CNote < Rotor::Model
   end
 end
 
+# Keys that may be false (rotor#80): a single `Bool` key, and a
+# composite one holding a `Bool`.
+class CSwitch < Rotor::Model
+  table "c_switches" do
+    column :on, Bool, primary: true
+    column :label, String
+    timestamps
+    has_many CLamp, foreign_key: :switch_on
+  end
+end
+
+class CLamp < Rotor::Model
+  table "c_lamps" do
+    column :id, Int, primary: true
+    column :switch_on, Bool
+  end
+end
+
+class CFlag < Rotor::Model
+  table "c_flags" do
+    column :site, String, primary: true
+    column :on, Bool, primary: true
+    column :label, String
+    timestamps
+  end
+end
+
 class CompositeKeyTextTest < Test::Case
   T = Time.at(1_700_000_000).utc
 
@@ -56,6 +83,19 @@ class CompositeKeyTextTest < Test::Case
     assert_equal("CReading#taken_at is not set", e2.message)
   end
 
+  def test_a_false_key_is_set
+    s = CSwitch.load({on: false, label: "off", created_at: T, updated_at: T})
+    sql, params = Rotor::Statement.delete(s).to_sql
+    assert_equal("DELETE FROM \"c_switches\" WHERE \"on\" = $1", sql)
+    expected: Array[Object?] = [false]
+    assert_equal(expected, params)
+    f = CFlag.load({site: "a", on: false, label: "x", created_at: T, updated_at: T})
+    sql, params = Rotor::Statement.delete(f).to_sql
+    assert_equal("DELETE FROM \"c_flags\" WHERE \"site\" = $1 AND \"on\" = $2", sql)
+    expected = ["a", false]
+    assert_equal(expected, params)
+  end
+
   def test_schema_create
     models: Array[Type[Rotor::Model]] = [CReading]
     sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
@@ -84,8 +124,8 @@ class CompositeKeyTest < Test::Case
       c = PG.connect(server.url)
       begin
         # (Dropped first: PG_TEST_URL's server outlives a run.)
-        c.exec("DROP TABLE IF EXISTS c_notes, c_readings")
-        models: Array[Type[Rotor::Model]] = [CReading]
+        c.exec("DROP TABLE IF EXISTS c_notes, c_readings, c_switches, c_flags, c_lamps")
+        models: Array[Type[Rotor::Model]] = [CReading, CSwitch, CFlag, CLamp]
         Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
         c.exec("CREATE TABLE c_notes (id bigserial PRIMARY KEY, c_reading_id bigint NOT NULL)")
       ensure
@@ -112,7 +152,7 @@ class CompositeKeyTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE c_readings, c_notes")
+      c.exec("TRUNCATE c_readings, c_notes, c_switches, c_flags, c_lamps")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -143,6 +183,33 @@ class CompositeKeyTest < Test::Case
       assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
       e = assert_raise(Rotor::StaleError) { repo.update(r.with(value: 3)) }
       assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
+    end
+  end
+
+  # rotor#80: a key that is false is a key.
+  def test_false_keys
+    with_repo do |repo|
+      off = repo.insert(CSwitch.new(on: false, label: "off"))
+      repo.insert(CSwitch.new(on: true, label: "on"))
+      off = repo.update(off.with(label: "dark"))
+      off = repo.touch(off)
+      assert_equal("dark", (repo.get(CSwitch, false) || raise "not found").label)
+      # A has_many preloaded for an owner whose key is false.
+      [false, false, true].each { |on| repo.insert(CLamp.new(switch_on: on)) }
+      counts = repo.preload(repo.all(CSwitch.query.order { |x| x.on })) { c_lamps }.map { |x| x.c_lamps.size }
+      assert_equal([2, 1], counts)
+      repo.delete_all(CLamp.query)
+      repo.delete(off)
+      assert_equal(["on"], repo.all(CSwitch.query).map { |x| x.label })
+      f = repo.insert(CFlag.new(site: "a", on: false, label: "x"))
+      repo.insert(CFlag.new(site: "a", on: true, label: "y"))
+      f = repo.update(f.with(label: "z"))
+      f = repo.touch(f)
+      assert_equal("z", (repo.get(CFlag, {site: "a", on: false}) || raise "not found").label)
+      repo.delete(f)
+      assert_equal(["y"], repo.all(CFlag.query).map { |x| x.label })
+      e = assert_raise(Rotor::StaleError) { repo.delete(f) }
+      assert_equal("CFlag site: \"a\", on: false: its row no longer exists", e.message)
     end
   end
 

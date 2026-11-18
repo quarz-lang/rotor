@@ -231,9 +231,13 @@ class Repo
     a = info.associations.find { |x| x.name == name } || raise SchemaError.new("#{owner.class.name} has no association `#{name}`")
     k = Through.keys(owner.class, a)
     pk = info.single_key("`#{info.name}`", "`#{name}`")
-    id = owner.to_h[pk]? || raise MissingAttributeError.new("#{owner.class.name}##{pk} is not set")
+    # (`nil?`, not `||`: a `Bool` key may be false.)
+    id = owner.to_h[pk]?
+    raise MissingAttributeError.new("#{owner.class.name}##{pk} is not set") if id.nil?
     ids: Array[Value] = targets.map do |t|
-      t.to_h[k.target_pk]? || raise ArgumentError.new("`put_assoc` of a #{t.class.name} without its #{k.target_pk}: save it first")
+      tk = t.to_h[k.target_pk]?
+      raise ArgumentError.new("`put_assoc` of a #{t.class.name} without its #{k.target_pk}: save it first") if tk.nil?
+      tk.as(Value)
     end
     ji = k.join.table_info
     join = Dialect.table(ji.name, ji.schema)
