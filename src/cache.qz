@@ -212,6 +212,9 @@ module Binds
       in Date
         ys: Array[Date] = xs.map { |x| x.as(Date) }
         return ys
+      in Decimal
+        ys: Array[Decimal] = xs.map { |x| x.as(Decimal) }
+        return ys
       in Bytes
         ys: Array[Bytes] = xs.map { |x| x.as(Bytes) }
         return ys
@@ -255,6 +258,7 @@ module Binds
     in Bool => x then x
     in Time => x then x
     in Date => x then x
+    in Decimal => x then x
     in Bytes => x then x
     in Symbol => x then x
     in JSON::Value => x then x

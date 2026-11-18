@@ -115,6 +115,14 @@ module Compare
     def >=(other: String?) -> Bool = other.nil? ? false : self >= other.as(String)
   end
 
+  # A `Decimal` compared with a `Decimal?`: false for nil.
+  extension Decimal
+    def <(other: Decimal?) -> Bool = other.nil? ? false : self < other.as(Decimal)
+    def <=(other: Decimal?) -> Bool = other.nil? ? false : self <= other.as(Decimal)
+    def >(other: Decimal?) -> Bool = other.nil? ? false : self > other.as(Decimal)
+    def >=(other: Decimal?) -> Bool = other.nil? ? false : self >= other.as(Decimal)
+  end
+
   # A `Date` compared with a `Date?`: false for nil.
   extension Date
     def <(other: Date?) -> Bool = other.nil? ? false : self < other.as(Date)

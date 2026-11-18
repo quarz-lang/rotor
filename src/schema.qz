@@ -79,6 +79,22 @@ class Schema
     add(name, "date", Date, null, nil, primary, redact)
   end
 
+  # A `Decimal` column (`numeric`, or `numeric(precision, scale)` when
+  # both are given, which the server then rounds a value to on
+  # assignment), exact; without a default (a `Float` column stays valid
+  # for a `numeric` of a table rotor did not create).
+  def column(name: Symbol, type: Type[Decimal], *, null: Bool = false, primary: Bool = false, redact: Bool = false, precision: Int? = nil, scale: Int? = nil) -> Void
+    sql = if (p = precision) && (s = scale)
+            raise ArgumentError.new("#{@model}'s column `#{name}`: numeric(#{p}, #{s}) needs 1 <= precision <= 1000 and 0 <= scale <= precision") unless p >= 1 && p <= 1000 && s >= 0 && s <= p
+            "numeric(#{p}, #{s})"
+          elsif precision || scale
+            raise ArgumentError.new("#{@model}'s column `#{name}`: give `precision:` and `scale:` together")
+          else
+            "numeric"
+          end
+    add(name, sql, Decimal, null, nil, primary, redact)
+  end
+
   # A `Bytes` column (`bytea`).
   def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "bytea", Bytes, null, default, primary, redact)

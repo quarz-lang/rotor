@@ -1,9 +1,9 @@
 # What a parameter of a statement may be: the values PostgreSQL is
 # given (a symbol as its name).
-type Bindable = Int | Float | String | Bool | Time | Date | Bytes | Symbol | Items | Array[Int?] | Array[String?] | JSON::Value
+type Bindable = Int | Float | String | Bool | Time | Date | Decimal | Bytes | Symbol | Items | Array[Int?] | Array[String?] | JSON::Value
 
 # An array parameter: one class's values (pg sends it as one array).
-type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Time] | Array[Date] | Array[Bytes] | Array[Symbol]
+type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Time] | Array[Date] | Array[Decimal] | Array[Bytes] | Array[Symbol]
 
 # A piece of SQL: text, a column of one of a query's tables (by the
 # table's index among them: qualified by the table's alias in a join),
@@ -497,7 +497,7 @@ class Translator
 
   # The classes whose operators and methods the translator knows.
   private def primitive?(t: Type[Object]) -> Bool
-    t == Int || t == Float || t == String || t == Bool || t == Time || t == Date || t == Bytes || t == Object || t == Nil || t == Array || t == Comparable
+    t == Int || t == Float || t == String || t == Bool || t == Time || t == Date || t == Decimal || t == Bytes || t == Object || t == Nil || t == Array || t == Comparable
   end
 
   # The table whose row `e` is in `scopes` (innermost last): an `Arg`
@@ -867,6 +867,7 @@ class Translator
     in Bool => x then x
     in Time => x then x
     in Date => x then x
+    in Decimal => x then x
     in Bytes => x then x
     in Symbol => x then x
     # (A document: its compact text, untyped beside a column, which
@@ -1009,6 +1010,14 @@ class Translator
       l = cast(operand(r))
       rr = operand(a)
       return with_nulls(binary(l, name, rr, ADD, name == "+"), [l])
+    end
+    # `Decimal + - *` a `Decimal` or an `Int`: SQL's `numeric`, exact as
+    # Quarz's (the result's scale may differ: PostgreSQL's own, and a
+    # `numeric(p, s)` column rounds on assignment).
+    if m.owner == Decimal && (name == "+" || name == "-" || name == "*")
+      l = cast(operand(r))
+      rr = cast(operand(a))
+      return with_nulls(binary(l, name, rr, name == "*" ? MUL : ADD, name != "-"), [l, rr])
     end
     # `Date + Int`, `Date - Int` and `Date - Date`: SQL's `date +
     # integer` (a date) and `date - date` (an integer of days), as in
@@ -1274,6 +1283,9 @@ class Translator
       [Time]
     in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) if !m.singleton && m.owner == Time && (m.name == :+ || m.name == :-)
       [Time]
+    # (`Decimal + - *` a `Decimal` or an `Int`: a `Decimal`.)
+    in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) if !m.singleton && m.owner == Decimal && (m.name == :+ || m.name == :- || m.name == :*)
+      [Decimal]
     # (`Date + Int`, `Date - Int`: a `Date`; `Date - Date`: an `Int`.)
     in Meta::Expr::Call(Meta::Expr, m, _, [arg], nil, _) if !m.singleton && m.owner == Date && (m.name == :+ || m.name == :-)
       classes(arg).include?(Date) ? [Int] : [Date]
@@ -1464,6 +1476,7 @@ class Translator
            in Bool then "boolean"
            in Time then "timestamptz"
            in Date then "date"
+           in Decimal then "numeric"
            in Bytes then "bytea"
            # (Only where no column gives it a type: two documents.)
            in JSON::Value then "jsonb"
@@ -1647,7 +1660,7 @@ class Translator
   private def any(x: Meta::Expr, array: Piece, item: Type[Object]?, nils: Bool, whole: Meta::Expr, line: Int) -> Sql
     untranslatable("`include?` on an array of mixed classes", line) if item == Object
     if k = item
-      unless k == Int || k == Float || k == String || k == Bool || k == Time || k == Date || k == Bytes || k == Symbol
+      unless k == Int || k == Float || k == String || k == Bool || k == Time || k == Date || k == Decimal || k == Bytes || k == Symbol
         untranslatable("`include?` on an array of #{k.name}", line)
       end
       # (Items of a class the target's never equal: found nowhere, as
@@ -1677,6 +1690,7 @@ class Translator
            elsif item == Bool then "boolean"
            elsif item == Time then "timestamptz"
            elsif item == Date then "date"
+           elsif item == Decimal then "numeric"
            else "bytea"
            end
     c = target.column

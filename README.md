@@ -106,6 +106,24 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   order in Quarz), or does not compile (`<`, `+`). A
   changeset takes a `JSON::Value` (`put_change`, `cast`), not text to
   parse. No `default:`.
+- A decimal column (#102): `column :total, Decimal` (`numeric`, or
+  `numeric(p, s)` with `precision:` and `scale:`, which the server then
+  rounds a value to on assignment), read and written exactly as a
+  `Decimal` (pg's `row.decimal`, the scale kept); no `default:`. A
+  `numeric` column of a table rotor did not create may stay `Float`.
+  In query blocks: the comparisons and `nil?` (a nullable one with
+  Quarz's nil), `include?` of a captured array (a `numeric[]`), an
+  order key, an `update`'s value, and `+`, `-`, `*` of a `Decimal` or an
+  `Int`, exact in `numeric` as in Quarz (the result's scale may
+  differ: PostgreSQL's own rule, and a `numeric(p, s)` column rounds).
+  As in Quarz (quarz-lang/quarz#891), a `Decimal` compares with
+  `Decimal`s only: against an `Int` or a `Float` it is never equal
+  (refused) or does not compile (`<`). `round` is refused for now;
+  `div` takes keywords, which a query block cannot hold. A changeset
+  casts a form's text with `Decimal.parse?` (anything else, or past
+  `Decimal`'s limits, is invalid). A row holding NaN or an infinity in
+  such a column cannot be read (pg's reader raises `ArgumentError`
+  naming it). No `numeric[]` column yet.
 - A date column (#98): `column :day, Date` (`date`), read and written
   as a `Date` (pg's `row.date`), in a composite key too; no `default:`,
   as for `Time`. In query blocks: `==`, `!=`, `<`, `<=`, `>`, `>=` and
@@ -605,7 +623,8 @@ that type would not be Quarz's. What follows from it:
    precision is one, so an `Int` row differs from Quarz beyond 2**53
    (#31); its `/` and `%` are refused (above).
 5. **`jsonb`, `json` and `date` columns of tables rotor did not
-   create** may be declared `String` (#64), as well as a document
+   create** may be declared `String` (#64) (a `numeric` one `Float`,
+   or `Decimal`, #102), as well as a document
    column `JSON::Value` (#93) or a `Date` (#98, above). pg reads every column as
    text, and a parameter beside such a column takes the column's
    type: a model reads and writes the document as JSON text and the
