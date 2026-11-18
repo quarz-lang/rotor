@@ -136,7 +136,9 @@ class Statement
       if model.changed.include?(key)
         raise ArgumentError.new("#{model.class.name}##{key}, the primary key, was assigned: the row it named is not known")
       end
-      v = values[key]? || raise MissingAttributeError.new("#{model.class.name}##{key} is not set")
+      # (`nil?`, not `||`: a `Bool` key may be false.)
+      v = values[key]?
+      raise MissingAttributeError.new("#{model.class.name}##{key} is not set") if v.nil?
       [key, v.as(Value)]
     end
   end

@@ -104,7 +104,13 @@ module Preloads
       by_key = by_key.put(k, (by_key[k]? || []) + [row])
     end
     models.map do |m|
-      m.preloaded(a.name) || ((k = Model.key_of(m, pk)) ? by_key[k]? || [] : [])
+      if found = m.preloaded(a.name)
+        found
+      else
+        # (`nil?`, not truthiness: a `Bool` key may be false.)
+        k = Model.key_of(m, pk)
+        k.nil? ? [] : by_key[k]? || []
+      end
     end
   end
 
@@ -130,7 +136,12 @@ module Preloads
       end
     end
     models.map do |m|
-      m.preloaded(a.name) || ((key = Model.key_of(m, pk)) ? by_key[key]? || [] : [])
+      if found = m.preloaded(a.name)
+        found
+      else
+        key = Model.key_of(m, pk)
+        key.nil? ? [] : by_key[key]? || []
+      end
     end
   end
 
@@ -143,15 +154,16 @@ module Preloads
     by_key: Hash[Value, Model] = {}
     fetch(repo, a.target, pk, keys).each do |row|
       k = Model.value(row.read(pk))
-      by_key = by_key.put(k, row) if k
+      by_key = by_key.put(k, row) unless k.nil?
     end
     models.map do |m|
       if found = m.preloaded(a.name)
         found
-      elsif (k = Model.key_of(m, a.foreign_key)) && (row = by_key[k]?)
-        [row]
       else
-        Array[Model].new
+        # (`nil?`, not truthiness: a `Bool` key may be false.)
+        k = Model.key_of(m, a.foreign_key)
+        row = k.nil? ? nil : by_key[k]?
+        row ? [row] : Array[Model].new
       end
     end
   end
