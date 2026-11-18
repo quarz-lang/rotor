@@ -216,9 +216,25 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   one parameter whatever its length; an array literal with other
   expressions is an `IN` list); `String#start_with?`,
   `end_with?` and `include?` of a string value (`LIKE`, escaped);
-  `Rotor::SQL.like`, `ilike`, `lower`, `upper` and `not_nil` (below); literals and
-  captured values. Anything else raises `Rotor::UntranslatableError`
+  `Rotor::SQL.like`, `ilike`, `lower`, `upper` and `not_nil` (below);
+  `Rotor::SQL.now`, or `now` alone (below); literals and captured
+  values. Anything else raises `Rotor::UntranslatableError`
   when the query is built, naming the method and where it is.
+- The database's clock (#75): `Rotor::SQL.now`, or `now` alone, is
+  SQL's `now()`, the transaction's start, the same for each statement
+  in it (`where { expires_at < now }`, `update { {finished_at: now} }`);
+  where a block runs in Quarz (`select`), it is Quarz's clock, in UTC.
+  `now` alone is a private method `Rotor::Compare` gives every object,
+  called on the block's `self`: in a block with a receiver (`where {
+  expires_at < now }`) that is the row, so it is found wherever such a
+  block is written; in a block with parameters (`where { |s| s.expires_at
+  < now }`) it is the `self` around the block, which the block must be
+  able to capture: found in a method of a Shareable object (a model's,
+  say), not in a method of another class ("calling `now` uses `self`,
+  which has the non-shareable type ...") nor in a function (a function
+  has no `self`). Write `Rotor::SQL.now` there. It is not found outside
+  query blocks. A model's column or method named `now`, and a local
+  variable of that name, come first, as for any name.
 - `==` and `!=` keep Quarz's meaning of nil. Against a value they are
   decided by the value: `IS NULL` for nil, `=` otherwise (which an index
   serves), so a query's SQL can differ by what it captured (pg's

@@ -1,0 +1,17 @@
+class Ev < Rotor::Model
+  table "evs" do
+    column :id, Int, primary: true
+    column :at, Time
+  end
+end
+
+# A block with a parameter written in a function, which has no `self`.
+def due -> Rotor::Query[Ev] = Ev.where { |e| e.at < now }
+
+# Outside a query's block.
+p now
+
+class Holder
+  # A block with a parameter in a method of a non-Shareable class.
+  def due -> Rotor::Query[Ev] = Ev.where { |e| e.at < now }
+end

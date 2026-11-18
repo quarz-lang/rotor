@@ -33,6 +33,10 @@ class Gauge < Rotor::Model
     column :at, Time, null: true
     column :on, Bool
   end
+
+  # A block with a parameter in a model's method: its `self`, a model, is
+  # Shareable, so `now` alone is found (rotor#75).
+  def later -> Rotor::Query[Gauge] = Gauge.where { |g| !g.at.nil? && Rotor::SQL.not_nil(g.at) > now }
 end
 
 # A post and its events: a correlated subquery's tables (rotor#72).
@@ -49,6 +53,14 @@ class XEvent < Rotor::Model
     column :id, Int, primary: true
     column :post_id, Int
     column :kind, String
+  end
+end
+
+# A model with a column named `now`: the column comes first (rotor#75).
+class NowCol < Rotor::Model
+  table "now_cols" do
+    column :id, Int, primary: true
+    column :now, Time
   end
 end
 
@@ -645,6 +657,36 @@ class QueryTest < Test::Case
     assert_equal("`asc` without an `order` before it", e.message)
     e = assert_raise(ArgumentError) { Gauge.query.order { |g| g.at }.nulls_last.nulls_first }
     assert_equal("`nulls_first` of an order that says where its NULLs go already", e.message)
+  end
+
+  # rotor#75: the database's clock, `Rotor::SQL.now` or `now` alone.
+  def test_now
+    check(Gauge.where { at < Rotor::SQL.now }, "#{GS} WHERE \"at\" < now()", [])
+    check(Gauge.where { at < now }, "#{GS} WHERE \"at\" < now()", [])
+    check(Gauge.where { |g| g.at < Rotor::SQL.now }, "#{GS} WHERE \"at\" < now()", [])
+    check(Gauge.new(on: true).later, "#{GS} WHERE NOT \"at\" IS NULL AND \"at\" > now()", [])
+    assert_equal("UPDATE \"gauges\" SET \"at\" = now()", Gauge.query.update { {at: now} }.to_sql[0])
+    assert_equal("UPDATE \"gauges\" SET \"at\" = now()", Gauge.query.update { |g| {at: Rotor::SQL.now} }.to_sql[0])
+    # A column named `now` comes first, and a local of that name.
+    check(NowCol.where { now < Rotor::SQL.now }, "SELECT \"id\", \"now\" FROM \"now_cols\" WHERE \"now\" < now()", [])
+    now = Time.at(1_700_000_000).utc
+    check(Gauge.where { at < now }, "#{GS} WHERE \"at\" < $1", [now])
+  end
+
+  # rotor#75: `now` alone is not found in a block written in a function,
+  # nor outside a block (checked by `quarz` on the PATH, or by $QUARZ).
+  def test_bare_now_is_found_in_blocks_only
+    out = Process.sh("cd test/fixtures/bare_now && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    # In a function's block with a parameter: no `self`.
+    assert_match(/main\.qz:9:\d+: error: no overload of `where` on Type\[Ev\]/, out.stderr)
+    assert_match(/a function has no `self`: `now` is a method of an object, not a function/, out.stderr)
+    # Outside a query's block.
+    assert_match(/main\.qz:12:3: error: undefined local variable or method `now` for main/, out.stderr)
+    # In a block with a parameter in a method of a class that is not
+    # Shareable: `now` would capture its `self`.
+    assert_match(/main\.qz:16:\d+: error: no overload of `where` on Type\[Ev\]/, out.stderr)
+    assert_match(/calling `now` uses `self`, which has the non-shareable type Holder and cannot be captured by a shareable procedure/, out.stderr)
   end
 
   def test_order_limit_offset
