@@ -21,6 +21,39 @@ class StatementTest < Test::Case
     assert_equal([text, params], s.to_sql)
   end
 
+  # rotor#69: what an insert does on a conflict.
+  def test_on_conflict
+    i = Item.new(name: "pen")
+    base = "INSERT INTO \"items\" (\"name\", \"price\", \"qty\") VALUES ($1, $2, $3)"
+    check(Rotor::Statement.insert(i).on_conflict.do_nothing, "#{base} ON CONFLICT DO NOTHING", ["pen", 1.0, 0])
+    check(Rotor::Statement.insert(i).on_conflict(:name).do_nothing, "#{base} ON CONFLICT (\"name\") DO NOTHING", ["pen", 1.0, 0])
+    check(Rotor::Statement.insert(i).on_conflict(constraint: "items_name_key").do_nothing, "#{base} ON CONFLICT ON CONSTRAINT \"items_name_key\" DO NOTHING", ["pen", 1.0, 0])
+    # The table's row and the proposed one; constants and captures.
+    extra = 5
+    check(
+      Rotor::Statement.insert(i).on_conflict(:name).do_update { |old, new| {price: new.price, qty: old.qty + extra, note: nil} },
+      "#{base} ON CONFLICT (\"name\") DO UPDATE SET \"price\" = EXCLUDED.\"price\", \"qty\" = \"items\".\"qty\" + $4, \"note\" = NULL", ["pen", 1.0, 0, 5]
+    )
+    check(
+      Rotor::Statement.insert(i).on_conflict(:name, :note).do_update { |old, new| {qty: new.qty} }.where { |old, new| old.qty < new.qty }.returning(:id),
+      "#{base} ON CONFLICT (\"name\", \"note\") DO UPDATE SET \"qty\" = EXCLUDED.\"qty\" WHERE \"items\".\"qty\" < EXCLUDED.\"qty\" RETURNING \"id\"", ["pen", 1.0, 0]
+    )
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict(:nope) }
+    assert_equal("`on_conflict`: `items` has no column `nope`", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict.do_update { |old, new| {qty: 1} } }
+    assert_equal("`do_update` of a conflict that names no columns or constraint: name them in `on_conflict`", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).where { |old, new| old.qty > 0 } }
+    assert_equal("`where` of an insert: write it after `do_update`, once, as its condition", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict(:name).do_nothing.where { |old, new| old.qty > 0 } }
+    assert_equal("`where` of an insert: write it after `do_update`, once, as its condition", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict(:name).do_nothing.on_conflict(:name) }
+    assert_equal("`on_conflict` of an insert that already says what to do on a conflict", e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict(:name).do_update { |old, new| {nope: 1} } }
+    assert_match(/\AItem has no column `nope`/, e.message)
+    e = assert_raise(ArgumentError) { Rotor::Statement.insert(i).on_conflict(:name).do_update { |old, new| {qty: "x"} } }
+    assert_match(/\AItem#qty takes Int, not String/, e.message)
+  end
+
   def test_insert
     i = Item.new(name: "pen")
     check(Rotor::Statement.insert(i), "INSERT INTO \"items\" (\"name\", \"price\", \"qty\") VALUES ($1, $2, $3)", ["pen", 1.0, 0])

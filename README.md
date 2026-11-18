@@ -172,7 +172,26 @@ User.where { admin }.update { {age: age + 1, name: "x"} }   # UPDATE ... SET
 Rotor::Statement.insert(u).returning(:id)
 Rotor::Statement.update(u)                    # the changed columns, nil for none
 Rotor::Statement.delete(u)                    # by the primary key (refused once it was assigned)
+Rotor::Statement.insert(u).on_conflict(:email).do_nothing                          # ON CONFLICT ("email") DO NOTHING
+Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new.name, visits: old.visits + 1} }
+  .where { |old, new| old.visits < 100 }      # ... DO UPDATE SET ... WHERE ...
 ```
+
+- **On a conflict** (#69): `Rotor::Statement.insert(m)` is a
+  `Rotor::Insert`, whose `on_conflict(:a, :b)` (the columns of a unique
+  index or of the key), `on_conflict(constraint: "name")`, or
+  `on_conflict` alone (any, for `do_nothing` only) says which conflict;
+  then `do_nothing`, or `do_update` with a block of the table's row
+  (`old`) and the proposed one (`new`, SQL's `EXCLUDED`) giving the
+  columns to set, as `update`'s block does, and an optional `where` of
+  the same two rows. `repo.upsert(insert)` runs one, the model's
+  timestamps set as `insert` sets them, and gives the row as it is
+  after it (inserted or updated), or nil when the conflict left it as
+  it was (`do_nothing`, or a false `where`). With `upsert`, `do_update`
+  also sets the table's update time to the proposed row's
+  (`"updated_at" = EXCLUDED."updated_at"`) unless the block sets it, as
+  `update` always moves it; a statement run as written (`repo.run`)
+  sets what its block says only.
 
 - The row is the block's receiver (`where { age > 18 }`) or its
   parameter (`where { |u| u.age > 18 }`, the form `for` comprehensions

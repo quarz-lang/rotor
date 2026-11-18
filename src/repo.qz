@@ -131,6 +131,35 @@ class Repo
   # the row reads back (its key, the database's defaults), unchanged.
   def insert[M <: Model](model: M) -> M
     t = model.table_info
+    stamped = Repo.stamped(model)
+    sql, params = Statement.insert(stamped).returning.to_sql
+    rows = @adapter.query(sql, params)
+    row = rows.rows.first? || return stamped
+    stamped.loaded(Repo.values(row, t.columns))
+  end
+
+  # Runs an insert that says what to do on a conflict
+  # (`Rotor::Statement.insert(m).on_conflict(...)`), its model's
+  # timestamps set first as `insert` sets them, and its `do_update` the
+  # update time too (`"updated_at" = EXCLUDED."updated_at"`) when the
+  # table has one and the block does not set it: the row as it is after
+  # it (inserted, or updated by `do_update`), read back, unchanged; nil
+  # when the conflict left the row as it was (`do_nothing`, or a
+  # `do_update` whose `where` was false). `ArgumentError` for an insert
+  # without a conflict clause: `insert` runs those.
+  def upsert[M <: Model](insert: Insert[M]) -> M?
+    raise ArgumentError.new("`upsert` of an insert that says nothing on a conflict: `on_conflict` first, or `insert` the model") unless insert.conflict?
+    stamped = Repo.stamped(insert.model)
+    sql, params = insert.with_model(stamped).with_update_time.returning.to_sql
+    row = @adapter.query(sql, params).rows.first? || return nil
+    stamped.loaded(Repo.values(row, stamped.table_info.columns))
+  end
+
+  # :nodoc:
+  # `model` with the timestamps an insert sets: its creation time unless
+  # given, its update time, now.
+  def self.stamped[M <: Model](model: M) -> M
+    t = model.table_info
     now = Repo.now
     stamps: Hash[Symbol, Object?] = {}
     if c = t.created_at
@@ -139,11 +168,7 @@ class Repo
     if u = t.updated_at
       stamps = stamps.put(u, now)
     end
-    stamped = model.with_values(stamps)
-    sql, params = Statement.insert(stamped).returning.to_sql
-    rows = @adapter.query(sql, params)
-    row = rows.rows.first? || return stamped
-    stamped.loaded(Repo.values(row, t.columns))
+    model.with_values(stamps)
   end
 
   # Inserts the changeset's model (`Rotor::Changeset#apply`, with its
