@@ -94,10 +94,11 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `100` and `1e2` are equal to both), but jsonb keeps a number's
   decimal exactly where Quarz reads a `Float`: a stored
   `0.1000000000000000001`, read as `0.1`, does not match `0.1` in a
-  query, though Quarz finds the document read back equal to it. (Today
-  an `Int` beyond 2**53 also equals the `Float` nearest it in Quarz,
-  `9007199254740993` and `9007199254740992.0`, where jsonb finds them
-  different: quarz-lang/quarz#888.) A changeset's change tracking is
+  query, though Quarz finds the document read back equal to it. (On a
+  Quarz without the fix of quarz-lang/quarz#888, an `Int` beyond 2**53
+  also equals the `Float` nearest it, `9007199254740993` and
+  `9007199254740992.0`, where jsonb finds them different; with the fix
+  Quarz compares them exactly, as jsonb does.) A changeset's change tracking is
   Quarz's `==`, so putting such a document is no change
   (test/json_column_test.qz, `PAIRS`). Reading a
   member (`body["kind"]`) is a later issue; everything else is refused
