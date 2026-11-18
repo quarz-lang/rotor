@@ -920,6 +920,11 @@ class Translator
   private def call(recv: Meta::Expr?, m: Meta::MethodRef, ms: Array[Meta::MethodRef], args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql
     name = m.name.to_s
     label = Translator.label(m)
+    # (`now` written bare: `Rotor::Compare`'s function, never run here:
+    # the database's clock.)
+    if Translator.bare_now?(m) && args.empty?
+      return node([Piece::Text.new("now()")], ATOM)
+    end
     if recv.nil?
       untranslatable("the function #{label}", line)
     end
@@ -931,11 +936,6 @@ class Translator
         c = Column.new(c.name, c.sql, c.type, false, c.primary, c.default, c.redact)
       end
       return Sql.new([Piece::Column.new(found[0], c.name)], ATOM, c, nil, false, nil, c.null ? Translator.show(whole) : nil)
-    end
-    # (`now` written bare: `Rotor::Compare`'s, on whatever `self` is, a
-    # row or a capture, never run here: the database's clock.)
-    if Translator.bare_now?(m) && args.empty?
-      return node([Piece::Text.new("now()")], ATOM)
     end
     if v = captured(r, m, args, block, line)
       return v
@@ -1590,7 +1590,7 @@ class Translator
 
   # Whether `m` is the `now` written bare in a query's block:
   # `Rotor::Compare`'s, not a model's or anything else's of that name.
-  def self.bare_now?(m: Meta::MethodRef) -> Bool = m.name == :now && m.extension == Compare
+  def self.bare_now?(m: Meta::MethodRef) -> Bool = m.name == :now && m.singleton && m.owner == Kernel && m.extension == Compare
 
   # `pieces` (a number) times an interval of `unit`: `($1::bigint *
   # interval '1 microsecond')`.

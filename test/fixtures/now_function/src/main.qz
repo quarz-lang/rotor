@@ -5,7 +5,8 @@ class Ev < Rotor::Model
   end
 end
 
-# The program's own function `now`.
+# The program's own function `now`: beside `Rotor::Compare`'s, `now`
+# alone in a query block is ambiguous (#105, quarz-lang/quarz#885).
 def now -> Time = Time.at(0).utc
 
 puts Ev.where { at < now }.to_sql.inspect
