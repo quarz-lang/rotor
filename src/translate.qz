@@ -881,6 +881,11 @@ class Translator
       ms.each { |x| untranslatable(Translator.label(x), line) unless x.singleton && x.owner == SQL }
       return function(name, args, label, line)
     end
+    # A captured query's `include?`: `x IN (SELECT ...)`.
+    if name == "include?" && m.owner == Query
+      untranslatable(label, line) unless args.size == 1
+      return in_query(r, args[0], line)
+    end
     # Every method the call may run, one for each member of a union
     # receiver (`Int#>` and `Nil#>` for an `Int?`'s `>`), is one the
     # translator knows: a primitive's own, or `Rotor::Compare`'s, a
@@ -1310,6 +1315,27 @@ class Translator
       return c.null
     end
     !s.nulls.nil?
+  end
+
+  # `q.include?(x)`, `q` a captured query of one column (`select { id
+  # }`): `x IN (SELECT "id" ...)`, the query's SQL and parameters in
+  # place when it is built (`Rotor::Bind::Subquery`). Three-valued where
+  # `x` or the query's column can be NULL: `!` of it is refused then.
+  private def in_query(q: Meta::Expr, x: Meta::Expr, line: Int) -> Sql
+    case q
+    in Meta::Expr::Capture(index, _, l)
+      sub = case v = look(Bind::Capture.new(index))
+            in Subquery => found then found
+            else untranslatable("`include?` on a #{v.class.name}", l)
+            end
+      column = sub.subquery_column
+      target = operand(x)
+      pieces = wrap(target, CMP + 1) + [Piece::Text.new(" IN ("), Piece::Bound.new(Bind::Subquery.new(index)), Piece::Text.new(")")]
+      maybe = target.nulls || (column.null ? "#{Translator.show(q)}.#{column.name}" : nil)
+      three(node(pieces, CMP), maybe)
+    else
+      untranslatable("`include?` of a query built in the block: build it outside, and use it here", line)
+    end
   end
 
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal

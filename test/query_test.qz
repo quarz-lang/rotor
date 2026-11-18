@@ -625,6 +625,41 @@ class QueryTest < Test::Case
     assert_equal("a negative limit: -1", e.message)
   end
 
+  # rotor#71: a captured query as a subquery, `x IN (SELECT ...)`.
+  def test_include_of_a_query
+    admins = Person.where { admin }.select { id }
+    check(Flagged.where { |f| admins.include?(f.id) }, "SELECT \"id\", \"vip\" FROM \"flagged\" WHERE \"id\" IN (SELECT \"id\" FROM \"people\" WHERE \"admin\")", [])
+    # The parameters of both, numbered in order; the subquery the one
+    # captured at each build (the translation kept for the site).
+    m = 1
+    [3, 5].each do |n|
+      young = Person.where { age < n }.select { id }
+      check(Person.where { |p| p.age > m && young.include?(p.id) }, "#{COLS} WHERE \"age\" > $1 AND \"id\" IN (SELECT \"id\" FROM \"people\" WHERE \"age\" < $2)", [1, n])
+    end
+    # An order and a limit in the subquery are its own.
+    top = Person.order { age }.desc.limit(3).select { id }
+    check(Flagged.where { |f| top.include?(f.id) }, "SELECT \"id\", \"vip\" FROM \"flagged\" WHERE \"id\" IN (SELECT \"id\" FROM \"people\" ORDER BY \"age\" DESC LIMIT 3)", [])
+    # Refused: a `select` computed in Quarz, or of several columns; a
+    # query built in the block; `include?` outside a block; `!` where
+    # the subquery's column can be NULL (`NOT IN` finds nothing then).
+    plus = Person.select { id + 1 }
+    e = assert_raise(Rotor::UntranslatableError) { Flagged.where { |f| plus.include?(f.id) } }
+    assert_match(/its block is computed in Quarz, not SQL/, e.message)
+    pairs = Person.select { [id, age] }
+    e = assert_raise(Rotor::UntranslatableError) { Flagged.where { |f| pairs.include?([f.id, 1]) } }
+    assert_match(/not one column as it is/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Flagged.where { |f| Person.where { admin }.select { id }.include?(f.id) } }
+    assert_match(/\A`include\?` of a query built in the block: build it outside, and use it here/, e.message)
+    e = assert_raise(ArgumentError) { admins.include?(3) }
+    assert_match(/\A`include\?` of a query outside a query's block: a query is not a collection/, e.message)
+    emails = Person.select { email }
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| !emails.include?(p.name) } }
+    assert_match(/\A`!emails.include\?\(p.name\)` is three-valued in SQL when `emails.email` can be NULL/, e.message)
+    # Where nothing can be NULL, `!` is `NOT ... IN (...)` (NOT binds
+    # looser than IN).
+    check(Flagged.where { |f| !admins.include?(f.id) }, "SELECT \"id\", \"vip\" FROM \"flagged\" WHERE NOT \"id\" IN (SELECT \"id\" FROM \"people\" WHERE \"admin\")", [])
+  end
+
   # rotor#68: row locks, written last.
   def test_row_locks
     check(Person.where { admin }.order { id }.limit(1).for_update, "#{COLS} WHERE \"admin\" ORDER BY \"id\" LIMIT 1 FOR UPDATE", [])

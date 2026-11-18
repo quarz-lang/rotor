@@ -12,6 +12,9 @@ enum Bind
   variant ToFloat(of: Bind)
   # (`name`: `"start_with?"`, `"end_with?"` or `"include?"`.)
   variant Like(of: Bind, name: String)
+  # A captured query, as a subquery (`col IN (SELECT ...)`): its pieces,
+  # its parameters among them, in the place of the one piece.
+  variant Subquery(index: Int)
 end
 
 # What a translation looked at of a captured value: its class (nil for
@@ -85,6 +88,7 @@ module Binds
       in String => s then pattern(s, name)
       else v
       end
+    in Bind::Subquery(i) then captures[i]
     end
   end
 
@@ -123,11 +127,16 @@ module Binds
   # `captures`.
   def self.fill(pieces: Array[Piece], captures: Array[Object]) -> Array[Piece]
     return pieces unless pieces.any? { |p| p.is_a?(Piece::Bound) }
-    pieces.map do |p|
+    pieces.flat_map do |p|
       case p
-      in Piece::Bound(Bind::Items => b) then Piece::Param.new(items(value(b, captures).as(Array[Object?])))
-      in Piece::Bound(b) then Piece::Param.new(parameter(value(b, captures)))
-      else p
+      in Piece::Bound(Bind::Items => b) then [Piece::Param.new(items(value(b, captures).as(Array[Object?]))).as(Piece)]
+      in Piece::Bound(Bind::Subquery => b)
+        case q = value(b, captures)
+        in Subquery => sub then sub.subquery
+        else raise ArgumentError.new("a subquery that is not a query: #{q.class.name}")
+        end
+      in Piece::Bound(b) then [Piece::Param.new(parameter(value(b, captures))).as(Piece)]
+      else [p]
       end
     end
   end
