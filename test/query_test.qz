@@ -753,6 +753,24 @@ class QueryTest < Test::Case
     e1 = assert_raise(Rotor::UntranslatableError) { gq.where { |p, g| !(!g.nil? && g.label == "x") } }
     assert_match(/\A`!\(!g.nil\? && \(g.label == "x"\)\)` is three-valued in SQL when `g.label` can be NULL/, e1.message)
     check(gq.where { |p, g| !(g.nil? || g.on) }, "SELECT \"p0\".\"id\", \"p0\".\"name\", \"p0\".\"email\", \"p0\".\"age\", \"p0\".\"score\", \"p0\".\"admin\", \"p0\".\"born\", \"p0\".\"joined\", \"g1\".\"id\", \"g1\".\"level\", \"g1\".\"cap\", \"g1\".\"ratio\", \"g1\".\"label\", \"g1\".\"at\", \"g1\".\"on\" FROM \"people\" AS \"p0\" LEFT JOIN \"gauges\" AS \"g1\" ON \"g1\".\"id\" = \"p0\".\"id\" WHERE NOT (\"g1\".\"id\" IS NULL OR \"g1\".\"on\")", [])
+    # The row itself is a presence test where a condition is, and
+    # nothing else.
+    gw = "SELECT \"p0\".\"id\", \"p0\".\"name\", \"p0\".\"email\", \"p0\".\"age\", \"p0\".\"score\", \"p0\".\"admin\", \"p0\".\"born\", \"p0\".\"joined\", \"g1\".\"id\", \"g1\".\"level\", \"g1\".\"cap\", \"g1\".\"ratio\", \"g1\".\"label\", \"g1\".\"at\", \"g1\".\"on\" FROM \"people\" AS \"p0\" LEFT JOIN \"gauges\" AS \"g1\" ON \"g1\".\"id\" = \"p0\".\"id\""
+    # (`g && g.on` is not a `Bool` in Quarz, a `where` does not take it:
+    # under `!` it is a condition, the row's presence `AND` the column.)
+    check(gq.where { |p, g| !(g && g.on) }, "#{gw} WHERE NOT (\"g1\".\"id\" IS NOT NULL AND \"g1\".\"on\")", [])
+    check(gq.where { |p, g| !g }, "#{gw} WHERE NOT \"g1\".\"id\" IS NOT NULL", [])
+    check(gq.where { |p, g| g == nil }, "#{gw} WHERE \"g1\".\"id\" IS NULL", [])
+    check(gq.where { |p, g| g != nil }, "#{gw} WHERE \"g1\".\"id\" IS NOT NULL", [])
+    check(q.order { |p, e| e ? e.kind : "" }, "#{pe} ORDER BY CASE WHEN \"x1\".\"id\" IS NOT NULL THEN \"x1\".\"kind\" ELSE $1::text END", [""])
+    value = "the row `g` as a value (test it with `g.nil?`, or read a column of it)"
+    e4 = assert_raise(Rotor::UntranslatableError) { gq.where { |p, g| g == 5 } }
+    assert_match(/\A#{Regexp.escape(value)}/, e4.message)
+    e4 = assert_raise(Rotor::UntranslatableError) { gq.order { |p, g| g } }
+    assert_match(/\A#{Regexp.escape(value)}/, e4.message)
+    other = Gauge.new(on: true)
+    e4 = assert_raise(Rotor::UntranslatableError) { gq.where { |p, g| g == other } }
+    assert_match(/\A#{Regexp.escape(value)}/, e4.message)
     # Refused: a statement of a join; a right table without a key.
     e2 = assert_raise(ArgumentError) { q.delete }
     assert_equal("`delete` of a join: it is of one table's query", e2.message)
