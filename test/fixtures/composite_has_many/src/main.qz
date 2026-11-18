@@ -1,0 +1,16 @@
+class Sensor < Rotor::Model
+  table do
+    column :site, String, primary: true
+    column :serial, String, primary: true
+    has_many Sample
+  end
+end
+
+class Sample < Rotor::Model
+  table do
+    column :id, Int, primary: true
+    column :sensor_id, Int
+  end
+end
+
+p Sensor.primary_keys

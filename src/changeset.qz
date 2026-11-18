@@ -416,19 +416,26 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     values = fields.map { |f| get_field(f) }
     return self if values.any? { |v| v.nil? }
     info = data.table_info
-    pk = info.primary_key
-    own = pk ? data.to_h[pk.as(Symbol)]? : nil
+    # (Its own row, by every column of its key, when the model has one
+    # set: a model not yet inserted has none.)
+    pks = info.primary_keys
+    data_values = data.to_h
+    own = pks.map { |k| data_values[k]? }
+    known = !pks.empty? && own.all? { |v| !v.nil? }
     taken = if q = query
               narrowed = q
               fields.each_with_index { |f, i| narrowed = narrowed.where_key(f, values[i]) }
-              repo.all(narrowed.limit(2)).any? { |m| own.nil? || pk.nil? || m.to_h[pk.as(Symbol)]? != own }
+              repo.all(narrowed.limit(2)).any? { |m| !known || pks.each_with_index.any? { |k, i| m.to_h[k]? != own[i] } }
             else
               conds = fields.each_with_index.map { |f, i| "#{Dialect.quote(f.to_s)} = #{Dialect.param(i + 1)}" }
               params: Array[Object?] = []
               values.each { |v| params = params + [v] }
-              if (k = pk) && !own.nil?
-                conds = conds + ["#{Dialect.quote(k.to_s)} <> #{Dialect.param(fields.size + 1)}"]
-                params = params + [own]
+              if known
+                # (Key columns are never NULL: `<>`, and `NOT` of the
+                # conjunction, are exact.)
+                mine = pks.each_with_index.map { |k, i| "#{Dialect.quote(k.to_s)} #{pks.size == 1 ? "<>" : "="} #{Dialect.param(fields.size + i + 1)}" }
+                conds = conds + [pks.size == 1 ? mine[0] : "NOT (#{mine.join(" AND ")})"]
+                own.each { |v| params = params + [v] }
               end
               found = repo.query("SELECT 1 FROM #{Dialect.table(info.name, info.schema)} WHERE #{conds.join(" AND ")} LIMIT 1", params) { |r| r.int(0) }
               !found.empty?

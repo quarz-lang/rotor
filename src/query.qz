@@ -1,7 +1,31 @@
 # What a model's table is, for the statements made from its values and
-# the repository that sets its timestamps: its name, and the schema
+# the repository that sets its timestamps: its name, its primary key's
+# columns (none, one, or several for a composite key), and the schema
 # that qualifies it (nil: the connection's `search_path` finds it).
-data TableInfo = (name: String, columns: Array[Column], primary_key: Symbol?, created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [], schema: String? = nil)
+data TableInfo(name: String, columns: Array[Column], primary_keys: Array[Symbol], created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [], schema: String? = nil)
+  # The primary key's one column; nil for none, and for a composite key
+  # (`primary_keys` has its columns).
+  def primary_key -> Symbol? = primary_keys.size == 1 ? primary_keys[0] : nil
+
+  # The primary key's one column, for `what` (an association, a
+  # preload), which needs one: `Rotor::SchemaError` for none and for a
+  # composite key, naming the table as `table` (its model's name, or
+  # its own quoted).
+  def single_key(table: String, what: String) -> Symbol
+    case primary_keys
+    in [k] then k
+    in [] then raise SchemaError.new("#{table} has no primary key, which #{what} needs")
+    else raise SchemaError.new("#{table} has a composite primary key (#{primary_keys.join(", ")}), and #{what} needs a single one")
+    end
+  end
+
+  # The primary key's columns, for a statement by the key: `ArgumentError`
+  # for none.
+  def keys! -> Array[Symbol]
+    raise ArgumentError.new("`#{name}` has no primary key") if primary_keys.empty?
+    primary_keys
+  end
+end
 
 # A table a query reads: the first, or one joined to it, with the
 # conditions of its JOIN (`INNER JOIN ... ON` them, `CROSS JOIN` for

@@ -65,8 +65,11 @@ class SchemaTest < Test::Case
     s.column(:id, Int, primary: true)
     e = assert_raise(ArgumentError) { s.column(:id, String) }
     assert_equal("Item declares the column `id` twice", e.message)
-    e = assert_raise(ArgumentError) { s.column(:key, String, primary: true) }
-    assert_equal("Item declares a second primary key, `key`", e.message)
+    # (A second `primary: true` column makes a composite key: rotor#63.)
+    k = schema
+    k.column(:id, Int, primary: true)
+    k.column(:key, String, primary: true)
+    assert_equal([:id, :key], k.columns.select { |c| c.primary }.map { |c| c.name })
     e = assert_raise(ArgumentError) { schema.column(:id, Int, primary: true, null: true) }
     assert_equal("Item's primary key `id` cannot be NULL", e.message)
     s.has_many(Post)
