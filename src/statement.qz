@@ -29,23 +29,67 @@ class Statement
   # The insertion of `model`'s row, with the columns it has values for
   # (`DEFAULT VALUES` when none): a `Rotor::Insert`, which may say what
   # to do on a conflict (`on_conflict`).
-  def self.insert[M <: Model](model: M) -> Insert[M] = Insert[M].new(model, [], [], false, nil)
+  def self.insert[M <: Model](model: M) -> Insert[M] = Insert[M].new([model], [], [], false, nil)
+
+  # The insertion of the rows of `models` in one statement (`VALUES
+  # (...), (...)`), each with the columns any of them has values for, a
+  # model without a value for one writing DEFAULT (the column's
+  # default): a `Rotor::Insert`, as `insert`'s. `ArgumentError` for no
+  # models, and for models of several classes. `Rotor::Repo#insert_all`
+  # runs it, in several statements when one would take too many
+  # parameters.
+  #
+  # ```
+  # class BItem < Rotor::Model
+  #   table "items" do
+  #     column :id, Int, primary: true
+  #     column :sku, String
+  #     column :qty, Int, null: true
+  #   end
+  # end
+  #
+  # Rotor::Statement.insert_all([BItem.new(sku: "a", qty: 1), BItem.new(sku: "b")]).to_sql
+  # # => ["INSERT INTO \"items\" (\"sku\", \"qty\") VALUES ($1, $2), ($3, DEFAULT)", ["a", 1, "b"]]
+  # ```
+  def self.insert_all[M <: Model](models: Array[M]) -> Insert[M]
+    first = models.first? || raise ArgumentError.new("`insert_all` of no models")
+    if other = models.find { |m| m.class != first.class }
+      raise ArgumentError.new("`insert_all` of models of several classes: #{first.class.name} and #{other.class.name}")
+    end
+    Insert[M].new(models, [], [], false, nil)
+  end
 
   # :nodoc:
-  # The INSERT of `model`'s row, without a conflict clause.
-  def self.insert_pieces(model: Model) -> Array[Piece]
-    t = model.table_info
-    values = model.to_h
-    cols = t.columns.select { |c| values.key?(c.name) }
+  # The columns an insert of `models` names: those any of them has a
+  # value for.
+  def self.insert_columns(models: Array[Model]) -> Array[Column]
+    rows = models.map { |m| m.to_h }
+    models[0].table_info.columns.select { |c| rows.any? { |values| values.key?(c.name) } }
+  end
+
+  # :nodoc:
+  # The INSERT of the rows of `models` (one table's), without a
+  # conflict clause.
+  def self.insert_pieces(models: Array[Model]) -> Array[Piece]
+    t = models[0].table_info
+    table = Dialect.table(t.name, t.schema)
+    rows = models.map { |m| m.to_h }
+    cols = Statement.insert_columns(models)
     if cols.empty?
-      return [Piece::Text.new("INSERT INTO #{Dialect.table(t.name, t.schema)} DEFAULT VALUES").as(Piece)]
+      return [Piece::Text.new("INSERT INTO #{table} DEFAULT VALUES").as(Piece)] if models.size == 1
+      # (Several rows of defaults only: one column named, DEFAULT.)
+      return [Piece::Text.new("INSERT INTO #{table} (#{Dialect.quote(t.columns[0].name.to_s)}) VALUES #{models.map { |_| "(DEFAULT)" }.join(", ")}").as(Piece)]
     end
-    pieces: Array[Piece] = [Piece::Text.new("INSERT INTO #{Dialect.table(t.name, t.schema)} (#{cols.map { |c| Dialect.quote(c.name.to_s) }.join(", ")}) VALUES (")]
-    cols.each_with_index do |c, i|
-      pieces = pieces + [Piece::Text.new(", ")] if i > 0
-      pieces = pieces + [Piece::Param.new(values[c.name])]
+    pieces: Array[Piece] = [Piece::Text.new("INSERT INTO #{table} (#{cols.map { |c| Dialect.quote(c.name.to_s) }.join(", ")}) VALUES ")]
+    rows.each_with_index do |values, r|
+      pieces = pieces + [Piece::Text.new(r == 0 ? "(" : ", (")]
+      cols.each_with_index do |c, i|
+        pieces = pieces + [Piece::Text.new(", ")] if i > 0
+        pieces = pieces + [values.key?(c.name) ? Piece::Param.new(values[c.name]).as(Piece) : Piece::Text.new("DEFAULT").as(Piece)]
+      end
+      pieces = pieces + [Piece::Text.new(")")]
     end
-    pieces + [Piece::Text.new(")")]
+    pieces
   end
 
   # :nodoc:
@@ -266,7 +310,8 @@ end
 # # => "INSERT INTO \"sensors\" (\"serial\", \"name\", \"hits\") VALUES ($1, $2, $3) ON CONFLICT (\"serial\") DO UPDATE SET \"name\" = EXCLUDED.\"name\", \"hits\" = \"sensors\".\"hits\" + 1"
 # ```
 class Insert[M <: Model] < Statement
-  @model: M
+  # The models whose rows it inserts (one, for `Rotor::Statement.insert`).
+  @models: Array[M]
   # The conflict clause, its action (`... DO NOTHING`, `... DO UPDATE
   # SET ...`) and its `where` (none: empty).
   @action: Array[Piece]
@@ -277,12 +322,15 @@ class Insert[M <: Model] < Statement
   @update: Array[Symbol]?
 
   # (Made by `Rotor::Statement.insert` and the methods below.)
-  def initialize(@model: M, @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?)
-    super(@model.table_info, Statement.insert_pieces(@model) + @action + @where, nil)
+  def initialize(@models: Array[M], @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?)
+    super(@models[0].table_info, Statement.insert_pieces(@models.map { |m| m.as(Model) }) + @action + @where, nil)
   end
 
   # The model whose row it inserts.
-  def model -> M = @model
+  def model -> M = @models[0]
+
+  # The models whose rows it inserts.
+  def models -> Array[M] = @models
 
   # Whether it says what to do on a conflict.
   def conflict? -> Bool = @conflict
@@ -290,7 +338,12 @@ class Insert[M <: Model] < Statement
   # :nodoc:
   # The same insert of `model`'s row (the repository's, its timestamps
   # set).
-  def with_model(model: M) -> Insert[M] = Insert[M].new(model, @action, @where, @conflict, @update)
+  def with_models(models: Array[M]) -> Insert[M] = Insert[M].new(models, @action, @where, @conflict, @update)
+
+  # :nodoc:
+  # The parameters its conflict clause takes (`do_update`'s and
+  # `where`'s captures): what a statement of more rows adds to.
+  def conflict_params -> Int = (@action + @where).count { |p| p.is_a?(Piece::Param) || p.is_a?(Piece::Bound) }
 
   # :nodoc:
   # The same insert, its `do_update` setting the table's update time to
@@ -298,11 +351,11 @@ class Insert[M <: Model] < Statement
   # table has one and the block does not set it: what
   # `Rotor::Repo#upsert` runs.
   def with_update_time -> Insert[M]
-    u = @model.table_info.updated_at
+    u = @models[0].table_info.updated_at
     cols = @update
     return self if u.nil? || cols.nil? || cols.include?(u)
     name = Dialect.quote(u.to_s)
-    Insert[M].new(@model, @action + [Piece::Text.new(", #{name} = EXCLUDED.#{name}").as(Piece)], @where, @conflict, cols + [u])
+    Insert[M].new(@models, @action + [Piece::Text.new(", #{name} = EXCLUDED.#{name}").as(Piece)], @where, @conflict, cols + [u])
   end
 
   # On a conflict of these columns (`ON CONFLICT ("a", "b")`: the
@@ -312,12 +365,12 @@ class Insert[M <: Model] < Statement
   # have, and on an insert that already says what to do.
   def on_conflict(*columns: Symbol) -> Conflict[M]
     conflicting!
-    t = @model.table_info
+    t = @models[0].table_info
     columns.each do |c|
       raise ArgumentError.new("`on_conflict`: `#{t.name}` has no column `#{c}`") unless t.columns.any? { |x| x.name == c }
     end
     target = columns.empty? ? " ON CONFLICT" : " ON CONFLICT (#{columns.map { |c| Dialect.quote(c.to_s) }.join(", ")})"
-    Conflict[M].new(@model, target, columns.empty?)
+    Conflict[M].new(@models, target, columns.empty?)
   end
 
   # On a conflict of the constraint named `constraint` (`ON CONFLICT ON
@@ -326,7 +379,7 @@ class Insert[M <: Model] < Statement
   def on_conflict(*, constraint: String) -> Conflict[M]
     conflicting!
     raise ArgumentError.new("`on_conflict`: an empty constraint name") if constraint.empty?
-    Conflict[M].new(@model, " ON CONFLICT ON CONSTRAINT #{Dialect.quote(constraint)}", false)
+    Conflict[M].new(@models, " ON CONFLICT ON CONSTRAINT #{Dialect.quote(constraint)}", false)
   end
 
   # `do_update` only where the block is true, of the table's row (`old`)
@@ -336,14 +389,14 @@ class Insert[M <: Model] < Statement
   # nil).
   def where(&cond: Quoted[shareable (M, M) -> Bool] using Compare) -> Insert[M]
     raise ArgumentError.new("`where` of an insert: write it after `do_update`, once, as its condition") if @update.nil? || !@where.empty?
-    t = @model.table_info
-    sources = Statement.conflict_rows(@model)
+    t = @models[0].table_info
+    sources = Statement.conflict_rows(@models[0])
     kept = Cache.fetch(Cache::CONDITIONS, Cache.key(cond.site, sources), cond.captures) do
       tr, e = Translator.of(sources, cond.expr, cond.captures, cond.file)
       [tr.sql(e), tr.guards]
     end
     s = Binds.fill_sql(kept, cond.captures)
-    Insert[M].new(@model, @action, [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, @update)
+    Insert[M].new(@models, @action, [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, @update)
   end
 
   private def conflicting! -> Void
@@ -355,18 +408,18 @@ end
 # about it.
 class Conflict[M <: Model]
   include Shareable
-  @model: M
+  @models: Array[M]
   @target: String
   # (No target named: `do_nothing` only.)
   @any: Bool
 
   # (Made by `Rotor::Insert#on_conflict`.)
-  def initialize(@model: M, @target: String, @any: Bool)
+  def initialize(@models: Array[M], @target: String, @any: Bool)
   end
 
   # Nothing: the conflicting row is left as it is, and the insert gives
   # no row (`Rotor::Repo#upsert`: nil). `ON CONFLICT ... DO NOTHING`.
-  def do_nothing -> Insert[M] = Insert[M].new(@model, [Piece::Text.new("#{@target} DO NOTHING").as(Piece)], [], true, nil)
+  def do_nothing -> Insert[M] = Insert[M].new(@models, [Piece::Text.new("#{@target} DO NOTHING").as(Piece)], [], true, nil)
 
   # The conflicting row updated as the block says, a hash literal of
   # columns as `Rotor::Query#update`'s, of the table's row (`old`) and
@@ -378,13 +431,13 @@ class Conflict[M <: Model]
   # Needs the conflict's columns or constraint (PostgreSQL's rule).
   def do_update(&set: Quoted[shareable (M, M) -> Hash[Symbol, Object]] using Compare) -> Insert[M]
     raise ArgumentError.new("`do_update` of a conflict that names no columns or constraint: name them in `on_conflict`") if @any
-    t = @model.table_info
-    sources = Statement.conflict_rows(@model)
-    name = @model.class.name
+    t = @models[0].table_info
+    sources = Statement.conflict_rows(@models[0])
+    name = @models[0].class.name
     sets = Cache.fetch(Cache::SETS, Cache.key(set.site, sources), set.captures) do
       tr, e = Translator.of(sources, set.expr, set.captures, set.file)
       [Statement.conflict_columns(t, Statement.set_list(tr, e, set.file, t, name, "do_update")), tr.guards]
     end
-    Insert[M].new(@model, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), [], true, Statement.set_columns(set.expr, set.file))
+    Insert[M].new(@models, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), [], true, Statement.set_columns(set.expr, set.file))
   end
 end

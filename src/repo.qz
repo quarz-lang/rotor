@@ -149,18 +149,67 @@ class Repo
   # without a conflict clause: `insert` runs those.
   def upsert[M <: Model](insert: Insert[M]) -> M?
     raise ArgumentError.new("`upsert` of an insert that says nothing on a conflict: `on_conflict` first, or `insert` the model") unless insert.conflict?
+    raise ArgumentError.new("`upsert` of the rows of several models: `insert_all` runs those") if insert.models.size > 1
     stamped = Repo.stamped(insert.model)
-    sql, params = insert.with_model(stamped).with_update_time.returning.to_sql
+    sql, params = insert.with_models([stamped]).with_update_time.returning.to_sql
     row = @adapter.query(sql, params).rows.first? || return nil
     stamped.loaded(Repo.values(row, stamped.table_info.columns))
   end
 
+  # Inserts the rows of `models` (of one class), their timestamps set
+  # first as `insert` sets them (one time for all), in one statement
+  # (`Rotor::Statement.insert_all`), or several when one would pass
+  # PostgreSQL's 65535 parameters, those in one transaction (the one
+  # open, or one of their own): the rows as they read back (their keys,
+  # the database's defaults), as models. Nothing is run for no models.
+  def insert_all[M <: Model](models: Array[M]) -> Array[M]
+    return Array[M].new if models.empty?
+    insert_all(Statement.insert_all(models))
+  end
+
+  # Runs an insert of many rows (`Rotor::Statement.insert_all(models)`,
+  # and what it does on a conflict, `on_conflict`, its `do_update`
+  # setting the update time as `upsert`'s does): the rows the
+  # statement gave back, as models. Those are all of them for an insert
+  # without a conflict clause, those inserted or updated for one with
+  # it (a row `do_nothing` or a false `where` skipped gives none).
+  # PostgreSQL does not promise that RETURNING follows the order of
+  # the VALUES rows: match the rows to the models by a key when the
+  # order matters.
+  def insert_all[M <: Model](insert: Insert[M]) -> Array[M] = insert_chunked(insert, MAX_PARAMS)
+
+  # The most parameters PostgreSQL takes in one statement.
+  MAX_PARAMS = 65535
+
+  # :nodoc:
+  # `insert_all` with statements of at most `max_params` parameters.
+  def insert_chunked[M <: Model](insert: Insert[M], max_params: Int) -> Array[M]
+    now = Repo.now
+    stamped = insert.models.map { |m| Repo.stamped(m, now) }
+    template = stamped[0]
+    columns = template.table_info.columns
+    per_row = Statement.insert_columns(stamped.map { |m| m.as(Model) }).size
+    room = max_params - insert.conflict_params
+    size = per_row == 0 ? stamped.size : room / per_row
+    raise ArgumentError.new("`insert_all`: a row of #{per_row} parameters and a conflict clause of #{insert.conflict_params} pass #{max_params}") if size < 1
+    chunks = stamped.each_slice(size).to_a
+    run_chunk = ->(r: Repo, ms: Array[M]) {
+      sql, params = insert.with_models(ms).with_update_time.returning.to_sql
+      r.adapter.query(sql, params).rows.map { |row| template.restore(Checkpoint.new(Hash[Symbol, Value?].new, [], nil)).loaded(Repo.values(row, columns)) }
+    }
+    return run_chunk.call(self, chunks[0]) if chunks.size == 1
+    if @adapter.in_transaction?
+      chunks.flat_map { |ms| run_chunk.call(self, ms) }
+    else
+      transaction { |tx| chunks.flat_map { |ms| run_chunk.call(tx, ms) } }
+    end
+  end
+
   # :nodoc:
   # `model` with the timestamps an insert sets: its creation time unless
-  # given, its update time, now.
-  def self.stamped[M <: Model](model: M) -> M
+  # given, its update time, `now`.
+  def self.stamped[M <: Model](model: M, now: Time = Repo.now) -> M
     t = model.table_info
-    now = Repo.now
     stamps: Hash[Symbol, Object?] = {}
     if c = t.created_at
       stamps = stamps.put(c, now) unless model.to_h[c]?
