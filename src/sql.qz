@@ -42,11 +42,9 @@ module SQL
   def self.raw(sql: String) -> Raw = Raw.new(sql)
 
   # Now, in UTC: SQL's `now()`, the transaction's start, the same for
-  # every statement in it; outside a query, Quarz's clock. In a query's
-  # block with a receiver, `now` alone is the same (`Rotor::Compare`); in
-  # a block with parameters it is found only where the block can capture
-  # its `self` (a Shareable object's method: not a function's, nor
-  # another class's method), and this one is written there.
+  # every statement in it; outside a query, Quarz's clock. A query's
+  # block with a receiver may write `now` alone (`Rotor::Compare`); a
+  # block with parameters writes this one.
   #
   # ```
   # Rotor::SQL.now.utc?  # => true

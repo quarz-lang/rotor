@@ -675,6 +675,15 @@ class QueryTest < Test::Case
 
   # rotor#75: `now` alone is not found in a block written in a function,
   # nor outside a block (checked by `quarz` on the PATH, or by $QUARZ).
+  def test_bare_now_beside_a_function_named_now
+    # A program's own function `now` (test/fixtures/now_function): in a
+    # block with a receiver, the method of the row is found first, so the
+    # block is still the database's clock.
+    out = Process.sh("cd test/fixtures/now_function && exec \"${QUARZ:-quarz}\" run")
+    assert(out.success?, out.stderr)
+    assert_equal("[\"SELECT \\\"id\\\", \\\"at\\\" FROM \\\"evs\\\" WHERE \\\"at\\\" < now()\", []]", out.stdout.strip)
+  end
+
   def test_bare_now_is_found_in_blocks_only
     out = Process.sh("cd test/fixtures/bare_now && exec \"${QUARZ:-quarz}\" check")
     assert(!out.success?)

@@ -22,12 +22,12 @@
 module Compare
   # `now` alone in a query's block: `Rotor::SQL.now`, the database's
   # `now()` in SQL, Quarz's clock where the block runs in Quarz
-  # (`select`). Private, of every object, so that it is found bare on a
-  # block's `self`: the row in a block with a receiver; in a block with
-  # parameters the `self` around it, which the block must be able to
-  # capture (a Shareable object's; a function has none). Only in blocks
-  # checked `using Rotor::Compare`; a model's own `now` (a column of that
-  # name) and a local variable come first.
+  # (`select`). The form of a block with a receiver, called on the row;
+  # a block with parameters writes `Rotor::SQL.now` (there `now` alone
+  # is called on the object around the block, found only when that is
+  # Shareable). Only in blocks checked `using Rotor::Compare`; a model's
+  # own `now` and a local come first (a function named `now` does not:
+  # a method of `self` is found before it).
   extension Object
     private def now -> Time = Time.now.utc
   end
