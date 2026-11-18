@@ -437,13 +437,24 @@ class Model
     end
     # (An array's elements: a `Type` value carries no type arguments,
     # the column keeps them.)
-    if e = c.element
-      fits = if e == Int
-               c.nils ? v.is_a?(Array[Int?]) : v.is_a?(Array[Int])
-             else
-               c.nils ? v.is_a?(Array[String?]) : v.is_a?(Array[String])
-             end
-      raise ArgumentError.new("#{self.class.name}##{c.name} takes an Array of #{e.name}#{c.nils ? "?" : ""}, not #{v.inspect}") unless fits
+    if (e = c.element) && !Model.fits_array?(c, v)
+      raise ArgumentError.new("#{self.class.name}##{c.name} takes an Array of #{e.name}#{c.nils ? "?" : ""}, not #{v.inspect}")
+    end
+  end
+
+  # :nodoc:
+  # Whether `v` is an array of the array column `c`'s elements (nils
+  # only where it admits them): the one test of it, for a model's values
+  # and a changeset's. (`is_a?` of an `Array[T]` does not walk the
+  # elements: constant time, measured to a million.)
+  def self.fits_array?(c: Column, v: Object) -> Bool
+    e = c.element
+    if e.nil?
+      false
+    elsif e == Int
+      c.nils ? v.is_a?(Array[Int?]) : v.is_a?(Array[Int])
+    else
+      c.nils ? v.is_a?(Array[String?]) : v.is_a?(Array[String])
     end
   end
 

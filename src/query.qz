@@ -142,6 +142,9 @@ class Query[T]
     rows!("where_key")
     single!("where_key")
     c = table.columns.find { |x| x.name == name } || raise ArgumentError.new("`#{table.name}` has no column `#{name}`")
+    if value.is_a?(Array[Object?]) && c.element.nil?
+      raise ArgumentError.new("an array for `#{name}`, which is not an array column")
+    end
     col = Piece::Column.new(0, c.name)
     s = if value.nil?
           Sql.new([col, Piece::Text.new(" IS NULL")], Translator::IS, nil, nil, false)

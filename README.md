@@ -65,8 +65,11 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   checked when the program is compiled: quarz-lang/quarz#401's typed
   keywords), and the getter gives it so. The column keeps its declared
   element (`Rotor::Column#element`, `#nils`), as a `Type` value carries
-  no type arguments. No `default:`; element tests in query blocks
-  (`tags.include?(x)`) are a later issue.
+  no type arguments. No `default:`. In query blocks an array column
+  is `nil?` / `== nil` (`IS NULL`), an order key, a `select`'s read and
+  an `update`'s value (`{tags: xs}`, a captured array, checked by the
+  element); comparing it and element tests (`tags == xs`,
+  `tags.include?(x)`, `size`) are a later issue, refused for now.
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`

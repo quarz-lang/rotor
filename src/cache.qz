@@ -237,6 +237,8 @@ module Binds
     in Time => x then x
     in Bytes => x then x
     in Symbol => x then x
+    # (An array column's value, `update { {tags: xs} }`.)
+    in Array => xs then Model.value(xs)
     else raise ArgumentError.new("a value of class #{v.class.name} as a parameter")
     end
   end

@@ -35,11 +35,52 @@ class ArrayColumnTextTest < Test::Case
     assert_match(/Tagged#tags takes an Array of String, not/, e.message)
   end
 
+  # A query's blocks on array columns: what translates, and what is
+  # refused (element tests are a later issue, #66).
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*array_column_test\.qz:\d+\)/, "")
+    end
+  end
+
   def test_query_blocks
-    # Not yet translated (element tests are a later issue): refused.
     xs = ["a"]
-    e = assert_raise(Rotor::UntranslatableError) { Tagged.where { |t| t.tags == xs } }
-    assert_match(/cannot be translated to SQL/, e.message)
+    cols = "SELECT \"id\", \"tags\", \"scores\" FROM \"tagged\""
+    assert_equal("`Array#==` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags == xs } })
+    assert_equal("`Array#include?` on an array SQL does not have cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.include?("x") } })
+    assert_equal("`Array#size` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.size > 0 } })
+    assert_equal("`Array#empty?` cannot be translated to SQL", refusal { Tagged.where { |t| t.tags.empty? } })
+    assert_equal("an array literal cannot be translated to SQL", refusal { Tagged.query.update { |t| {tags: t.tags + ["x"]} } })
+    # (An order by an array column is PostgreSQL's array order.)
+    assert_equal("#{cols} ORDER BY \"tags\"", Tagged.query.order { |t| t.tags }.to_sql[0])
+    # NULL of a `null: true` array column: translated.
+    assert_equal("#{cols} WHERE \"scores\" IS NULL", Tagged.where { |t| t.scores.nil? }.to_sql[0])
+    assert_equal("#{cols} WHERE \"scores\" IS NULL", Tagged.where { |t| t.scores == nil }.to_sql[0])
+    # `select` (in Quarz, of the columns it reads) and an update's value.
+    assert_equal("SELECT \"tags\" FROM \"tagged\"", Tagged.query.select { |t| t.tags }.to_sql[0])
+    sql, params = Tagged.where { |t| t.id == 1 }.update { |t| {tags: xs} }.to_sql
+    assert_equal("UPDATE \"tagged\" SET \"tags\" = $1 WHERE \"id\" = 1", sql)
+    assert_equal(1, params.size)
+    wrong = [1]
+    assert_equal("Tagged#tags takes an Array of String, not [1]", refusal { Tagged.query.update { |t| {tags: wrong} } })
+  end
+
+  # A changeset's change of an array column is tested as the model's
+  # value is (`Rotor::Model.fits_array?`).
+  def test_changeset
+    t = Tagged.load({id: 1, tags: ["a"], scores: nil})
+    ok: Array[String] = ["b"]
+    Rotor::Changeset.change(t).put_change(:tags, ok)
+    ints: Array[Int?] = [1, nil]
+    Rotor::Changeset.change(t).put_change(:scores, ints)
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(t).put_change(:tags, [1, 2]) }
+    assert_equal("[1, 2] is not a value of Tagged#tags", e.message)
+    nils: Array[String?] = ["a", nil]
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(t).put_change(:tags, nils) }
+    assert_equal("[\"a\", nil] is not a value of Tagged#tags", e.message)
   end
 
   def test_schema
@@ -108,6 +149,25 @@ class ArrayColumnTest < Test::Case
       again = repo.get(Tagged, u.id) || raise "not found"
       assert_equal(Array[String].new, again.tags)
       assert_nil(again.scores)
+      # `insert_all` of rows with an array, one empty and one with a NULL
+      # element (each parameter's type inferred in a multi-row VALUES).
+      c.exec("TRUNCATE tagged RESTART IDENTITY")
+      empty = Tagged.new(tags: Array[String].new, scores: [1, nil])
+      made = repo.insert_all([empty, Tagged.new(tags: ["x", "y"], scores: Array[Int?].new)])
+      byid = made.sort_by { |m| m.id }
+      assert_equal([Array[String].new, ["x", "y"]], byid.map { |m| m.tags })
+      ints: Array[Int?] = [1, nil]
+      assert_equal(ints, byid[0].scores)
+      # `upsert` with a DO UPDATE of the array, and `returning` rows.
+      c.exec("CREATE UNIQUE INDEX IF NOT EXISTS tagged_tags_key ON tagged (tags)")
+      up = repo.upsert(Rotor::Statement.insert(Tagged.new(tags: ["x", "y"], scores: [9])).on_conflict(:tags).do_update { |old, new| {scores: new.scores} }) || raise "skipped"
+      nine: Array[Int?] = [9]
+      assert_equal(nine, up.scores)
+      zs = ["z"]
+      back = repo.all(Tagged.where { |x| x.id == up.id }.update { |x| {tags: zs} }.returning)
+      z: Array[String] = ["z"]
+      assert_equal(z, back[0].tags)
+      c.exec("DROP INDEX tagged_tags_key")
       # A NULL element in a column whose elements are not nilable.
       c.exec("UPDATE tagged SET tags = ARRAY['x', NULL]")
       e = assert_raise(ArgumentError) { repo.get(Tagged, t.id) }

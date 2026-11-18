@@ -851,6 +851,8 @@ class Translator
     in Time => x then x
     in Bytes => x then x
     in Symbol => x then x
+    # (An array column's value, `update { {tags: xs} }`: one parameter.)
+    in Array => xs then Model.value(xs)
     else untranslatable("a value of class #{value.class.name}", line)
     end
   end
@@ -966,7 +968,9 @@ class Translator
       return like(operand(r), a, name, label, line)
     end
     if sym = COMPARISONS[m.name]?
-      if arr = ms.find { |x| x.owner == Array }
+      # (An array's `==`/`!=` with nil is `IS NULL`; with anything else it
+      # is an array comparison, a later issue.)
+      if (arr = ms.find { |x| x.owner == Array }) && !(always_nil?(r) || always_nil?(a))
         untranslatable(Translator.label(arr), line)
       end
       return compare(r, sym, a, whole, line)
@@ -1055,6 +1059,13 @@ class Translator
   # NOT DISTINCT FROM`, as Quarz's `==` takes nil for equal to nil, and
   # `=` when neither can (`n = CASE WHEN ... END`, which an index serves).
   private def compare(le: Meta::Expr, op: String, re: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
+    # (An array column compared: element tests and array equality are a
+    # later issue, #66; `nil` is not a comparison, `nil?` is.)
+    [le, re].each do |side|
+      if (found = column_of(side)) && !found[1].element.nil? && !always_nil?(le) && !always_nil?(re)
+        untranslatable("a comparison of the array column `#{found[1].name}`", line)
+      end
+    end
     # (A LEFT JOIN's row against nil: `c == nil` is `c.nil?`; against
     # anything else it would compare its key, which the block does not
     # mean: refused as a value below.)
