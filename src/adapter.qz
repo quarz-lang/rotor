@@ -45,6 +45,8 @@ abstract class Row
   abstract def bool?(i: Int) -> Bool?
   abstract def time?(i: Int) -> Time?
   abstract def bytes?(i: Int) -> Bytes?
+  # A `json` or `jsonb` value, parsed.
+  abstract def json?(i: Int) -> JSON::Value?
   abstract def ints?(i: Int) -> Array[Int?]?
   abstract def floats?(i: Int) -> Array[Float?]?
   abstract def strings?(i: Int) -> Array[String?]?
@@ -67,6 +69,8 @@ abstract class Row
   # :ditto:
   def bytes(i: Int) -> Bytes = bytes?(i) || null(i)
   # :ditto:
+  def json(i: Int) -> JSON::Value = json?(i) || null(i)
+  # :ditto:
   def ints(i: Int) -> Array[Int?] = ints?(i) || null(i)
   # :ditto:
   def floats(i: Int) -> Array[Float?] = floats?(i) || null(i)
@@ -78,7 +82,7 @@ abstract class Row
   def times(i: Int) -> Array[Time?] = times?(i) || null(i)
 
   # The value of `i` as `type` wants it (`Int`, `Float`, `String`,
-  # `Bool`, `Time` or `Bytes`).
+  # `Bool`, `Time`, `Bytes` or `JSON::Value`).
   def value(i: Int, type: Type[Object]) -> Object?
     if type == Int
       int?(i)
@@ -94,6 +98,8 @@ abstract class Row
       t ? t.utc : nil
     elsif type == Bytes
       bytes?(i)
+    elsif type == JSON::Value
+      json?(i)
     else
       raise ArgumentError.new("no column type #{type.name}")
     end
@@ -197,6 +203,7 @@ module Adapters
     def bool?(i: Int) -> Bool? = @row.bool?(i)
     def time?(i: Int) -> Time? = @row.time?(i)
     def bytes?(i: Int) -> Bytes? = @row.bytes?(i)
+    def json?(i: Int) -> JSON::Value? = @row.json?(i)
     def ints?(i: Int) -> Array[Int?]? = @row.ints?(i)
     def floats?(i: Int) -> Array[Float?]? = @row.floats?(i)
     def strings?(i: Int) -> Array[String?]? = @row.strings?(i)

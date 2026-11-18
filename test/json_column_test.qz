@@ -1,0 +1,244 @@
+require "test"
+
+# `JSON::Value` columns (rotor#93): `jsonb`, read parsed and written as
+# the document's compact text.
+class Doc < Rotor::Model
+  table "docs" do
+    column :id, Int, primary: true
+    column :body, JSON::Value
+    column :extra, JSON::Value, null: true
+  end
+end
+
+class JsonColumnTextTest < Test::Case
+  COLS = "SELECT \"id\", \"body\", \"extra\" FROM \"docs\""
+
+  def doc(text: String) -> JSON::Value = JSON.parse(text)
+
+  def refusal(&f: () -> Object) -> String
+    begin
+      f.call
+      "translated"
+    rescue => e
+      e.message.sub(/ \([^()]*json_column_test\.qz:\d+\)/, "")
+    end
+  end
+
+  def test_columns
+    assert_equal(["bigint", "jsonb", "jsonb"], Doc.columns.map { |c| c.sql })
+    assert(Doc.columns[1].type == JSON::Value && !Doc.columns[1].null)
+    assert(Doc.columns[2].null)
+  end
+
+  def test_values
+    d = Doc.new(body: doc("{\"a\": [1, null]}"))
+    assert_equal(doc("{\"a\": [1, null]}"), d.body)
+    assert_nil(d.extra)
+    # The document `null` is a value, not nil.
+    n = d.with(extra: JSON::Value::Null)
+    assert(n.extra == JSON::Value::Null)
+    sql, params = Rotor::Statement.insert(n).to_sql
+    assert_equal("INSERT INTO \"docs\" (\"body\", \"extra\") VALUES ($1, $2)", sql)
+    expected: Array[Object?] = [doc("{\"a\": [1, null]}"), doc("null")]
+    assert_equal(expected, params)
+    # A loaded value is checked by the column's type.
+    e = assert_raise(ArgumentError) { Doc.load({id: 1, body: "{}", extra: nil}) }
+    assert_equal("Doc#body takes JSON::Value, not String", e.message)
+  end
+
+  def test_query_blocks
+    body = doc("{\"k\": 1}")
+    sql, params = Doc.where { |d| d.body == body }.to_sql
+    assert_equal("#{COLS} WHERE \"body\" = $1", sql)
+    expected: Array[Object?] = [body]
+    assert_equal(expected, params)
+    # `!=` of a nullable column: a NULL differs from a document.
+    assert_equal("#{COLS} WHERE \"extra\" IS DISTINCT FROM $1", Doc.where { |d| d.extra != body }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"body\" <> $1", Doc.where { |d| d.body != body }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"extra\" IS NULL", Doc.where { |d| d.extra.nil? }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"extra\" IS NULL", Doc.where { |d| d.extra == nil }.to_sql[0])
+    # (A nullable column against another: Quarz's nil, equal to nil.)
+    assert_equal("#{COLS} WHERE \"body\" IS NOT DISTINCT FROM \"extra\"", Doc.where { |d| d.body == d.extra }.to_sql[0])
+    # The document `null` written in the block: a parameter.
+    sql, params = Doc.where { |d| d.extra == JSON::Value::Null }.to_sql
+    assert_equal("#{COLS} WHERE \"extra\" = $1", sql)
+    nulls: Array[Object?] = [doc("null")]
+    assert_equal(nulls, params)
+    # An update's value: a document, nil, another column.
+    sql, params = Doc.where { |d| d.id == 1 }.update { |d| {body: body, extra: nil} }.to_sql
+    assert_equal("UPDATE \"docs\" SET \"body\" = $1, \"extra\" = NULL WHERE \"id\" = 1", sql)
+    assert_equal(expected, params)
+    assert_equal("UPDATE \"docs\" SET \"extra\" = \"body\"", Doc.query.update { |d| {extra: d.body} }.to_sql[0])
+    # Two captured documents: typed, as no column types them.
+    other = doc("[]")
+    assert_equal("#{COLS} WHERE $1::jsonb = $2::jsonb", Doc.where { |d| body == other }.to_sql[0])
+  end
+
+  def test_refused
+    s = "x"
+    body = doc("{}")
+    docs = [body]
+    assert_equal("`d.body == s` is always false: a `JSON::Value` and a `String` are never equal", refusal { Doc.where { |d| d.body == s } })
+    assert_equal("`d.body == 1` is always false: a `JSON::Value` and an `Int` are never equal", refusal { Doc.where { |d| d.body == 1 } })
+    assert_equal("`JSON::Value#null?` cannot be translated to SQL", refusal { Doc.where { |d| d.body.null? } })
+    assert_equal("`JSON::Value#[]` cannot be translated to SQL", refusal { Doc.where { |d| d.body["k"] == body } })
+    assert_equal("`JSON::Value#to_json` cannot be translated to SQL", refusal { Doc.where { |d| d.body.to_json == s } })
+    assert_match(/\Aan array of JSON::Value::Object as a parameter|cannot be translated to SQL\z/, refusal { Doc.where { |d| docs.include?(d.body) }.to_sql })
+    assert_equal("Doc#body takes JSON::Value, not String", refusal { Doc.query.update { |d| {body: s} } })
+    # No order: a `JSON::Value` has none in Quarz.
+    assert_equal("an order by a `JSON::Value` cannot be translated to SQL", refusal { Doc.query.order { |d| d.body }.to_sql })
+    assert_equal("an order by a `JSON::Value` cannot be translated to SQL", refusal { Doc.query.order { |d| d.id > 1 ? d.extra : d.body }.to_sql })
+  end
+
+  # One site, documents of different variants and nil: a document's
+  # kind is `JSON::Value` whatever its variant (no translation depends
+  # on one), nil's its own (`IS NULL`).
+  def find(x: JSON::Value?) -> Rotor::Query[Doc] = Doc.where { |d| d.extra == x }
+
+  def test_one_site_kinds
+    sql, params = find(doc("{\"a\": 1}")).to_sql
+    assert_equal("#{COLS} WHERE \"extra\" = $1", sql)
+    sql, params = find(doc("null")).to_sql
+    assert_equal("#{COLS} WHERE \"extra\" = $1", sql)
+    expected: Array[Object?] = [doc("null")]
+    assert_equal(expected, params)
+    assert_equal("#{COLS} WHERE \"extra\" IS NULL", find(nil).to_sql[0])
+    assert_equal("#{COLS} WHERE \"extra\" = $1", find(doc("[1]")).to_sql[0])
+  end
+
+  def test_changeset
+    d = Doc.load({id: 1, body: doc("{}"), extra: nil})
+    c = Rotor::Changeset.change(d).put_change(:body, doc("[1]"))
+    assert(c.valid?)
+    e = assert_raise(ArgumentError) { Rotor::Changeset.change(d).put_change(:body, "[1]") }
+    assert_equal("\"[1]\" is not a value of Doc#body", e.message)
+    # Cast: a document as it is; text is not parsed into one.
+    params: Hash[String, Object?] = {"body" => doc("[2]"), "extra" => "{}"}
+    c = Rotor::Changeset.cast(d, params, [:body, :extra])
+    assert(c.changes[:body]? == doc("[2]"))
+    assert(c.errors.any? { |x| x.field == :extra })
+  end
+
+  def test_schema
+    models: Array[Type[Rotor::Model]] = [Doc]
+    sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
+    assert_equal(["CREATE TABLE \"docs\" (\"id\" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \"body\" jsonb NOT NULL, \"extra\" jsonb)"], sql)
+  end
+
+  def test_wrong_types_do_not_compile
+    # (Checked by `quarz` on the PATH, or by $QUARZ.)
+    out = Process.sh("cd test/fixtures/json_wrong_type && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:9:\d+: error/, out.stderr)
+    assert_match(/main\.qz:10:\d+: error/, out.stderr)
+    assert_match(/main\.qz:11:\d+: error/, out.stderr)
+    refute_match(/main\.qz:(8|12|13):\d+: error/, out.stderr)
+  end
+end
+
+# A `json` column of a table rotor did not create.
+class RawDoc < Rotor::Model
+  table "raw_docs" do
+    column :id, Int, primary: true
+    column :body, JSON::Value, null: true
+  end
+end
+
+# Against a real server.
+class JsonColumnTest < Test::Case
+  SERVER = Atom[PG::Testing::Server | String].new("not started")
+
+  def self.startup
+    server = PG::Testing.start_or_reason
+    if server.is_a?(PG::Testing::Server)
+      c = PG.connect(server.url)
+      begin
+        # (Dropped first: PG_TEST_URL's server outlives a run.)
+        c.exec("DROP TABLE IF EXISTS docs, raw_docs")
+        models: Array[Type[Rotor::Model]] = [Doc]
+        Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
+        c.exec("CREATE TABLE raw_docs (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, body json)")
+      ensure
+        c.close
+      end
+    end
+    SERVER.set(server)
+  end
+
+  def self.shutdown
+    case SERVER.get
+    in PG::Testing::Server => s then s.stop
+    else nil
+    end
+  end
+
+  def url -> String
+    case SERVER.get
+    in PG::Testing::Server => s then s.url
+    in String => why then omit(why)
+    end
+  end
+
+  def doc(text: String) -> JSON::Value = JSON.parse(text)
+
+  def test_round_trip
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE docs RESTART IDENTITY")
+      body = doc("{\"b\": 1, \"a\": {\"n\": [true, null, \"\\\"x,y\\\"\"]}, \"big\": 123456789012345678901234567890}")
+      d = repo.insert(Doc.new(body: body, extra: JSON::Value::Null))
+      got = repo.get(Doc, d.id) || raise "not found"
+      assert_equal(body, got.body)
+      # The document `null` and SQL's NULL stay apart.
+      assert(got.extra == JSON::Value::Null)
+      e = repo.insert(Doc.new(body: doc("1.5")))
+      assert_nil((repo.get(Doc, e.id) || raise "not found").extra)
+      assert_equal(["null"], c.query("SELECT coalesce(extra::text, 'NULL') FROM docs ORDER BY id").rows.map { |r| r.string(0) }.first(1))
+      # jsonb equality: members in another order are the same document.
+      same = doc("{\"a\": {\"n\": [true, null, \"\\\"x,y\\\"\"]}, \"big\": 123456789012345678901234567890, \"b\": 1}")
+      assert_equal([d.id], repo.all(Doc.where { |x| x.body == same }).map { |x| x.id })
+      assert_equal([d.id], repo.all(Doc.where { |x| x.extra == JSON::Value::Null }).map { |x| x.id })
+      assert_equal([e.id], repo.all(Doc.where { |x| x.extra.nil? }).map { |x| x.id })
+      assert_equal([e.id], repo.all(Doc.where { |x| x.extra != JSON::Value::Null }).map { |x| x.id })
+      # A decimal fraction is read as a Float.
+      assert_equal(1.5, (repo.get(Doc, e.id) || raise "not found").body.as_f)
+      # An update's value, a model's update, and `insert_all`.
+      nb = doc("[1, 2]")
+      repo.run(Doc.where { |x| x.id == e.id }.update { |x| {body: nb, extra: x.body} })
+      back = repo.get(Doc, e.id) || raise "not found"
+      assert_equal(nb, back.body)
+      assert_equal(doc("1.5"), back.extra)
+      u = repo.update(back.with(extra: nil))
+      assert_nil((repo.get(Doc, u.id) || raise "not found").extra)
+      made = repo.insert_all([Doc.new(body: doc("{}")), Doc.new(body: doc("\"s\""), extra: doc("[]"))])
+      assert_equal(2, made.size)
+      # Change tracking (a changeset's, by `==`): the document read back
+      # (jsonb's normal form, members in another order) equals the one
+      # written, so putting it again is no change; another document is.
+      again = repo.get(Doc, d.id) || raise "not found"
+      assert(Rotor::Changeset.change(again).put_change(:body, same).changes.empty?)
+      assert(Rotor::Changeset.change(again).put_change(:body, nb).changes.key?(:body))
+    ensure
+      c.close
+    end
+  end
+
+  def test_json_column
+    c = PG.connect(url)
+    begin
+      repo = Rotor::Repo.new(connection: c)
+      c.exec("TRUNCATE raw_docs RESTART IDENTITY")
+      body = doc("{\"b\":  1, \"a\": 2}")
+      r = repo.insert(RawDoc.new(body: body))
+      assert_equal(body, (repo.get(RawDoc, r.id) || raise "not found").body)
+      nb = doc("[null]")
+      repo.run(RawDoc.where { |x| x.id == r.id }.update { |x| {body: nb} })
+      assert_equal(nb, (repo.get(RawDoc, r.id) || raise "not found").body)
+      repo.update((repo.get(RawDoc, r.id) || raise "not found").with(body: nil))
+      assert_equal([r.id], repo.all(RawDoc.where { |x| x.body.nil? }).map { |x| x.id })
+    ensure
+      c.close
+    end
+  end
+end
