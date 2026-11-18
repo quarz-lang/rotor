@@ -56,6 +56,11 @@ class DecimalColumnTextTest < Test::Case
     assert_equal("#{COLS} WHERE \"total\" * 3 > $1", Invoice.where { |x| x.total * 3 > d }.to_sql[0])
     assert_equal("#{COLS} WHERE \"total\" - \"total\" = $1", Invoice.where { |x| x.total - x.total == d }.to_sql[0])
     assert_equal("UPDATE \"invoices\" SET \"total\" = \"total\" * 2", Invoice.query.update { |x| {total: x.total * 2} }.to_sql[0])
+    assert_equal("UPDATE \"invoices\" SET \"total\" = \"total\" + 1", Invoice.query.update { |x| {total: x.total + 1} }.to_sql[0])
+    # Unary minus: the operand as it is, never cast to a bigint (which
+    # would round a fraction).
+    assert_equal("#{COLS} WHERE - \"total\" < $1", Invoice.where { |x| -x.total < d }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"total\" > - $1::numeric", Invoice.where { |x| x.total > -d }.to_sql[0])
   end
 
   def test_refused
@@ -66,9 +71,16 @@ class DecimalColumnTextTest < Test::Case
     assert_equal("`x.total == 100` is always false: a `Decimal` and an `Int` are never equal", refusal { Invoice.where { |x| x.total == 100 } })
     assert_equal("`x.total == f` is always false: a `Decimal` and a `Float` are never equal", refusal { Invoice.where { |x| x.total == f } })
     assert_equal("`x.approx == x.total` is always false: a `Float` and a `Decimal` are never equal", refusal { Invoice.where { |x| !x.approx.nil? && x.approx == x.total } }.sub("`!x.approx.nil? && ", "`"))
-    # `round`: later. (`div` takes keywords, which a quoted block cannot
-    # hold: it does not compile.)
+    # `round` and the other methods: later. (`div` takes keywords, which
+    # a quoted block cannot hold: it does not compile.)
     assert_equal("`Decimal#round` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.round(1) == d } })
+    assert_equal("`Decimal#abs` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.abs == d } })
+    assert_equal("`Decimal#zero?` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.zero? } })
+    assert_equal("`Decimal#scale` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.scale == 2 } })
+    assert_equal("`Decimal#to_f` cannot be translated to SQL", refusal { Invoice.where { |x| x.total.to_f == f } })
+    # An `Int` into a `Decimal` column: refused, as `with(total: 5)` does
+    # not compile (no `Int` widens to a `Decimal` in Quarz).
+    assert_equal("Invoice#total takes Decimal, not Int", refusal { Invoice.query.update { |x| {total: 5} } })
   end
 
   def test_changeset
@@ -81,8 +93,10 @@ class DecimalColumnTextTest < Test::Case
       bad: Hash[String, Object?] = {"rate" => text}
       assert(Rotor::Changeset.cast(a, bad, [:rate]).errors.any? { |x| x.field == :rate }, text)
     end
-    # Change tracking by `==`: `1.0` is `1.00`.
+    # Change tracking by `==`: `1.0` is `1.00`, so a scale alone is not
+    # written.
     assert(Rotor::Changeset.change(a).put_change(:total, dec("1.0")).changes.empty?)
+    assert(Rotor::Changeset.change(a).put_change(:total, dec("1.000")).changes.empty?)
     e = assert_raise(ArgumentError) { Rotor::Changeset.change(a).put_change(:total, 1.0) }
     assert_equal("1.0 is not a value of Invoice#total", e.message)
   end
@@ -154,6 +168,18 @@ class DecimalColumnTest < Test::Case
       assert_equal([b.id], repo.all(Invoice.where { |x| x.total * 3 == t }).map { |x| x.id })
       repo.run(Invoice.where { |x| x.id == a.id }.update { |x| {total: x.total * 2} })
       assert_equal("0.2000000000000000002", (repo.get(Invoice, a.id) || raise "not found").total.to_s)
+      # Unary minus of a fraction, on the server: not rounded.
+      neg = dec("-0.2000000000000000002")
+      assert_equal([a.id], repo.all(Invoice.where { |x| -x.total == neg }).map { |x| x.id })
+      # SQL goes on where Quarz stops: `numeric` holds more fraction
+      # digits than a `Decimal`, so an update computing in SQL can write
+      # a value the model cannot read.
+      small = Decimal.new(1, scale: 600)
+      far = repo.insert(Invoice.new(total: small))
+      repo.run(Invoice.where { |x| x.id == far.id }.update { |x| {total: x.total * x.total} })
+      deep = assert_raise(ArgumentError) { repo.get(Invoice, far.id) }
+      assert_match(/: a Decimal's scale is 0 to 1000 \(read the column as a string\)\z/, deep.message)
+      c.exec("DELETE FROM invoices WHERE id = #{far.id}")
       # NaN in a `numeric` column: the row cannot be read (pg's reader).
       c.exec("UPDATE invoices SET total = 'NaN' WHERE id = #{b.id}")
       err = assert_raise(ArgumentError) { repo.get(Invoice, b.id) }

@@ -121,9 +121,15 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   (refused) or does not compile (`<`). `round` is refused for now;
   `div` takes keywords, which a query block cannot hold. A changeset
   casts a form's text with `Decimal.parse?` (anything else, or past
-  `Decimal`'s limits, is invalid). A row holding NaN or an infinity in
-  such a column cannot be read (pg's reader raises `ArgumentError`
-  naming it). No `numeric[]` column yet.
+  `Decimal`'s limits, is invalid); its change tracking is
+  `Decimal#==`, by value, so putting `19.990` over `19.99` is no
+  change and a scale alone is not written. A row holding NaN or an
+  infinity in such a column cannot be read (pg's reader raises
+  `ArgumentError` naming it). SQL goes on where Quarz stops: `numeric`
+  holds more digits than a `Decimal` (10,000 digits, 1,000 of them a
+  fraction), so an `update` computing in SQL (`total * total` of a
+  value with 600 fraction digits) can write a value the model then
+  cannot read. No `numeric[]` column yet.
 - A date column (#98): `column :day, Date` (`date`), read and written
   as a `Date` (pg's `row.date`), in a composite key too; no `default:`,
   as for `Time`. In query blocks: `==`, `!=`, `<`, `<=`, `>`, `>=` and
