@@ -975,7 +975,15 @@ class Translator
     # `Time + Duration`, `Time - Duration`: on a `timestamptz`, exact
     # for a `Duration`'s hours to microseconds, as in Quarz.
     if m.owner == Time && (name == "+" || name == "-")
-      untranslatable(name == "-" ? "`Time - Time`" : "`Time + Time`", line) unless duration?(a)
+      # (What cannot be: `Time - Time`, the argument's own (`at + (t1 -
+      # t2)`) or this one's.)
+      unless duration?(a)
+        times = case a
+                in Meta::Expr::Call(Meta::Expr, am, _, [_], nil, _) then am.owner == Time && am.name == :-
+                else false
+                end
+        untranslatable(name == "-" || times ? "`Time - Time`" : "a `Duration` of this form", line)
+      end
       l = cast(operand(r))
       rr = operand(a)
       return with_nulls(binary(l, name, rr, ADD, name == "+"), [l])

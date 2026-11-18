@@ -724,6 +724,9 @@ class QueryTest < Test::Case
     assert_match(/`Time - Time`/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Person.where { |p| span > 1.hour } }
     assert_match(/a comparison of `Duration`s/, e.message)
+    # A `Duration` that is a difference of `Time`s: `Time - Time` named.
+    e = assert_raise(Rotor::UntranslatableError) { Person.where { joined > at + (joined - at) } }
+    assert_match(/`Time - Time`/, e.message)
   end
 
   # rotor#77: a LEFT JOIN, the right row an `R?`.
