@@ -5,13 +5,15 @@ class Ev < Rotor::Model
   end
 end
 
-# A block with a parameter written in a function, which has no `self`.
+# A block with a parameter written in a function, which has no `self`:
+# `now` is found (#105).
 def due -> Rotor::Query[Ev] = Ev.where { |e| e.at < now }
 
-# Outside a query's block.
+# Outside a query's block: not found.
 p now
 
 class Holder
-  # A block with a parameter in a method of a non-Shareable class.
+  # A block with a parameter in a method of a non-Shareable class:
+  # found (#105).
   def due -> Rotor::Query[Ev] = Ev.where { |e| e.at < now }
 end

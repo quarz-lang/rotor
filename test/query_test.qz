@@ -64,6 +64,16 @@ class NowCol < Rotor::Model
   end
 end
 
+# `now` alone in a function's block and in a non-Shareable class's
+# method (#105).
+def stale_gauges -> Rotor::Query[Gauge] = Gauge.where { |g| g.at < now }
+
+class GaugeReport
+  var @runs: Int = 0
+  def initialize; end
+  def stale -> Rotor::Query[Gauge] = Gauge.where { |g| g.at < now }
+end
+
 class QueryTest < Test::Case
   GS = "SELECT \"id\", \"level\", \"cap\", \"ratio\", \"label\", \"at\", \"on\" FROM \"gauges\""
 
@@ -665,6 +675,7 @@ class QueryTest < Test::Case
     check(Gauge.where { at < now }, "#{GS} WHERE \"at\" < now()", [])
     check(Gauge.where { |g| g.at < Rotor::SQL.now }, "#{GS} WHERE \"at\" < now()", [])
     check(Gauge.new(on: true).later, "#{GS} WHERE NOT \"at\" IS NULL AND \"at\" > now()", [])
+    # (A block naming nothing of the row: the receiver form, quarz-lang/quarz#901.)
     assert_equal("UPDATE \"gauges\" SET \"at\" = now()", Gauge.query.update { {at: now} }.to_sql[0])
     assert_equal("UPDATE \"gauges\" SET \"at\" = now()", Gauge.query.update { |g| {at: Rotor::SQL.now} }.to_sql[0])
     # A column named `now` comes first, and a local of that name.
@@ -673,29 +684,35 @@ class QueryTest < Test::Case
     check(Gauge.where { at < now }, "#{GS} WHERE \"at\" < $1", [now])
   end
 
-  # rotor#75: `now` alone is not found in a block written in a function,
-  # nor outside a block (checked by `quarz` on the PATH, or by $QUARZ).
+  # `now` alone beside a program's own function `now`
+  # (test/fixtures/now_function): an ambiguity at the call
+  # (quarz-lang/quarz#885, decision 2), where before #105 the row's
+  # helper was taken silently (checked by `quarz` on the PATH, or by
+  # $QUARZ).
   def test_bare_now_beside_a_function_named_now
-    # A program's own function `now` (test/fixtures/now_function): in a
-    # block with a receiver, the method of the row is found first, so the
-    # block is still the database's clock.
-    out = Process.sh("cd test/fixtures/now_function && exec \"${QUARZ:-quarz}\" run")
-    assert(out.success?, out.stderr)
-    assert_equal("[\"SELECT \\\"id\\\", \\\"at\\\" FROM \\\"evs\\\" WHERE \\\"at\\\" < now()\", []]", out.stdout.strip)
+    out = Process.sh("cd test/fixtures/now_function && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:12:\d+: error: no overload of `where` on Type\[Ev\]/, out.stderr)
+    assert_match(/the call of `now` is ambiguous: the function `now\(\) -> Time` and the private function `now` that the extension of `Kernel` in `Rotor::Compare` gives, active here, have one name; the extension's is called bare only, where it is active: rename the program's function, or make the call where the extension is not active/, out.stderr)
   end
 
+  # `now` alone is found in every query block (#105): a block with a
+  # parameter in a function and in a method of a class that is not
+  # Shareable; not outside a query block.
   def test_bare_now_is_found_in_blocks_only
     out = Process.sh("cd test/fixtures/bare_now && exec \"${QUARZ:-quarz}\" check")
     assert(!out.success?)
-    # In a function's block with a parameter: no `self`.
-    assert_match(/main\.qz:9:\d+: error: no overload of `where` on Type\[Ev\]/, out.stderr)
-    assert_match(/a function has no `self`: `now` is a method of an object, not a function/, out.stderr)
-    # Outside a query's block.
-    assert_match(/main\.qz:12:3: error: undefined local variable or method `now` for main/, out.stderr)
-    # In a block with a parameter in a method of a class that is not
-    # Shareable: `now` would capture its `self`.
-    assert_match(/main\.qz:16:\d+: error: no overload of `where` on Type\[Ev\]/, out.stderr)
-    assert_match(/calling `now` uses `self`, which has the non-shareable type Holder and cannot be captured by a shareable procedure/, out.stderr)
+    assert_match(/main\.qz:13:3: error: undefined local variable or method `now` for main/, out.stderr)
+    refute_match(/main\.qz:(10|18):\d+: error/, out.stderr)
+  end
+
+  # `now` alone in a block with a parameter, in a function and in a
+  # method of a class that is not Shareable (#105).
+  def test_bare_now_with_parameters
+    check(Gauge.where { |g| g.at < now }, "#{GS} WHERE \"at\" < now()", [])
+    check(stale_gauges, "#{GS} WHERE \"at\" < now()", [])
+    check(GaugeReport.new.stale, "#{GS} WHERE \"at\" < now()", [])
+    assert_equal("UPDATE \"gauges\" SET \"at\" = now()", Gauge.query.update { |g| {at: now} }.to_sql[0])
   end
 
   # rotor#76: `Time + Duration` and `Time - Duration` as intervals.

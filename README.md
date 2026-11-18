@@ -363,19 +363,16 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   SQL's `now()`, the transaction's start, the same for each statement
   in it (`where { expires_at < now }`, `update { {finished_at: now} }`);
   where a block runs in Quarz (`select`), it is Quarz's clock, in UTC.
-  `now` alone is the form of a block with a receiver (`where {
-  expires_at < now }`), where it is always found; a block with
-  parameters writes `Rotor::SQL.now` (`where { |s| s.expires_at <
-  Rotor::SQL.now }`). (`now` alone is a method `Rotor::Compare` gives
-  every object, called on the block's `self`: in a block with
-  parameters that is the object around it, so it is found there only
-  on a Shareable one, a model's method say.) It is not found outside
-  query blocks. A model's column or method named `now`, and a local
-  variable of that name, come first, as for any name (a local is
-  Quarz's value, not the database's clock); a function of the program
-  named `now` does not, in a block with a receiver: a method of the
-  block's `self` is found before a function, so the block keeps the
-  database's clock.
+  `now` alone is found in every query block, with a receiver or with
+  parameters (`where { |s| s.expires_at < now }`), in any class's
+  method or a function (#105: a function `Rotor::Compare` gives through
+  an `extension Kernel`, quarz-lang/quarz#885, which takes no `self`).
+  It is not found outside query blocks, nor as `Kernel.now`. A model's
+  column or method named `now`, and a local variable of that name, come
+  first, as for any name (a local is Quarz's value, not the database's
+  clock). A function of the program named `now` is ambiguous beside it,
+  an error at the call (before #105 the row's helper was taken
+  silently): rename it, or write `Rotor::SQL.now`.
 - `==` and `!=` keep Quarz's meaning of nil. Against a value they are
   decided by the value: `IS NULL` for nil, `=` otherwise (which an index
   serves), so a query's SQL can differ by what it captured (pg's

@@ -14,8 +14,10 @@ Code, comments, commit messages and the docs are in English.
 - The schema is generated at compile time by `static def`s (Quarz's
   docs/14); queries are `Quoted` blocks translated to SQL.
 - A function added to `Rotor::SQL` for query blocks also gets its bare
-  form, a private method of the `extension Object` in `Rotor::Compare`
-  that the translator takes as the `Rotor::SQL` one (as `now`, #75); the
+  form, a `private def self.` of the `extension Kernel` in
+  `Rotor::Compare` (a function, found bare in every query block,
+  quarz-lang/quarz#885) that the translator takes as the `Rotor::SQL`
+  one (as `now`, #75, #105); the
   older ones (`like`, `ilike`, `not_nil`, `lower`, `upper`) stay as they
   are.
 
