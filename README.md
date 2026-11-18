@@ -91,13 +91,14 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `==` and `!=` are an error from the server. On a `jsonb` column the
   server's equality decides, not Quarz's `JSON::Value#==`: both ignore
   the members' order and compare numbers by value (`1` and `1.0`,
-  `100` and `1e2` are equal to both), but jsonb compares them as
-  exact decimals where Quarz reads a `Float`, so a stored
-  `0.1000000000000000001` or `9007199254740993` (read as `0.1`, and
-  equal to `9007199254740992.0` in Quarz) does not match `0.1` or
-  `9007199254740992.0` in a query, though Quarz finds the document
-  read back equal to them; a changeset's change tracking is Quarz's
-  `==`, so putting such a document is no change
+  `100` and `1e2` are equal to both), but jsonb keeps a number's
+  decimal exactly where Quarz reads a `Float`: a stored
+  `0.1000000000000000001`, read as `0.1`, does not match `0.1` in a
+  query, though Quarz finds the document read back equal to it. (Today
+  an `Int` beyond 2**53 also equals the `Float` nearest it in Quarz,
+  `9007199254740993` and `9007199254740992.0`, where jsonb finds them
+  different: quarz-lang/quarz#888.) A changeset's change tracking is
+  Quarz's `==`, so putting such a document is no change
   (test/json_column_test.qz, `PAIRS`). Reading a
   member (`body["kind"]`) is a later issue; everything else is refused
   (the document's own methods, an order by it: a `JSON::Value` has no
