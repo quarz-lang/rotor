@@ -506,6 +506,27 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#72: a correlated `exists?`, against the server.
+  def test_exists_of_a_query
+    with_repo do |repo|
+      ann = repo.insert(Author.new(name: "Ann"))
+      repo.insert(Author.new(name: "Bob"))
+      cy = repo.insert(Author.new(name: "Cy"))
+      repo.insert(Volume.new(title: "Quarz", author_id: ann.id))
+      repo.insert(Volume.new(title: "Other", author_id: cy.id))
+      # A volume of no author: its NULL `author_id` makes no EXISTS
+      # true, and EXISTS is never NULL, so `!` is NOT EXISTS, two-valued.
+      repo.insert(Volume.new(title: "Orphan"))
+      names = ->(q: Rotor::Query[Author]) { repo.all(q.order { |a| a.id }).map { |a| a.name } }
+      assert_equal(["Bob"], names.call(Author.where { |a| !Volume.where { |v| v.author_id == a.id }.exists? }))
+      assert_equal(["Ann", "Cy"], names.call(Author.where { |a| Volume.where { |v| v.author_id == a.id }.exists? }))
+      prefix = "Q"
+      assert_equal(["Ann"], names.call(Author.where { |a| a.volumes.query.where { |v| v.title.start_with?(prefix) }.exists? }))
+      assert_equal(1, repo.delete_all(Author.where { |a| !Volume.where { |v| v.author_id == a.id }.exists? }))
+      assert_equal(["Ann", "Cy"], names.call(Author.query))
+    end
+  end
+
   # rotor#71: a subquery, against the server.
   def test_include_of_a_query
     with_repo do |repo|

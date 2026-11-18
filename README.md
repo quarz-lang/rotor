@@ -333,6 +333,17 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   three-valued (`NOT IN` finds nothing beside a NULL), and `!` of it
   refused. Outside a query's block `include?` raises `ArgumentError`: a
   query is not a collection.
+- A query built in a block has `exists?` (#72), `EXISTS (SELECT 1
+  ...)`, its block reading the outer row (a correlated subquery): `Post.where
+  { |p| !Event.where { |e| e.post_id == p.id && e.kind == "removed" }.exists?
+  }` is the posts with no `removed` event. The query is a model's
+  (`Event.where`, `Event.query`) or an association's of the outer row
+  (`p.events.query`), with `where` and `filter` only; its table is
+  aliased by its place (`"e1"`), and the outer row's columns are named
+  by the outer table (or its alias in a join). It is never NULL, so
+  `!` of it is `NOT EXISTS`. A captured query's `exists?` is refused
+  (build it in the block), and outside a block `exists?` raises
+  `ArgumentError`: run the query, `repo.exists?(query)`.
 - Comparing a nullable column: `where { age > 18 }` is allowed in query
   blocks, with `age` an `Int?`. Every query block is checked with `using
   Rotor::Compare` (Quarz's docs/01 §7), whose extensions give `nil` and

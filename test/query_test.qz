@@ -35,6 +35,23 @@ class Gauge < Rotor::Model
   end
 end
 
+# A post and its events: a correlated subquery's tables (rotor#72).
+class XPost < Rotor::Model
+  table "x_posts" do
+    column :id, Int, primary: true
+    column :title, String
+    has_many XEvent, foreign_key: :post_id
+  end
+end
+
+class XEvent < Rotor::Model
+  table "x_events" do
+    column :id, Int, primary: true
+    column :post_id, Int
+    column :kind, String
+  end
+end
+
 class QueryTest < Test::Case
   GS = "SELECT \"id\", \"level\", \"cap\", \"ratio\", \"label\", \"at\", \"on\" FROM \"gauges\""
 
@@ -623,6 +640,53 @@ class QueryTest < Test::Case
     assert_equal("`desc` without an `order` before it", e.message)
     e = assert_raise(ArgumentError) { Person.limit(-1) }
     assert_equal("a negative limit: -1", e.message)
+  end
+
+  # rotor#72: `exists?` of a query built in the block, reading the outer
+  # row.
+  def test_exists_of_a_query
+    posts = "SELECT \"id\", \"title\" FROM \"x_posts\""
+    gone = "removed"
+    check(
+      XPost.where { |p| !XEvent.where { |e| e.post_id == p.id && e.kind == gone }.exists? },
+      "#{posts} WHERE NOT EXISTS (SELECT 1 FROM \"x_events\" AS \"x1\" WHERE \"x1\".\"post_id\" = \"x_posts\".\"id\" AND \"x1\".\"kind\" = $1)", ["removed"]
+    )
+    # An association's query; `filter` too; no condition at all.
+    check(
+      XPost.where { |p| p.x_events.query.filter { |e| e.kind == gone }.exists? },
+      "#{posts} WHERE EXISTS (SELECT 1 FROM \"x_events\" AS \"x1\" WHERE \"x1\".\"post_id\" = \"x_posts\".\"id\" AND \"x1\".\"kind\" = $1)", ["removed"]
+    )
+    check(XPost.where { |p| XEvent.query.exists? }, "#{posts} WHERE EXISTS (SELECT 1 FROM \"x_events\" AS \"x1\")", [])
+    # The same table inside: the outer row's column named by the table,
+    # the inner one's by its alias.
+    check(
+      Person.where { |p| !Person.where { |q| q.age > p.age }.exists? },
+      "#{COLS} WHERE NOT EXISTS (SELECT 1 FROM \"people\" AS \"p1\" WHERE \"p1\".\"age\" > \"people\".\"age\")", []
+    )
+    # Nested: each subquery's table its own alias.
+    check(
+      XPost.where { |p| XEvent.where { |e| e.post_id == p.id && !XEvent.where { |f| f.id > e.id && f.post_id == p.id }.exists? }.exists? },
+      "#{posts} WHERE EXISTS (SELECT 1 FROM \"x_events\" AS \"x1\" WHERE \"x1\".\"post_id\" = \"x_posts\".\"id\" AND NOT EXISTS (SELECT 1 FROM \"x_events\" AS \"x2\" WHERE \"x2\".\"id\" > \"x1\".\"id\" AND \"x2\".\"post_id\" = \"x_posts\".\"id\"))", []
+    )
+    # In a join, the outer rows' columns by their aliases.
+    check(
+      XPost.query.join { x_events }.where { |p, e| !XEvent.where { |f| f.post_id == p.id && f.id > e.id }.exists? }.select { |p, e| e.id },
+      "SELECT \"x0\".\"id\", \"x1\".\"id\" FROM \"x_posts\" AS \"x0\" INNER JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\" WHERE NOT EXISTS (SELECT 1 FROM \"x_events\" AS \"x2\" WHERE \"x2\".\"post_id\" = \"x0\".\"id\" AND \"x2\".\"id\" > \"x1\".\"id\")", []
+    )
+    # A statement's condition.
+    assert_equal(
+      "DELETE FROM \"x_posts\" WHERE NOT EXISTS (SELECT 1 FROM \"x_events\" AS \"x1\" WHERE \"x1\".\"post_id\" = \"x_posts\".\"id\")",
+      XPost.where { |p| !XEvent.where { |e| e.post_id == p.id }.exists? }.delete.to_sql[0]
+    )
+    # Refused: a captured query, a call other than `where` or `filter`,
+    # and `exists?` outside a block.
+    events = XEvent.query
+    e = assert_raise(Rotor::UntranslatableError) { XPost.where { |p| events.exists? } }
+    assert_match(/\A`exists\?` of a captured query: build the query in the block/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { XPost.where { |p| XEvent.where { |x| x.post_id == p.id }.order { |x| x.id }.exists? } }
+    assert_match(/\A`exists\?` of a query with `order`: only `where` and `filter` say which rows exist/, e.message)
+    e2 = assert_raise(ArgumentError) { events.exists? }
+    assert_match(/\A`exists\?` of a query outside a query's block: run it, `repo.exists\?\(query\)`/, e2.message)
   end
 
   # One site of `!q.include?(name)`, for queries of a non-null and of a

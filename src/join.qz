@@ -63,6 +63,21 @@ module Joins
   # A `target` from the values a row gave of its table.
   def self.load[R <: Model](target: Type[R], f: Fetched) -> R = f.all ? target.load(f.values) : target.load_partial(f.values)
 
+  # :nodoc:
+  # `inner`, for the translator (`exists?`).
+  def self.inner_plan(t: Translator, sources: Array[Source], e: Meta::Expr) -> Plan = inner(t, sources, e)
+
+  # :nodoc:
+  # The name of the `Rotor::Query` method `e` calls on a query, or nil.
+  def self.query_call(e: Meta::Expr) -> Symbol?
+    c = step_of(e) || return nil
+    c[0]
+  end
+
+  # :nodoc:
+  # The receiver of the call `e`.
+  def self.receiver(e: Meta::Expr) -> Meta::Expr = receiver_of(e)
+
   # The plan of the query `e`, inside the blocks `t` translates, joined
   # to `sources`: its table (a model's or an association's, then those
   # of a nested `flat_map`), with its conditions, and its orders.

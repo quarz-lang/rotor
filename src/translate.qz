@@ -14,6 +14,10 @@ type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Tim
 enum Piece
   variant Text(text: String)
   variant Column(source: Int, name: Symbol)
+  # A column of an outer query's row (table `source`) inside a subquery
+  # that reads it (`exists?`): qualified by that table, or its alias in
+  # a join, whatever the query's other columns are.
+  variant Outer(source: Int, name: Symbol)
   variant Param(value: Bindable?)
   variant Bound(bind: Bind)
 end
@@ -881,6 +885,12 @@ class Translator
       ms.each { |x| untranslatable(Translator.label(x), line) unless x.singleton && x.owner == SQL }
       return function(name, args, label, line)
     end
+    # A query's `exists?`, the query built in the block: `EXISTS (SELECT
+    # 1 ...)`, reading the outer rows.
+    if name == "exists?" && m.owner == Query
+      untranslatable(label, line) unless args.size == 0
+      return exists(r, line)
+    end
     # A captured query's `include?`: `x IN (SELECT ...)`.
     if name == "include?" && m.owner == Query
       untranslatable(label, line) unless args.size == 1
@@ -1119,7 +1129,7 @@ class Translator
       out
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.name == :"-@" && column_of(e).nil?
       classes(recv)
-    in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :start_with?, :end_with?].include?(m.name)) && column_of(e).nil?
+    in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :start_with?, :end_with?, :exists?].include?(m.name)) && column_of(e).nil?
       [Bool]
     else
       s = sql(e)
@@ -1315,6 +1325,47 @@ class Translator
       return c.null
     end
     !s.nulls.nil?
+  end
+
+  # `q.exists?`, `q` a query built in the block of a model's
+  # (`Event.where { |e| e.post_id == p.id }`) or an association's (`p.events.query`),
+  # with `where` or `filter` only: `EXISTS (SELECT 1 FROM "events" AS
+  # "e1" WHERE ...)`, its table aliased by its index among the tables in
+  # scope, the outer rows' columns `Rotor::Piece::Outer` (named by the
+  # outer query). Never NULL.
+  private def exists(q: Meta::Expr, line: Int) -> Sql
+    if q.is_a?(Meta::Expr::Capture)
+      untranslatable("`exists?` of a captured query: build the query in the block (`where { |p| Event.where { |e| e.post_id == p.id }.exists? }`), or run it (`repo.exists?(query)`)", line)
+    end
+    cur: Meta::Expr = q
+    while (c = Joins.query_call(cur))
+      unless c == :where || c == :filter
+        untranslatable("`exists?` of a query with `#{c}`: only `where` and `filter` say which rows exist", line)
+      end
+      cur = Joins.receiver(cur)
+    end
+    n = @sources.size
+    plan = Joins.inner_plan(self, @sources, q)
+    all = plan.sources
+    inner = all[n]
+    alias_of = ->(k: Int) { Dialect.quote("#{all[k].table.name[0, 1].downcase}#{k}") }
+    pieces: Array[Piece] = [Piece::Text.new("EXISTS (SELECT 1 FROM #{Dialect.table(inner.table.name, inner.table.schema)} AS #{alias_of.call(n)}")]
+    inner.on.each_with_index do |s, i|
+      pieces = pieces + [Piece::Text.new(i == 0 ? " WHERE " : " AND ")]
+      pieces = pieces + (inner.on.size > 1 ? wrap(s, AND + 1) : s.pieces)
+    end
+    pieces = pieces + [Piece::Text.new(")")]
+    # (This subquery's columns, and those of the subqueries in it,
+    # named by their aliases; the outer rows' left to the outer query.)
+    named = pieces.map do |p|
+      case p
+      in Piece::Column(k, c) if k >= n then Piece::Text.new("#{alias_of.call(k)}.#{Dialect.quote(c.to_s)}").as(Piece)
+      in Piece::Outer(k, c) if k >= n then Piece::Text.new("#{alias_of.call(k)}.#{Dialect.quote(c.to_s)}").as(Piece)
+      in Piece::Column(k, c) then Piece::Outer.new(k, c).as(Piece)
+      else p
+      end
+    end
+    node(named, ATOM)
   end
 
   # `q.include?(x)`, `q` a captured query of one column (`select { id
