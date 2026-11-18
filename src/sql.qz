@@ -41,6 +41,16 @@ module SQL
   # ```
   def self.raw(sql: String) -> Raw = Raw.new(sql)
 
+  # Now, in UTC: SQL's `now()`, the transaction's start, the same for
+  # every statement in it; outside a query, Quarz's clock. A query's
+  # block with a receiver may write `now` alone (`Rotor::Compare`); a
+  # block with parameters writes this one.
+  #
+  # ```
+  # Rotor::SQL.now.utc?  # => true
+  # ```
+  def self.now -> Time = Time.now.utc
+
   # `s` in lower case: SQL's `lower`.
   def self.lower(s: String) -> String = s.downcase
 

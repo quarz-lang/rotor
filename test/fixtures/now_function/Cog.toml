@@ -1,0 +1,12 @@
+# A program with a function `now` of its own (test/query_test.qz): which
+# `now` a query's block with a receiver takes. It is run against this
+# checkout of rotor.
+[cog]
+name = "now_function"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

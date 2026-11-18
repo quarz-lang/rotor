@@ -1,0 +1,11 @@
+class Ev < Rotor::Model
+  table "evs" do
+    column :id, Int, primary: true
+    column :at, Time
+  end
+end
+
+# The program's own function `now`.
+def now -> Time = Time.at(0).utc
+
+puts Ev.where { at < now }.to_sql.inspect

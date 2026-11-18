@@ -1,0 +1,12 @@
+# A program `quarz check` refuses (test/query_test.qz): `now` alone is
+# found only in a query's block with a `self`, not in a function's nor
+# outside a block. It is checked against this checkout of rotor.
+[cog]
+name = "bare_now"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

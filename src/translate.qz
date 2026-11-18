@@ -877,6 +877,11 @@ class Translator
       end
       return Sql.new([Piece::Column.new(found[0], c.name)], ATOM, c, nil, false, nil, c.null ? Translator.show(whole) : nil)
     end
+    # (`now` written bare: `Rotor::Compare`'s, on whatever `self` is, a
+    # row or a capture, never run here: the database's clock.)
+    if Translator.bare_now?(m) && args.empty?
+      return node([Piece::Text.new("now()")], ATOM)
+    end
     if v = captured(r, m, args, block, line)
       return v
     end
@@ -1114,6 +1119,8 @@ class Translator
       classes(a).reject { |k| k == Nil }
     in Meta::Expr::Call(_, m, _, _, nil, _) if m.singleton && m.owner == SQL && (m.name == :lower || m.name == :upper)
       [String]
+    in Meta::Expr::Call(_, m, _, [], nil, _) if (m.singleton && m.owner == SQL && m.name == :now) || Translator.bare_now?(m)
+      [Time]
     in Meta::Expr::Call(_, m, _, _, nil, _) if m.singleton && m.owner == SQL
       [Bool]
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [a], nil, _) if !m.singleton && ARITHMETIC.has_key?(m.name) && column_of(e).nil?
@@ -1391,6 +1398,10 @@ class Translator
     end
   end
 
+  # Whether `m` is the `now` written bare in a query's block:
+  # `Rotor::Compare`'s, not a model's or anything else's of that name.
+  def self.bare_now?(m: Meta::MethodRef) -> Bool = m.name == :now && m.extension == Compare
+
   # `xs.include?(x)`: `x = ANY($n)`, the array one parameter (a literal
   # of literals or a captured array).
   private def in_list(arr: Meta::Expr, x: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
@@ -1571,6 +1582,7 @@ class Translator
     in ["lower", 1] | ["upper", 1]
       a = operand(args[0])
       with_nulls(node([Piece::Text.new("#{name}(")] + a.pieces + [Piece::Text.new(")")], ATOM), [a])
+    in ["now", 0] then node([Piece::Text.new("now()")], ATOM)
     else untranslatable(label, line)
     end
   end

@@ -20,6 +20,18 @@
 # CUser.where { !(age > 18) }      # raises Rotor::UntranslatableError
 # ```
 module Compare
+  # `now` alone in a query's block: `Rotor::SQL.now`, the database's
+  # `now()` in SQL, Quarz's clock where the block runs in Quarz
+  # (`select`). The form of a block with a receiver, called on the row;
+  # a block with parameters writes `Rotor::SQL.now` (there `now` alone
+  # is called on the object around the block, found only when that is
+  # Shareable). Only in blocks checked `using Rotor::Compare`; a model's
+  # own `now` and a local come first (a function named `now` does not:
+  # a method of `self` is found before it).
+  extension Object
+    private def now -> Time = Time.now.utc
+  end
+
   # nil compared: false.
   extension Nil
     def <(other: Object) -> Bool = false

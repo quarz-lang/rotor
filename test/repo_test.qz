@@ -532,6 +532,25 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#75: the database's clock in a condition and an update; Quarz's
+  # where a block runs in Quarz.
+  def test_now
+    with_repo do |repo|
+      repo.insert(Note.new(body: "past", seen: Time.at(1_700_000_000).utc))
+      repo.insert(Note.new(body: "future", seen: Time.now.utc + 3600.seconds))
+      assert_equal(["past"], repo.all(Note.where { seen < now }).map { |n| n.body })
+      # `now()` is the transaction's start: the same in its statements.
+      repo.transaction do |tx|
+        assert_equal(2, tx.update_all(Note.query) { {seen: now} })
+        assert_equal([2], tx.query("SELECT count(*) FROM notes WHERE seen = now()", []) { |r| r.int(0) })
+        nil
+      end
+      before = Time.now.utc
+      rows = repo.all(Note.query.select { [body, now] })
+      assert(rows.all? { |r| r[1] >= before && r[1] <= Time.now.utc })
+    end
+  end
+
   # rotor#73: the rows a statement changed, as models.
   def test_rows_a_statement_returns
     with_repo do |repo|

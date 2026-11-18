@@ -13,6 +13,11 @@ Code, comments, commit messages and the docs are in English.
   users do: a rotor change that needs a pg change waits for the pg PR.
 - The schema is generated at compile time by `static def`s (Quarz's
   docs/14); queries are `Quoted` blocks translated to SQL.
+- A function added to `Rotor::SQL` for query blocks also gets its bare
+  form, a private method of the `extension Object` in `Rotor::Compare`
+  that the translator takes as the `Rotor::SQL` one (as `now`, #75); the
+  older ones (`like`, `ilike`, `not_nil`, `lower`, `upper`) stay as they
+  are.
 
 ## Before committing
 
