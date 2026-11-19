@@ -4,11 +4,11 @@
 # that qualifies it (nil: the connection's `search_path` finds it).
 data TableInfo(name: String, columns: Array[Column], primary_keys: Array[Symbol], created_at: Symbol?, updated_at: Symbol?, associations: Array[Association] = [], schema: String? = nil)
   # The primary key's one column; nil for none, and for a composite key
-  # (`primary_keys` has its columns).
+  # ([primary_keys] has its columns).
   def primary_key -> Symbol? = primary_keys.size == 1 ? primary_keys[0] : nil
 
   # The primary key's one column, for `what` (an association, a
-  # preload), which needs one: `Rotor::SchemaError` for none and for a
+  # preload), which needs one: [Rotor::SchemaError] for none and for a
   # composite key, naming the table as `table` (its model's name, or
   # its own quoted).
   def single_key(table: String, what: String) -> Symbol
@@ -19,7 +19,7 @@ data TableInfo(name: String, columns: Array[Column], primary_keys: Array[Symbol]
     end
   end
 
-  # The primary key's columns, for a statement by the key: `ArgumentError`
+  # The primary key's columns, for a statement by the key: [ArgumentError]
   # for none.
   def keys! -> Array[Symbol]
     raise ArgumentError.new("`#{name}` has no primary key") if primary_keys.empty?
@@ -31,7 +31,7 @@ end
 # conditions of its JOIN (`INNER JOIN ... ON` them, `CROSS JOIN` for
 # none), the columns it fetches (nil for all of them), those it
 # fetches whatever a `select` reads (the key an association's join
-# needs), and whether its JOIN is a LEFT one (`Rotor::Query#left_join`:
+# needs), and whether its JOIN is a LEFT one ([Rotor::Query#left_join]:
 # its row may be missing, its key then NULL).
 data Source = (table: TableInfo, model: Type[Object], on: Array[Sql], fetch: Array[Column]?, keep: Array[Symbol] = [], left: Bool = false)
 
@@ -44,7 +44,7 @@ data Fetched = (values: Hash[Symbol, Object?], all: Bool)
 type Loader[T] = shareable (Array[Array[Fetched]]) -> Array[T]
 
 # What a query of models does with them for a preload
-# (`Rotor::Query#preload`): a row as a model, and a row with the
+# ([Rotor::Query#preload]): a row as a model, and a row with the
 # associations preloaded for it.
 data ModelOps[T] = (as_model: shareable (T) -> Model, attach: shareable (T, Hash[Symbol, Array[Model]]) -> T)
 
@@ -62,12 +62,12 @@ module Subquery
   abstract def subquery_nullable? -> Bool
 end
 
-# A query over a model's table, as a value: what `Rotor::Model.where`
+# A query over a model's table, as a value: what [Rotor::Model.where]
 # and the others build, and a repository runs. Each method gives a new
 # query; none changes the one it is called on. Its blocks are not run:
 # they are translated to SQL when the query is built, so that a block
-# SQL cannot express raises `Rotor::UntranslatableError` there, and
-# `to_sql` gives the statement and its parameters.
+# SQL cannot express raises [Rotor::UntranslatableError] there, and
+# [to_sql] gives the statement and its parameters.
 #
 # ```
 # class QUser < Rotor::Model
@@ -83,11 +83,11 @@ end
 # q.to_sql  # => ["SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE \"age\" >= $1 ORDER BY \"name\" LIMIT 10", [18]]
 # ```
 #
-# `T` is what a row gives: the model, or what `select` projects.
+# `T` is what a row gives: the model, or what [select] projects.
 #
-# A query is `Shareable`: a constant (`ACTIVE = User.where { active }`),
+# A query is [Shareable]: a constant (`ACTIVE = User.where { active }`),
 # a value a task's block captures or a channel carries. Its blocks'
-# translations are kept for the process (`Rotor::Cache`), so building a
+# translations are kept for the process ([Rotor::Cache]), so building a
 # query again where it was built before costs no translation.
 class Query[T]
   include Shareable
@@ -117,7 +117,7 @@ class Query[T]
   # gives, or nil: what makes it a subquery (`include?`).
   @single: Column?
 
-  # (Made by `Rotor::Model.query` and the methods of this class.)
+  # (Made by [Rotor::Model.query] and the methods of this class.)
   def initialize(@sources: Array[Source], @wheres: Array[Sql], @orders: Array[[Sql, Bool]], @projected: Bool, @limit: Int?, @offset: Int?, @shape: Shape, @loader: Loader[T], @preloads: Array[Preload] = [], @ops: ModelOps[T]? = nil, @lock: String? = nil, @single: Column? = nil)
   end
 
@@ -128,7 +128,7 @@ class Query[T]
   def sources -> Array[Source] = @sources
 
   # The columns its rows have, in order (each table's in turn, in a
-  # join): what `to_sql` selects.
+  # join): what [to_sql] selects.
   def fetched -> Array[Column] = @sources.flat_map { |s| s.fetch || s.table.columns }
 
   # What it gives: its rows, their number, or whether there is one.
@@ -167,7 +167,7 @@ class Query[T]
   end
 
   # The rows a join model's rows pair with the owner of key `value`
-  # (`Rotor::HasMany#query` through it): `"id" IN (SELECT "tag_id" FROM
+  # ([Rotor::HasMany#query] through it): `"id" IN (SELECT "tag_id" FROM
   # "post_tags" WHERE "post_id" = $1)`.
   def where_through(k: ThroughKeys, value: Value) -> Query[T]
     rows!("where_through")
@@ -210,7 +210,7 @@ class Query[T]
   end
 
   # A row's `T` from the values of its table's columns (those of
-  # `fetched`), for a query of one table.
+  # [fetched]), for a query of one table.
   def load(values: Hash[Symbol, Object?]) -> T
     single!("load")
     @loader.call([[Fetched.new(values, @sources[0].fetch.nil?)]])[0]
@@ -219,7 +219,7 @@ class Query[T]
   # A row's `T` from the values of each of its tables.
   def load_row(values: Array[Fetched]) -> T = @loader.call([values])[0]
 
-  # The `T`s of the rows a database gave for `to_sql`.
+  # The `T`s of the rows a database gave for [to_sql].
   def load_rows(rows: Array[Row]) -> Array[T]
     case @shape
     in Shape::Count
@@ -252,7 +252,7 @@ class Query[T]
   # :ditto:
   def where(&cond: Quoted[shareable (T) -> Bool] using Compare) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
-  # `where`, by the name `for` comprehensions call.
+  # [where], by the name `for` comprehensions call.
   def filter(&cond: Quoted[shareable (T) -> Bool] using Compare) -> Query[T] = add_where(cond.expr, cond.captures, cond.file, cond.site)
 
   # Ordered by the block's value, ascending, after the orders given before.
@@ -267,15 +267,15 @@ class Query[T]
     copy(orders: @orders[0...(@orders.size - 1)] + [[last[0], true]])
   end
 
-  # The last order ascending, as `order` gives it: written to say so
-  # before `nulls_first` or `nulls_last` (`order { seen_at }.asc.nulls_first`).
+  # The last order ascending, as [order] gives it: written to say so
+  # before [nulls_first] or [nulls_last] (`order { seen_at }.asc.nulls_first`).
   def asc -> Query[T]
     last = @orders.last? || raise ArgumentError.new("`asc` without an `order` before it")
     copy(orders: @orders[0...(@orders.size - 1)] + [[last[0], false]])
   end
 
   # The last order with its NULLs first (`NULLS FIRST`). Without it the
-  # order is PostgreSQL's: NULLs last ascending, first descending (`desc`).
+  # order is PostgreSQL's: NULLs last ascending, first descending ([desc]).
   #
   # ```
   # class NSensor < Rotor::Model
@@ -290,7 +290,7 @@ class Query[T]
   # ```
   def nulls_first -> Query[T] = nulls("nulls_first", "FIRST")
 
-  # The last order with its NULLs last (`NULLS LAST`): as `nulls_first`.
+  # The last order with its NULLs last (`NULLS LAST`): as [nulls_first].
   def nulls_last -> Query[T] = nulls("nulls_last", "LAST")
 
   # At most `n` rows.
@@ -308,7 +308,7 @@ class Query[T]
   end
 
   # Whether `x` is one of its rows: only in another query's block, as a
-  # subquery (`x IN (SELECT ...)`), the query a `select` of one column as
+  # subquery (`x IN (SELECT ...)`), the query a [select] of one column as
   # it is, captured by the block:
   #
   # ```
@@ -331,8 +331,8 @@ class Query[T]
   # # => ["SELECT \"id\", \"order_id\" FROM \"line_items\" WHERE \"order_id\" IN (SELECT \"id\" FROM \"orders\" WHERE \"status\" = $1)", ["paid"]]
   # ```
   #
-  # Called outside a query's block, it raises `ArgumentError`: a query
-  # is not a collection (run it: `Rotor::Repo#all`).
+  # Called outside a query's block, it raises [ArgumentError]: a query
+  # is not a collection (run it: [Rotor::Repo#all]).
   def include?(x: T) -> Bool
     raise ArgumentError.new("`include?` of a query outside a query's block: a query is not a collection; run it (`repo.all(query)`), or test a column against it in a block (`where { q.include?(col) }`)")
   end
@@ -362,9 +362,9 @@ class Query[T]
   # ```
   #
   # The query is a model's (`Event.where { ... }`, or its `query`) or an
-  # association's of the outer row (`p.events.query`), with `where` and
-  # `filter` only. Called outside a query's block, it raises
-  # `ArgumentError`: run the query (`Rotor::Repo#exists?`).
+  # association's of the outer row (`p.events.query`), with [where] and
+  # [filter] only. Called outside a query's block, it raises
+  # [ArgumentError]: run the query ([Rotor::Repo#exists?]).
   def exists? -> Bool
     raise ArgumentError.new("`exists?` of a query outside a query's block: run it, `repo.exists?(query)`, or test it in a block (`where { |p| Event.where { |e| e.post_id == p.id }.exists? }`)")
   end
@@ -400,13 +400,13 @@ class Query[T]
   end
 
   # Its rows locked for update, `FOR UPDATE`, until the transaction
-  # ends: another transaction's `for_update` of one of them waits, or
+  # ends: another transaction's [for_update] of one of them waits, or
   # with `skip_locked: true` leaves the locked rows out (`SKIP LOCKED`:
   # a queue's workers each claim a row), or with `nowait: true` raises
-  # (NOWAIT, a `PG::ServerError`, SQLSTATE 55P03). Not both. Refused
-  # after `select`, `count` and `exists` (SQL locks rows, not a
+  # (NOWAIT, a [PG::ServerError], SQLSTATE 55P03). Not both. Refused
+  # after [select], [count] and [exists] (SQL locks rows, not a
   # projection or an aggregate). Outside a transaction the lock ends
-  # with the statement: run it in `Rotor::Repo#transaction`.
+  # with the statement: run it in [Rotor::Repo#transaction].
   #
   # ```
   # class LJob < Rotor::Model
@@ -421,21 +421,21 @@ class Query[T]
   # ```
   def for_update(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_update", "UPDATE", skip_locked, nowait)
 
-  # Its rows locked as `for_update` does, `FOR NO KEY UPDATE`: the lock
+  # Its rows locked as [for_update] does, `FOR NO KEY UPDATE`: the lock
   # an UPDATE that changes no key column takes, which a row's `FOR
   # KEY SHARE` (a foreign key's check) does not wait for.
   def for_no_key_update(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_no_key_update", "NO KEY UPDATE", skip_locked, nowait)
 
-  # Its rows locked for share, `FOR SHARE`, as `for_update` does: other
+  # Its rows locked for share, `FOR SHARE`, as [for_update] does: other
   # transactions may share the lock, not update or delete the rows.
   def for_share(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_share", "SHARE", skip_locked, nowait)
 
-  # Its rows locked as `for_share` does, `FOR KEY SHARE`: only a change
+  # Its rows locked as [for_share] does, `FOR KEY SHARE`: only a change
   # of a key column, or a delete, waits for it.
   def for_key_share(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_key_share", "KEY SHARE", skip_locked, nowait)
 
   # Its rows with the associations the block names preloaded, as
-  # `Rotor::Repo#preload` does after they are loaded (`repo.all(User.query.preload
+  # [Rotor::Repo#preload] does after they are loaded (`repo.all(User.query.preload
   # { posts })`): Ecto's `preload:`.
   def preload(&spec: Quoted[shareable T.() -> Object] using Compare) -> Query[T]
     rows!("preload")
@@ -446,7 +446,7 @@ class Query[T]
     Query[T].new(@sources, @wheres, @orders, @projected, @limit, @offset, @shape, @loader, Preloads.merge(@preloads + added), ops, @lock)
   end
 
-  # The rows `repo` loaded with the preloads done (`preload`).
+  # The rows `repo` loaded with the preloads done ([preload]).
   def preloaded(rows: Array[T], repo: Repo) -> Array[T]
     ops = self.ops
     return rows if @preloads.empty? || ops.nil?
@@ -463,7 +463,7 @@ class Query[T]
   # fetches the columns it reads (all of them when it calls another
   # method of the row or passes the row on), and the repository runs it
   # on each row, loaded with those columns only (reading another raises
-  # `Rotor::NotLoadedError`). Counting is `count`, a query's shape, not
+  # [Rotor::NotLoadedError]). Counting is [count], a query's shape, not
   # a projection.
   def select[R](&f: Quoted[shareable T.() -> R] using Compare) -> Query[R]
     proc = f.proc
@@ -476,7 +476,7 @@ class Query[T]
     project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
   end
 
-  # `select`, by the name `for` comprehensions call.
+  # [select], by the name `for` comprehensions call.
   def map[R](&f: Quoted[shareable (T) -> R] using Compare) -> Query[R]
     proc = f.proc
     project(f.expr, f.file, f.site, ->(row: T) { proc.call(row) })
@@ -485,14 +485,14 @@ class Query[T]
   # The rows of the queries the block gives for each row, in one query
   # with a JOIN: what a `for` comprehension over several queries calls
   # (Quarz's docs/01 §11). The block's query is a model's (`Post.where
-  # { ... }`, or its `query`), with `where`, `filter`, `order` and `desc`,
-  # and a last `map`, `select` or `flat_map`, or an association's
+  # { ... }`, or its `query`), with [where], [filter], [order] and [desc],
+  # and a last [map], [select] or [flat_map], or an association's
   # (`u.posts.query`, joined by its key); its conditions, those on the row
   # (`u`) included, are the JOIN's, its orders come after this query's.
   # Its rows are made by the block, run for each distinct row of this
   # query (with the columns the block reads of it): building the inner
   # query again costs some microseconds per row, so a large result reads
-  # better through `join`, which makes pairs.
+  # better through [join], which makes pairs.
   #
   # ```
   # class FUser < Rotor::Model
@@ -602,11 +602,11 @@ class Query[T]
   end
 
   # Its rows paired with the rows of an association of theirs (as
-  # `join`), or with nil where a row has none: a LEFT JOIN. The blocks
+  # [join]), or with nil where a row has none: a LEFT JOIN. The blocks
   # after it take the right row as `R?`: `c.nil?` is the missing row
   # (its primary key NULL), and its columns are read where a condition
   # says it is there (`!c.nil? && c.code == "x"`, `c.nil? ? nil :
-  # c.code`, `if c then c.code end`; `&.` cannot be quoted). `preload`
+  # c.code`, `if c then c.code end`; `&.` cannot be quoted). [preload]
   # stays the way to load an association's models; a `has_many`'s LEFT
   # JOIN repeats the row for each of its models.
   #
@@ -641,8 +641,8 @@ class Query[T]
   end
 
   # Its rows paired with the rows of `other` for which the block is true,
-  # or with nil where none is: a LEFT JOIN on the condition (as `join`'s),
-  # the right row an `R?` in the blocks after it (`left_join` of an
+  # or with nil where none is: a LEFT JOIN on the condition (as [join]'s),
+  # the right row an `R?` in the blocks after it ([left_join] of an
   # association says how to read it).
   def left_join[R <: Model](other: Type[R], &cond: Quoted[shareable (T, R) -> Bool] using Compare) -> Query[[T, R?]]
     joining!
@@ -702,7 +702,7 @@ class Query[T]
   end
 
   # The rows' update: the block gives a hash literal of columns and their
-  # new values, expressions of the row as in `where` (`update { {age:
+  # new values, expressions of the row as in [where] (`update { {age:
   # age + 1, name: "x"} }`).
   def update(&set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Changes[T] = update_set(set.expr, set.captures, set.file, set.site)
 

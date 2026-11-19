@@ -9,10 +9,10 @@ type MetaValue = Int | Float | String | Symbol | Array[Value]
 # its message as a template (`should be at most %{count} characters`),
 # the validation that made it (`:required`, `:length`, `:cast`, a
 # constraint's kind...), and the values the template names (`count`,
-# `kind`...), so that an application can translate by `validation` and
-# `meta` rather than by text.
+# `kind`...), so that an application can translate by [validation] and
+# [meta] rather than by text.
 data FieldError(field: Symbol, message: String, validation: Symbol, meta: Hash[Symbol, MetaValue] = {})
-  # The message with its placeholders filled from `meta`.
+  # The message with its placeholders filled from [meta].
   #
   # ```
   # Rotor::FieldError.new(:name, "should be at most %{count} character(s)", :length, {count: 3}).text  # => "should be at most 3 character(s)"
@@ -31,7 +31,7 @@ end
 
 # A constraint of the database a changeset expects to be violated by
 # user input: on save, a violation of it (its SQLSTATE and name) is an
-# error on `field` rather than an exception.
+# error on [field] rather than an exception.
 data Constraint(kind: Symbol, field: Symbol, name: String, message: String)
   # The SQLSTATE a violation of this kind has.
   def code -> String
@@ -46,8 +46,8 @@ end
 # Changes to a model from untrusted input (a form, JSON), cast to the
 # columns' types and validated, with the errors meant for a user, as
 # Ecto's changesets: an immutable value, each validation giving a new
-# one; `Rotor::Repo#insert` and `Rotor::Repo#update` take it and answer with a
-# `Rotor::Outcome`.
+# one; [Rotor::Repo#insert] and [Rotor::Repo#update] take it and answer with a
+# [Rotor::Outcome].
 #
 # ```
 # class CsUser < Rotor::Model
@@ -66,21 +66,21 @@ end
 # cs.changes              # => {email: "ann@example.com"}
 # ```
 #
-# - `data` is the model it started from (a new one, the class's `new`,
-#   for `cast(Class, ...)`); `changes` the cast values that differ from
-#   its own; `params` the input's scalar values by name.
+# - [data] is the model it started from (a new one, the class's `new`,
+#   for `cast(Class, ...)`); [changes] the cast values that differ from
+#   its own; [params] the input's scalar values by name.
 # - Validations skip a field without a change, except
-#   `validate_required`, which looks at the value the model would have,
-#   and a field `validate_required` found blank.
+#   [validate_required], which looks at the value the model would have,
+#   and a field [validate_required] found blank.
 data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array[FieldError], params: Hash[String, Param?], permitted: Array[Symbol], constraints: Array[Constraint], assocs: Hash[Symbol, Array[Model]], action: Symbol?, cast: Bool = true)
-  # A changeset of `model` with the `permitted` fields of `params`
+  # A changeset of `model` with the [permitted] fields of [params]
   # (form or JSON input, by name) cast to their columns' types; the
   # other parameters are ignored. A value that does not cast is an `is
   # invalid` error (`validation: :cast`) and no change; a string of
-  # spaces or nothing is nil, except for a `String` column that admits
+  # spaces or nothing is nil, except for a [String] column that admits
   # no NULL; nil for a column that admits none is `can't be blank`
   # (`:required`). Raises
-  # `Rotor::SchemaError` for a permitted name that is not a column.
+  # [Rotor::SchemaError] for a permitted name that is not a column.
   def self.cast[T <: Model](model: T, params: Hash[String, Object?], permitted: Array[Symbol]) -> Changeset[T]
     info = model.table_info
     kept: Hash[String, Param?] = {}
@@ -127,8 +127,8 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
   # :ditto:
   def self.cast[T <: Model](model: Type[T], params: Hash[Symbol, Object?], permitted: Array[Symbol]) -> Changeset[T] = cast(model.blank, params, permitted)
 
-  # A changeset of `model` without parameters: for `put_change`,
-  # `put_assoc` and validations of code's own values.
+  # A changeset of `model` without parameters: for [put_change],
+  # [put_assoc] and validations of code's own values.
   def self.change[T <: Model](model: T) -> Changeset[T] = Changeset[T].new(model, {}, [], {}, [], [], {}, nil, false)
 
   # `[true, value]` for `raw` cast to column `c`'s type, `[false, nil]`
@@ -255,7 +255,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     valid? ? applied : nil
   end
 
-  # The model with the changes; raises `Rotor::InvalidChangeset` when
+  # The model with the changes; raises [Rotor::InvalidChangeset] when
   # there are errors.
   def apply! -> M
     raise InvalidChangeset.new(self, errors, summary) unless valid?
@@ -285,7 +285,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     out
   end
 
-  # The change of `field`, a `String`, must have between `min` and
+  # The change of `field`, a [String], must have between `min` and
   # `max` characters (grapheme clusters, what a reader sees as one,
   # as Ecto counts), or `is` (`:length`, with `count` and `kind`).
   def validate_length(field: Symbol, *, min: Int? = nil, max: Int? = nil, is: Int? = nil) -> Changeset[M]
@@ -304,7 +304,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     self
   end
 
-  # The change of `field`, a `String`, must match `pattern` (`has
+  # The change of `field`, a [String], must match `pattern` (`has
   # invalid format`, `:format`).
   def validate_format(field: Symbol, pattern: Regexp, *, message: String = "has invalid format") -> Changeset[M]
     s = changed_value(field)
@@ -372,7 +372,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
   # The parameter `field` (a checkbox, not a column) must be true:
   # `true`, `"true"`, `"1"` or `"on"` (`must be accepted`,
   # `:acceptance`); a missing one is not. Skipped for a changeset
-  # made by `Rotor::Changeset.change` (no input), as Ecto.
+  # made by [Rotor::Changeset.change] (no input), as Ecto.
   def validate_acceptance(field: Symbol, *, message: String = "must be accepted") -> Changeset[M]
     return self unless cast
     v = params[field.to_s]?
@@ -437,7 +437,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
   # query: an error on the first field (`has already been taken`,
   # `:unsafe_unique`) before the database's unique index refuses the
   # row. Racy (two saves may pass it at once): no replacement for the
-  # index and its `unique_constraint`. Checked when one of the fields
+  # index and its [unique_constraint]. Checked when one of the fields
   # changed and none has an error; nil values never match. `query`
   # narrows the rows looked at.
   def unsafe_validate_unique(fields: Array[Symbol], repo: Repo, *, query: Query[M]? = nil, message: String = "has already been taken") -> Changeset[M]
@@ -526,7 +526,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     "#{data.class.name} is invalid: #{errors.map { |e| "#{e.field} #{e.text}" }.join("; ")}"
   end
 
-  # The changeset with `action` (set by the repository on save).
+  # The changeset with [action] (set by the repository on save).
   def with_action(a: Symbol) -> Changeset[M] = with(action: a)
 
   # The error a violation `e` of a declared constraint is, or nil.
@@ -548,7 +548,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     "#<Rotor::Changeset #{data.class.name} action: #{action.inspect}, changes: #{shown(changes)}, errors: #{errors.map { |e| "#{e.field} #{e.text}" }.inspect}, valid: #{valid?}>"
   end
 
-  # As `inspect`.
+  # As [inspect].
   def to_s -> String = inspect
 
   private def shown(values: Hash[Symbol, Value?]) -> String
@@ -572,7 +572,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     changes[field]?
   end
 
-  # Whether `s` is an `Int` in decimal: ASCII digits, within 64 bits.
+  # Whether `s` is an [Int] in decimal: ASCII digits, within 64 bits.
   def self.int?(s: String) -> Bool
     return false unless s.match?(/\A[+-]?[0-9]+\z/)
     digits = s.sub(/\A[+-]/, "").sub(/\A0+/, "")
@@ -581,7 +581,7 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     digits <= (s.start_with?("-") ? "9223372036854775808" : "9223372036854775807")
   end
 
-  # An ISO 8601 time as `Time.iso8601` reads it: a space between the
+  # An ISO 8601 time as [Time.iso8601] reads it: a space between the
   # date and the time taken as `T`, and a time without an offset (an
   # HTML `datetime-local`, `2026-11-07T10:00`) read as UTC, as Ecto.
   def self.with_zone(s: String) -> String
@@ -615,7 +615,7 @@ enum Outcome[M]
   variant Ok(value: M)
   variant Invalid(changeset: Changeset[M])
 
-  # Whether it is `Ok`.
+  # Whether it is [Ok].
   def ok? -> Bool
     case self
     in Ok then true

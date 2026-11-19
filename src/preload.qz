@@ -1,5 +1,5 @@
 # An association a preload names, with those to preload of its models
-# (`Rotor::Repo#preload`: `{ [nest(posts) { comments }, account] }`).
+# ([Rotor::Repo#preload]: `{ [nest(posts) { comments }, account] }`).
 data Preload = (name: Symbol, nested: Array[Preload])
 
 # Preloading: reading a preload's block, and loading what it names with

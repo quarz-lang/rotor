@@ -1,4 +1,4 @@
-# Runs queries and statements (`Rotor::Query`, `Rotor::Statement`)
+# Runs queries and statements ([Rotor::Query], [Rotor::Statement])
 # against a database, through an adapter, and loads what they give.
 #
 # ```quarz no_run
@@ -19,13 +19,13 @@
 # end
 # ```
 #
-# Models are immutable: `insert`, `update` and `touch` give the model as
+# Models are immutable: [insert], [update] and [touch] give the model as
 # saved, the one given unchanged. Timestamps (`timestamps` in a `table`
-# block) are set here, never by SQL: `insert` sets both to now (in UTC, to the microsecond, as the
-# database keeps them), keeping a creation time the model has; `update`
+# block) are set here, never by SQL: [insert] sets both to now (in UTC, to the microsecond, as the
+# database keeps them), keeping a creation time the model has; [update]
 # sets the update time when a column changed, and issues no UPDATE when
-# none did; `touch` sets it alone. `update`, `touch` and `delete` of a
-# model whose row no longer exists raise `Rotor::StaleError`.
+# none did; [touch] sets it alone. [update], [touch] and [delete] of a
+# model whose row no longer exists raise [Rotor::StaleError].
 class Repo
   @adapter: Adapter
 
@@ -63,9 +63,9 @@ class Repo
 
   # The rows a statement changed, as it gives them back (`returning`):
   # models of the columns returned, as `select` loads them (reading
-  # another raises `Rotor::NotLoadedError`), in the order the server
+  # another raises [Rotor::NotLoadedError]), in the order the server
   # gives them (`repo.all(q.update { ... }.returning(:id))`).
-  # `ArgumentError` for a statement without `returning`.
+  # [ArgumentError] for a statement without `returning`.
   def all[T](statement: Changes[T]) -> Array[T]
     names = statement.returned || raise ArgumentError.new("`all` of a statement without `returning`: name the columns it gives back (`returning(:id)`), or all of them (`returning`); `run` gives the count")
     columns = statement.table.columns
@@ -76,7 +76,7 @@ class Repo
     statement.rows(found)
   end
 
-  # The query's one row, or nil; raises `Rotor::MultipleResultsError`
+  # The query's one row, or nil; raises [Rotor::MultipleResultsError]
   # when there are more.
   def one[T](query: Query[T]) -> T?
     q = query.limit_value ? query : query.limit(2)
@@ -85,8 +85,8 @@ class Repo
     rows.first?
   end
 
-  # The query's one row; raises `Rotor::NoResultsError` when there is
-  # none, `Rotor::MultipleResultsError` when there are more.
+  # The query's one row; raises [Rotor::NoResultsError] when there is
+  # none, [Rotor::MultipleResultsError] when there are more.
   def one![T](query: Query[T]) -> T
     found = one(query)
     found.nil? ? raise NoResultsError.new("no row: #{query.to_sql[0]}") : found
@@ -97,7 +97,7 @@ class Repo
 
   # The `model` whose primary key is `id`, or nil. For a composite key
   # `id` is a Hash of every key column's value (`{sensor_id: "a",
-  # taken_at: t}`), which a single key may take too; `ArgumentError`
+  # taken_at: t}`), which a single key may take too; [ArgumentError]
   # for a Hash that names a column not in the key or leaves one out,
   # and for a value that is not a Hash with a composite key.
   def get[M <: Model](model: Type[M], id: Object) -> M?
@@ -155,13 +155,13 @@ class Repo
 
   # Runs an insert that says what to do on a conflict
   # (`Rotor::Statement.insert(m).on_conflict(...)`), its model's
-  # timestamps set first as `insert` sets them, and its `do_update` the
+  # timestamps set first as [insert] sets them, and its `do_update` the
   # update time too (`"updated_at" = EXCLUDED."updated_at"`) when the
   # table has one and the block does not set it: the row as it is after
   # it (inserted, or updated by `do_update`), read back, unchanged; nil
   # when the conflict left the row as it was (`do_nothing`, or a
-  # `do_update` whose `where` was false). `ArgumentError` for an insert
-  # without a conflict clause: `insert` runs those.
+  # `do_update` whose `where` was false). [ArgumentError] for an insert
+  # without a conflict clause: [insert] runs those.
   def upsert[M <: Model](insert: Insert[M]) -> M?
     raise ArgumentError.new("`upsert` of an insert that says nothing on a conflict: `on_conflict` first, or `insert` the model") unless insert.conflict?
     raise ArgumentError.new("`upsert` of the rows of several models: `insert_all` runs those") if insert.models.size > 1
@@ -172,8 +172,8 @@ class Repo
   end
 
   # Inserts the rows of `models` (of one class), their timestamps set
-  # first as `insert` sets them (one time for all), in one statement
-  # (`Rotor::Statement.insert_all`), or several when one would pass
+  # first as [insert] sets them (one time for all), in one statement
+  # ([Rotor::Statement.insert_all]), or several when one would pass
   # PostgreSQL's 65535 parameters, those in one transaction (the one
   # open, or one of their own): the rows as they read back (their keys,
   # the database's defaults), as models. Nothing is run for no models.
@@ -184,7 +184,7 @@ class Repo
 
   # Runs an insert of many rows (`Rotor::Statement.insert_all(models)`,
   # and what it does on a conflict, `on_conflict`, its `do_update`
-  # setting the update time as `upsert`'s does): the rows the
+  # setting the update time as [upsert]'s does): the rows the
   # statement gave back, as models. Those are all of them for an insert
   # without a conflict clause, those inserted or updated for one with
   # it (a row `do_nothing` or a false `where` skipped gives none).
@@ -235,28 +235,28 @@ class Repo
     model.with_values(stamps)
   end
 
-  # Inserts the changeset's model (`Rotor::Changeset#apply`, with its
-  # timestamps as `insert` sets them) and its `put_assoc` sets: `Rotor::Outcome::Ok`
-  # with the model as saved, or `Rotor::Outcome::Invalid` with the changeset when it has
+  # Inserts the changeset's model ([Rotor::Changeset#apply], with its
+  # timestamps as [insert] sets them) and its `put_assoc` sets: [Rotor::Outcome::Ok]
+  # with the model as saved, or [Rotor::Outcome::Invalid] with the changeset when it has
   # errors or the database refused the row by a constraint it declares
   # (`unique_constraint`...), which becomes an error on its field. Any
   # other error raises. Inside a transaction the save runs under a
-  # savepoint, so that an `Rotor::Outcome::Invalid` leaves the transaction usable.
+  # savepoint, so that an [Rotor::Outcome::Invalid] leaves the transaction usable.
   def insert[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :insert)
 
-  # As `insert`, with `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  # As [insert], with [Rotor::Outcome::Invalid] raised as [Rotor::InvalidChangeset].
   def insert![M <: Model](changeset: Changeset[M]) -> M = Repo.unwrap(insert(changeset))
 
   # Updates the row of the changeset's model with its changes (no
   # statement when there are none) and replaces its `put_assoc` sets, as
-  # `insert` does.
+  # [insert] does.
   def update[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :update)
 
-  # As `update`, with `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  # As [update], with [Rotor::Outcome::Invalid] raised as [Rotor::InvalidChangeset].
   def update![M <: Model](changeset: Changeset[M]) -> M = Repo.unwrap(update(changeset))
 
-  # Deletes the row of the changeset's model, as `delete(model)`: `Rotor::Outcome::Ok`
-  # with it, or `Rotor::Outcome::Invalid` for errors or a declared constraint
+  # Deletes the row of the changeset's model, as `delete(model)`: [Rotor::Outcome::Ok]
+  # with it, or [Rotor::Outcome::Invalid] for errors or a declared constraint
   # (`no_assoc_constraint`: rows of another table still refer to it).
   def delete[M <: Model](changeset: Changeset[M]) -> Outcome[M] = save(changeset, :delete)
 
@@ -344,7 +344,7 @@ class Repo
     end
   end
 
-  # The value of `Rotor::Outcome::Ok`; `Rotor::Outcome::Invalid` raised as `Rotor::InvalidChangeset`.
+  # The value of [Rotor::Outcome::Ok]; [Rotor::Outcome::Invalid] raised as [Rotor::InvalidChangeset].
   def self.unwrap[M <: Model](outcome: Outcome[M]) -> M
     case outcome
     in Outcome::Ok(value) then value
@@ -366,7 +366,7 @@ class Repo
     stamped.clear_changes
   end
 
-  # Sets `model`'s update time, and the `Time` columns named, to now, and
+  # Sets `model`'s update time, and the [Time] columns named, to now, and
   # writes those alone: the model with them, its other assignments still
   # pending.
   def touch[M <: Model](model: M, *columns: Symbol) -> M
@@ -393,7 +393,7 @@ class Repo
   end
 
   # Deletes `model`'s row, and gives the model; raises
-  # `Rotor::StaleError` when there was none.
+  # [Rotor::StaleError] when there was none.
   def delete[M <: Model](model: M) -> M
     stale!(model) if changed(Statement.delete(model)) == 0
     model
@@ -402,7 +402,7 @@ class Repo
   # Deletes the query's rows: how many.
   def delete_all[T](query: Query[T]) -> Int = run(query.delete)
 
-  # Updates the query's rows as the block says (`Rotor::Query#update`;
+  # Updates the query's rows as the block says ([Rotor::Query#update];
   # no timestamps are set): how many.
   def update_all[T](query: Query[T], &set: Quoted[shareable T.() -> Hash[Symbol, Object]] using Compare) -> Int = run(query.update(&set))
 
@@ -411,7 +411,7 @@ class Repo
 
   # Runs the block in a transaction, with a repository bound to it:
   # committed when the block returns, rolled back when it raises.
-  # Transactions do not nest (pg raises `PG::TransactionError` for one
+  # Transactions do not nest (pg raises [PG::TransactionError] for one
   # inside another).
   def transaction[R](&: (Repo) -> R) -> R
     results: Array[R] = []
@@ -445,7 +445,7 @@ class Repo
   end
 
   # Runs raw SQL and gives the block's value for each row, read with
-  # `Rotor::Row`'s typed readers.
+  # [Rotor::Row]'s typed readers.
   def query[R](sql: String, params: Array[Object?] = [], &: (Row) -> R) -> Array[R]
     @adapter.query(sql, params).rows.map { |r| yield r }
   end

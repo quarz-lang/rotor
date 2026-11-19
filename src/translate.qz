@@ -8,9 +8,9 @@ type Items = Array[Int] | Array[Float] | Array[String] | Array[Bool] | Array[Tim
 # A piece of SQL: text, a column of one of a query's tables (by the
 # table's index among them: qualified by the table's alias in a join),
 # or the value of a parameter, numbered (`$n`) when the statement is put
-# together. A translation the cache keeps (`Rotor::Cache`) holds
-# `Bound` pieces, parameters made from the block's captures, which each
-# build fills in with its own (`Rotor::Binds.fill`).
+# together. A translation the cache keeps ([Rotor::Cache]) holds
+# [Bound] pieces, parameters made from the block's captures, which each
+# build fills in with its own ([Rotor::Binds.fill]).
 enum Piece
   variant Text(text: String)
   variant Column(source: Int, name: Symbol)
@@ -24,34 +24,34 @@ end
 
 # A translated expression: its pieces, its precedence (to parenthesize it
 # where it is an operand), and what the translator knows of it: the
-# column it is, or the value it has (`known`) when it is a literal or a
-# capture, and then (`bind`) the capture it is made from. `nulls` names
+# column it is, or the value it has ([known]) when it is a literal or a
+# capture, and then ([bind]) the capture it is made from. [nulls] names
 # what makes it NULL where Quarz has nil (a nullable column, shown as
-# written), `tri` what makes it NULL where Quarz has false: a comparison,
+# written), [tri] what makes it NULL where Quarz has false: a comparison,
 # `include?` or LIKE form of something that can be NULL, three-valued in
-# SQL. A `tri` expression is kept where NULL acts as false (a condition,
+# SQL. A [tri] expression is kept where NULL acts as false (a condition,
 # an operand of `&&`/`||`, a CASE WHEN's), and refused anywhere else.
-# `narrow` marks what PostgreSQL types as an `integer` where Quarz has
-# an `Int`: an `Int` literal, or a CASE of them. A column never is:
+# [narrow] marks what PostgreSQL types as an `integer` where Quarz has
+# an [Int]: an [Int] literal, or a CASE of them. A column never is:
 # rotor does not know the SQL type of a table it did not create, whose
 # `integer` columns are left as they are (README, "Parameter types").
 #
-# `test` names an `&&` or `||` (as written) that tests the truthiness
-# of an operand other than a `Bool` (`email IS NOT NULL`): right as a
-# condition, but a `Bool` where Quarz has one of the operands, so
-# refused as a value as `tri` is.
+# [test] names an `&&` or `||` (as written) that tests the truthiness
+# of an operand other than a [Bool] (`email IS NOT NULL`): right as a
+# condition, but a [Bool] where Quarz has one of the operands, so
+# refused as a value as [tri] is.
 data Sql = (pieces: Array[Piece], prec: Int, column: Column?, value: Bindable?, known: Bool, bind: Bind? = nil, nulls: String? = nil, tri: String? = nil, narrow: Bool = false, test: String? = nil)
 
 # A block of a query's tree as the translator sees it: its parameters,
 # the table (an index among the query's) each one is a row of, or nil,
-# and whether it has a receiver and which table's row that is. `known`
+# and whether it has a receiver and which table's row that is. [known]
 # is false for a block given to a call the translator does not know,
-# which may or may not have a receiver. `whole` lists the tables of a
+# which may or may not have a receiver. [whole] lists the tables of a
 # join whose row its one parameter (or its receiver) is as a whole: what
 # it reads of each is then all of it.
 data Scope = (params: Array[Symbol], rows: Array[Int?], receiver: Bool, row: Int?, known: Bool, whole: Array[Int] = [])
 
-# Translates the tree of a query's block (`Meta::Expr`, Quarz's docs/14
+# Translates the tree of a query's block ([Meta::Expr], Quarz's docs/14
 # §6) to SQL, with the values its captures had when the query was built.
 # The block's row is its receiver (`where { age > 18 }`) or its
 # parameter (`where { |u| u.age > 18 }`), one per table in a join
@@ -67,7 +67,7 @@ class Translator
   LIKE = 6
   OTHER = 7
   ADD = 8
-  # The units of `Int#hours` and the like, as `interval`s.
+  # The units of [Int#hours] and the like, as `interval`s.
   UNITS = {ms: "1 millisecond", milliseconds: "1 millisecond", second: "1 second", seconds: "1 second",
            minute: "1 minute", minutes: "1 minute", hour: "1 hour", hours: "1 hour", day: "24 hours", days: "24 hours"}
   MUL = 9
@@ -127,7 +127,7 @@ class Translator
 
   # The kinds of captured values the translation so far holds for: the
   # same tree with captures of these kinds translates the same, up to
-  # the values of its `Rotor::Piece::Bound` pieces.
+  # the values of its [Rotor::Piece::Bound] pieces.
   def guards -> Array[Guard] = @guards.list
 
   # The translator of a quoted block over the rows of `sources`, and the
@@ -306,7 +306,7 @@ class Translator
 
   # `e` as SQL where it is a value, not a condition: an `update`'s value,
   # an order's key, an operand. A comparison that can be NULL
-  # (`Sql#tri`) is refused: NULL is not false there.
+  # ([Sql#tri]) is refused: NULL is not false there.
   def operand(e: Meta::Expr, typed: Bool = true) -> Sql
     s = value(e)
     # (An `update` checks its value's classes against the column.)
@@ -321,10 +321,10 @@ class Translator
   end
 
   # Refuses `e` as a value when its classes are more than one SQL type
-  # holds (a `Bool` and another value, a `String` and an `Int`): a
-  # SQL CASE or COALESCE of them is an error in PostgreSQL. `Int`s and
-  # `Float`s meet in double precision; nil and what the translator does
-  # not know the class of (`Object`) meet anything.
+  # holds (a [Bool] and another value, a [String] and an [Int]): a
+  # SQL CASE or COALESCE of them is an error in PostgreSQL. [Int]s and
+  # [Float]s meet in double precision; nil and what the translator does
+  # not know the class of ([Object]) meet anything.
   def one_type(e: Meta::Expr) -> Void
     ks = classes(e).reject { |k| k == Nil }
     return if ks.size < 2 || ks.include?(Object) || ks.all? { |k| k == Int || k == Float }
@@ -332,14 +332,14 @@ class Translator
     untranslatable("`#{Translator.show(e)}`, #{what}, as a value", Translator.line_of(e))
   end
 
-  # `one_type` of `e` as a value (an order key), and `orderable`.
+  # [one_type] of `e` as a value (an order key), and [orderable].
   def valued_check(e: Meta::Expr) -> Void
     valued(true) { one_type(e) }
     orderable(e)
   end
 
   # Refuses `e` as an order key when it may be a document: a
-  # `JSON::Value` has no order in Quarz (`jsonb`'s would be the
+  # [JSON::Value] has no order in Quarz (`jsonb`'s would be the
   # server's own).
   def orderable(e: Meta::Expr) -> Void
     if valued(true) { classes(e) }.include?(JSON::Value)
@@ -348,24 +348,24 @@ class Translator
   end
 
   # Whether values of the classes `ls` and of `rs` (nil aside) can be
-  # equal: a class in both, `Int` and `Float`, nil only or a class the
-  # translator does not know (`Object`) on either side.
+  # equal: a class in both, [Int] and [Float], nil only or a class the
+  # translator does not know ([Object]) on either side.
   def self.meet?(ls: Array[Type[Object]], rs: Array[Type[Object]]) -> Bool
     return true if ls.empty? || rs.empty? || ls.include?(Object) || rs.include?(Object)
     numeric = ->(ks: Array[Type[Object]]) { ks.any? { |k| k == Int || k == Float } }
     ls.any? { |k| rs.include?(k) } || (numeric.call(ls) && numeric.call(rs))
   end
 
-  # "a `String` and a `Bool` are never equal".
+  # "a [String] and a [Bool] are never equal".
   def self.never_equal(ls: Array[Type[Object]], rs: Array[Type[Object]]) -> String
     "#{ls.map { |k| Translator.a(k) }.join(" or ")} and #{rs.map { |k| Translator.a(k) }.join(" or ")} are never equal"
   end
 
-  # "a `String`", "an `Int`".
+  # "a [String]", "an [Int]".
   def self.a(k: Type[Object]) -> String = "#{"AEIOU".include?(k.name[0]) ? "an" : "a"} `#{k.name}`"
 
   # `e` translated as a value (`@value`), its refusals left to the
-  # caller (`operand`).
+  # caller ([operand]).
   def value(e: Meta::Expr) -> Sql = valued(true) { sql(e) }
 
   # The block's value, translated as a value (`@value`) when `v`, else
@@ -381,7 +381,7 @@ class Translator
   end
 
   # The error for `e`, where `what` (an `&&` or `||` of an operand other
-  # than a `Bool`) is a value.
+  # than a [Bool]) is a value.
   def self.test_error(e: Meta::Expr, what: String, file: String) -> String
     "`#{what}` as a value is one of its operands in Quarz, but a `Bool` in SQL (#{file}:#{line_of(e)}): write an `if`"
   end
@@ -392,7 +392,7 @@ class Translator
     "`#{show(e)}` as a value is NULL, not false, in SQL when `#{what}` is NULL (#{file}:#{line_of(e)}): #{advice}"
   end
 
-  # What to do when what can be NULL is not a column, which `nil?`
+  # What to do when what can be NULL is not a column, which [nil?]
   # tells nothing of in SQL: a nil captured or written.
   def self.nil_advice(what: String) -> String
     return "write the case of nil out instead of `nil`" if what == "nil"
@@ -488,7 +488,7 @@ class Translator
   # The columns `e` reads of each table's row, in the table's order, nil
   # for one whose row it may read more of: it calls another method of the
   # row or passes the row on (its value is computed in Quarz,
-  # `Rotor::Query#select`). An association's getter reads the key it
+  # [Rotor::Query#select]). An association's getter reads the key it
   # needs.
   def reads(e: Meta::Expr) -> Array[Array[Column]?]
     found = collect(e, @scopes)
@@ -1247,11 +1247,11 @@ class Translator
   end
 
   # The classes `e` may have in Quarz, as translated: a column's class,
-  # a known value's (`Nil` for nil: a literal, a capture, a captured
-  # model's column, an `if` without `else`), a comparison's `Bool`,
-  # arithmetic's by its operands' (`Int` only from two `Int`s). An `if`
-  # gives its branches' (only the one a known condition takes, as `sql`
-  # does). A column that can be NULL (past the `nil?` facts) gives `Nil`
+  # a known value's ([Nil] for nil: a literal, a capture, a captured
+  # model's column, an `if` without `else`), a comparison's [Bool],
+  # arithmetic's by its operands' ([Int] only from two [Int]s). An `if`
+  # gives its branches' (only the one a known condition takes, as [sql]
+  # does). A column that can be NULL (past the [nil?] facts) gives [Nil]
   # as well, so an `update` refuses it into a non-null column. For an `update`
   # to check its value against the column, and a condition to be tested
   # for its truthiness: PostgreSQL would convert another class on
@@ -1589,7 +1589,7 @@ class Translator
   end
 
   # Whether `m` is the `now` written bare in a query's block:
-  # `Rotor::Compare`'s, not a model's or anything else's of that name.
+  # [Rotor::Compare]'s, not a model's or anything else's of that name.
   def self.bare_now?(m: Meta::MethodRef) -> Bool = m.name == :now && m.singleton && m.owner == Kernel && m.extension == Compare
 
   # `pieces` (a number) times an interval of `unit`: `($1::bigint *
@@ -1626,7 +1626,7 @@ class Translator
   private def present(i: Int) -> Sql = postfix(node([Piece::Column.new(i, @sources[i].table.primary_keys[0])], ATOM), "IS NOT NULL", IS)
 
   # `e`, an array column's new value in an `update`, when it is a
-  # captured array: one parameter (`Rotor::Bind::Whole`), the array as
+  # captured array: one parameter ([Rotor::Bind::Whole]), the array as
   # is; nil for anything else. Only there: elsewhere a captured array as
   # a value is refused, as before (`xs.include?(col)` has its own way).
   def array_value(e: Meta::Expr) -> Sql?

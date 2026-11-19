@@ -8,7 +8,7 @@ data Column = (
   # Its SQL type (`bigint`, `double precision`, `text`, `boolean`,
   # `timestamptz`, `bytea`, `text[]`, `bigint[]`).
   sql: String,
-  # Its Quarz type: `Int`, `Float`, `String`, `Bool`, `Time` or `Bytes`.
+  # Its Quarz type: [Int], [Float], [String], [Bool], [Time] or [Bytes].
   type: Type[Object],
   # Whether it admits NULL: its getter then returns `T?`.
   null: Bool,
@@ -16,17 +16,17 @@ data Column = (
   primary: Bool,
   # The value a model made with `new` starts with, or nil for none.
   default: Value?,
-  # Whether its value is hidden from `inspect` (a password, a token):
+  # Whether its value is hidden from [inspect] (a password, a token):
   # `**redacted**` shows instead.
   redact: Bool = false,
-  # For an array column (`type` `Array`): its elements' class (`Int`,
-  # `String`), and whether they may be nil (`Array[String?]`); nil for
-  # another column. (A `Type` value carries no type arguments: the
+  # For an array column ([type] [Array]): its elements' class ([Int],
+  # [String]), and whether they may be nil (`Array[String?]`); nil for
+  # another column. (A [Type] value carries no type arguments: the
   # column keeps its declared element here.)
   element: Type[Object]? = nil,
   nils: Bool = false,
   # For a document column (`json: true`): the `data` type its getter
-  # gives, its value held as the `JSON::Value` stored (`type`); nil for
+  # gives, its value held as the [JSON::Value] stored ([type]); nil for
   # another column.
   document: Type[Object]? = nil
 )
@@ -44,7 +44,7 @@ data Association = (
   # The column that holds the key: this model's for `belongs_to`
   # (`account_id`), the other's for `has_many` (`user_id`); for a
   # `has_many` through a join model, the default `has_many` would have,
-  # unused (the keys are the join model's, `Rotor::Through.keys`).
+  # unused (the keys are the join model's, [Rotor::Through.keys]).
   foreign_key: Symbol,
   # The join model of a `has_many ..., through:`, or nil.
   through: Type[Model]? = nil,

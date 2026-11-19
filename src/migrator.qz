@@ -1,7 +1,7 @@
-# Runs migrations (`Rotor::Migration` classes) against a database and
+# Runs migrations ([Rotor::Migration] classes) against a database and
 # records which ran in a table (`schema_migrations` unless `table:`
 # says otherwise: `version bigint PRIMARY KEY`, `inserted_at`), which
-# `migrate` and `rollback` create when it is missing.
+# [migrate] and [rollback] create when it is missing.
 #
 # ```quarz no_run
 # class MigCreateUsers < Rotor::Migration
@@ -32,25 +32,25 @@
 #
 # - Each migration runs in a transaction of its own, its version's row
 #   written in it (PostgreSQL's DDL is transactional): one that fails
-#   is rolled back whole, raising `Rotor::MigrationError`, and those
+#   is rolled back whole, raising [Rotor::MigrationError], and those
 #   before it stay applied. One whose class says `disable_transaction!`
 #   runs outside one, its row written after it succeeds.
-# - `migrate` and `rollback` take one connection of the repository's
-#   for their whole run (`Rotor::Adapter#hold`), take a session-level
+# - [migrate] and [rollback] take one connection of the repository's
+#   for their whole run ([Rotor::Adapter#hold]), take a session-level
 #   `pg_advisory_lock` on it (its key derived from the table's name),
 #   and run every migration there: two processes migrating at once run
 #   one after the other, the second finding nothing pending.
 #   `lock_timeout:` bounds the wait (PostgreSQL's `lock_timeout`, during
 #   the lock alone); without it the wait has no bound.
-# - Versions are unique among the migrations given. `migrate` refuses
+# - Versions are unique among the migrations given. [migrate] refuses
 #   a pending version lower than the highest one applied
-#   (`Rotor::MigrationError`, before running anything), unless
+#   ([Rotor::MigrationError], before running anything), unless
 #   `allow_out_of_order: true`: versions are timestamps, and an older
 #   one appearing late is usually a merge that went wrong, to look at
 #   before it runs. Applied versions without a migration in the list
-#   are shown by `status` as `:unknown`; `rollback` refuses them.
+#   are shown by [status] as `:unknown`; [rollback] refuses them.
 # - The repository must not be inside a transaction: each migration
-#   opens its own (`ArgumentError` otherwise). When the run ends, a
+#   opens its own ([ArgumentError] otherwise). When the run ends, a
 #   transaction a migration left open is rolled back and the lock
 #   released; a connection taken from a pool has its settings reset
 #   (`RESET ALL`), so that a migration's SET does not reach the pool,
@@ -66,7 +66,7 @@ class Migrator
   @log: (shareable (String) -> Void)?
 
   # A migrator of `migrations` (in any order) over `repo`. `log` gets a
-  # line as each migration starts and ends. Raises `ArgumentError` for a
+  # line as each migration starts and ends. Raises [ArgumentError] for a
   # migration without a version, or two with one version.
   def initialize(@repo: Repo, migrations: Array[Type[Migration]], *, table: String = "schema_migrations",
                  @allow_out_of_order: Bool = false, @lock_timeout: Duration? = nil, @log: (shareable (String) -> Void)? = nil)

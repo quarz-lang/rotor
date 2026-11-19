@@ -1,5 +1,5 @@
 # A statement that changes rows, as a value: what a repository runs.
-# `to_sql` gives its SQL and parameters; `returning` asks for columns
+# [to_sql] gives its SQL and parameters; [returning] asks for columns
 # of the rows it changed.
 #
 # ```
@@ -22,20 +22,20 @@ class Statement
   @pieces: Array[Piece]
   @returning: Array[Symbol]?
 
-  # (Made by the methods below and by `Rotor::Query`.)
+  # (Made by the methods below and by [Rotor::Query].)
   def initialize(@table: TableInfo, @pieces: Array[Piece], @returning: Array[Symbol]?)
   end
 
   # The insertion of `model`'s row, with the columns it has values for
-  # (`DEFAULT VALUES` when none): a `Rotor::Insert`, which may say what
+  # (`DEFAULT VALUES` when none): a [Rotor::Insert], which may say what
   # to do on a conflict (`on_conflict`).
   def self.insert[M <: Model](model: M) -> Insert[M] = Insert[M].new([model], [], [], false, nil)
 
   # The insertion of the rows of `models` in one statement (`VALUES
   # (...), (...)`), each with the columns any of them has values for, a
   # model without a value for one writing DEFAULT (the column's
-  # default): a `Rotor::Insert`, as `insert`'s. `ArgumentError` for no
-  # models, and for models of several classes. `Rotor::Repo#insert_all`
+  # default): a [Rotor::Insert], as `insert`'s. [ArgumentError] for no
+  # models, and for models of several classes. [Rotor::Repo#insert_all]
   # runs it, in several statements when one would take too many
   # parameters.
   #
@@ -200,7 +200,7 @@ class Statement
   end
 
   # The update of `model`'s row, by its primary key, with the columns
-  # assigned since it was loaded or saved (`Rotor::Model#changed`), or nil
+  # assigned since it was loaded or saved ([Rotor::Model#changed]), or nil
   # when there are none.
   def self.update[M <: Model](model: M) -> Changes[M]?
     t = model.table_info
@@ -253,7 +253,7 @@ class Statement
     names.empty? ? @table.columns.map { |c| c.name } : names
   end
 
-  # The columns `returning` asked for, or nil.
+  # The columns [returning] asked for, or nil.
   def returned -> Array[Symbol]? = @returning
 
   # The SQL statement and its parameters.
@@ -324,11 +324,11 @@ class Statement
 end
 
 # A statement that changes rows of a model's table, typed by them: what
-# `Rotor::Repo#all` gives back of it once it says `returning`
+# [Rotor::Repo#all] gives back of it once it says [returning]
 # (`User.where { ... }.update { ... }.returning(:id)`), the rows it
-# changed as models of the columns returned. `Rotor::Query#update`,
-# `Rotor::Query#delete`, `Rotor::Statement.update`,
-# `Rotor::Statement.delete` and `Rotor::Statement.insert` make one.
+# changed as models of the columns returned. [Rotor::Query#update],
+# [Rotor::Query#delete], [Rotor::Statement.update],
+# [Rotor::Statement.delete] and [Rotor::Statement.insert] make one.
 class Changes[T] < Statement
   @rows: Loader[T]
 
@@ -338,7 +338,7 @@ class Changes[T] < Statement
   end
 
   # The statement, returning the given columns of the rows it changes
-  # (all of them when none are named): `Rotor::Repo#all` gives those
+  # (all of them when none are named): [Rotor::Repo#all] gives those
   # rows.
   def returning(*names: Symbol) -> Changes[T] = Changes[T].new(table, statement_pieces, returned_names(names), @rows)
 
@@ -347,11 +347,11 @@ class Changes[T] < Statement
   def rows(fetched: Array[Array[Fetched]]) -> Array[T] = @rows.call(fetched)
 end
 
-# An INSERT of a model's row (`Rotor::Statement.insert`), and what it
+# An INSERT of a model's row ([Rotor::Statement.insert]), and what it
 # does when the row conflicts with one the table has (a unique index or
-# a constraint): `on_conflict` names which conflict, then `do_nothing`
-# or `do_update`, the latter with an optional `where`. Its `to_sql` and
-# a repository's `run` are a statement's; `Rotor::Repo#upsert` runs one
+# a constraint): [on_conflict] names which conflict, then `do_nothing`
+# or `do_update`, the latter with an optional [where]. Its [to_sql] and
+# a repository's `run` are a statement's; [Rotor::Repo#upsert] runs one
 # with a conflict clause and gives the row as it is after it, or nil.
 #
 # ```
@@ -382,7 +382,7 @@ class Insert[M <: Model] < Changes[M]
   # The columns `do_update`'s block sets (nil: no `do_update`).
   @update: Array[Symbol]?
 
-  # (Made by `Rotor::Statement.insert` and the methods below.)
+  # (Made by [Rotor::Statement.insert] and the methods below.)
   def initialize(@models: Array[M], @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?)
     super(@models[0].table_info, Statement.insert_pieces(@models.map { |m| m.as(Model) }) + @action + @where, nil, Statement.model_rows(@models[0]))
   end
@@ -422,7 +422,7 @@ class Insert[M <: Model] < Changes[M]
   # On a conflict of these columns (`ON CONFLICT ("a", "b")`: the
   # columns of a unique index, or of the primary key), or of any unique
   # index or constraint when none is named (`ON CONFLICT`, for
-  # `do_nothing` only). `ArgumentError` for a column the table does not
+  # `do_nothing` only). [ArgumentError] for a column the table does not
   # have, and on an insert that already says what to do.
   def on_conflict(*columns: Symbol) -> Conflict[M]
     conflicting!
@@ -445,8 +445,8 @@ class Insert[M <: Model] < Changes[M]
 
   # `do_update` only where the block is true, of the table's row (`old`)
   # and the proposed one (`new`, PostgreSQL's EXCLUDED), translated as
-  # a query's `where` is: a conflicting row for which it is false is
-  # left as it is, and the insert gives no row (`Rotor::Repo#upsert`:
+  # a query's [where] is: a conflicting row for which it is false is
+  # left as it is, and the insert gives no row ([Rotor::Repo#upsert]:
   # nil).
   def where(&cond: Quoted[shareable (M, M) -> Bool] using Compare) -> Insert[M]
     raise ArgumentError.new("`where` of an insert: write it after `do_update`, once, as its condition") if @update.nil? || !@where.empty?
@@ -465,7 +465,7 @@ class Insert[M <: Model] < Changes[M]
   end
 end
 
-# The conflict an insert names (`Rotor::Insert#on_conflict`): what to do
+# The conflict an insert names ([Rotor::Insert#on_conflict]): what to do
 # about it.
 class Conflict[M <: Model]
   include Shareable
@@ -474,21 +474,21 @@ class Conflict[M <: Model]
   # (No target named: `do_nothing` only.)
   @any: Bool
 
-  # (Made by `Rotor::Insert#on_conflict`.)
+  # (Made by [Rotor::Insert#on_conflict].)
   def initialize(@models: Array[M], @target: String, @any: Bool)
   end
 
   # Nothing: the conflicting row is left as it is, and the insert gives
-  # no row (`Rotor::Repo#upsert`: nil). `ON CONFLICT ... DO NOTHING`.
+  # no row ([Rotor::Repo#upsert]: nil). `ON CONFLICT ... DO NOTHING`.
   def do_nothing -> Insert[M] = Insert[M].new(@models, [Piece::Text.new("#{@target} DO NOTHING").as(Piece)], [], true, nil)
 
   # The conflicting row updated as the block says, a hash literal of
-  # columns as `Rotor::Query#update`'s, of the table's row (`old`) and
+  # columns as [Rotor::Query#update]'s, of the table's row (`old`) and
   # the proposed one (`new`, PostgreSQL's EXCLUDED):
   # `{ |old, new| {name: new.name, hits: old.hits + 1} }`.
-  # `Rotor::Repo#upsert` sets the table's update time too, to the
+  # [Rotor::Repo#upsert] sets the table's update time too, to the
   # proposed row's, unless the block sets it; a statement run as written
-  # (`Rotor::Repo#run`) sets what the block says only.
+  # ([Rotor::Repo#run]) sets what the block says only.
   # Needs the conflict's columns or constraint (PostgreSQL's rule).
   def do_update(&set: Quoted[shareable (M, M) -> Hash[Symbol, Object]] using Compare) -> Insert[M]
     raise ArgumentError.new("`do_update` of a conflict that names no columns or constraint: name them in `on_conflict`") if @any

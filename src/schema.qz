@@ -1,19 +1,19 @@
 # What a model's `table` block runs on, at compile time: each of its
-# calls declares a column or an association. Its `column` takes the
-# column's type as a class: `Int`, `Float`, `String`, `Bool`, `Time` or
-# `Bytes`, one overload each, so that a default is of the column's type;
-# or an array of `String`s or `Int`s (`Array[String]`, `text[]`;
+# calls declares a column or an association. Its [column] takes the
+# column's type as a class: [Int], [Float], [String], [Bool], [Time] or
+# [Bytes], one overload each, so that a default is of the column's type;
+# or an array of [String]s or [Int]s (`Array[String]`, `text[]`;
 # `Array[Int]`, `bigint[]`), its elements non-null unless declared `T?`
 # (`Array[String?]`), without a default.
 #
 # - `null: true`: the column admits NULL, and its getter returns `T?`.
 # - `default:`: the value a model made with `new` starts with (not for
-#   `Time`).
+#   [Time]).
 # - `primary: true`: the primary key, never NULL; on several columns,
 #   a composite key of them, in the order declared (a model with one
-#   has no `has_many`, and no `belongs_to` or `through` association
+#   has no [has_many], and no [belongs_to] or `through` association
 #   may target it).
-# - `redact: true`: the value is hidden from `inspect` (the model's and
+# - `redact: true`: the value is hidden from [inspect] (the model's and
 #   a changeset's), for a password or a token.
 class Schema
   @model: String
@@ -43,45 +43,45 @@ class Schema
   # The associations declared so far, in order.
   def associations -> Array[Association] = @associations
 
-  # The `timestamps` columns: created at, updated at (nil for none).
+  # The [timestamps] columns: created at, updated at (nil for none).
   def timestamp_columns -> [Symbol?, Symbol?] = [@created_at, @updated_at]
 
-  # An `Int` column (`bigint`).
+  # An [Int] column (`bigint`).
   def column(name: Symbol, type: Type[Int], *, null: Bool = false, default: Int? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "bigint", Int, null, default, primary, redact)
   end
 
-  # A `Float` column (`double precision`).
+  # A [Float] column (`double precision`).
   def column(name: Symbol, type: Type[Float], *, null: Bool = false, default: Float? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "double precision", Float, null, default, primary, redact)
   end
 
-  # A `String` column (`text`).
+  # A [String] column (`text`).
   def column(name: Symbol, type: Type[String], *, null: Bool = false, default: String? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "text", String, null, default, primary, redact)
   end
 
-  # A `Bool` column (`boolean`).
+  # A [Bool] column (`boolean`).
   def column(name: Symbol, type: Type[Bool], *, null: Bool = false, default: Bool? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "boolean", Bool, null, default, primary, redact)
   end
 
-  # A `Time` column (`timestamptz`). It takes no default: a time is not
+  # A [Time] column (`timestamptz`). It takes no default: a time is not
   # a value the compiler can bake into the program.
   def column(name: Symbol, type: Type[Time], *, null: Bool = false, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "timestamptz", Time, null, nil, primary, redact)
   end
 
-  # A `Date` column (`date`), a calendar date; without a default, as a
-  # `Time` column (a `String` column stays valid for a `date` of a table
+  # A [Date] column (`date`), a calendar date; without a default, as a
+  # [Time] column (a [String] column stays valid for a `date` of a table
   # rotor did not create).
   def column(name: Symbol, type: Type[Date], *, null: Bool = false, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "date", Date, null, nil, primary, redact)
   end
 
-  # A `Decimal` column (`numeric`, or `numeric(precision, scale)` when
+  # A [Decimal] column (`numeric`, or `numeric(precision, scale)` when
   # both are given, which the server then rounds a value to on
-  # assignment), exact; without a default (a `Float` column stays valid
+  # assignment), exact; without a default (a [Float] column stays valid
   # for a `numeric` of a table rotor did not create).
   def column(name: Symbol, type: Type[Decimal], *, null: Bool = false, primary: Bool = false, redact: Bool = false, precision: Int? = nil, scale: Int? = nil) -> Void
     sql = if (p = precision) && (s = scale)
@@ -95,34 +95,34 @@ class Schema
     add(name, sql, Decimal, null, nil, primary, redact)
   end
 
-  # A `Bytes` column (`bytea`).
+  # A [Bytes] column (`bytea`).
   def column(name: Symbol, type: Type[Bytes], *, null: Bool = false, default: Bytes? = nil, primary: Bool = false, redact: Bool = false) -> Void
     add(name, "bytea", Bytes, null, default, primary, redact)
   end
 
   # A JSON document column (`jsonb`, or a `json` column of a table
-  # rotor did not create), read as a `JSON::Value` (parsed from the text
+  # rotor did not create), read as a [JSON::Value] (parsed from the text
   # the server sends: every row read parses it) and written as its
   # compact text. `null: true` makes it `JSON::Value?`: nil is SQL's
-  # NULL, `JSON::Value::Null` the document `null`. A number reads as an
-  # `Int`, an exact `Integer` or a `Float`, while `jsonb` keeps any
+  # NULL, [JSON::Value::Null] the document `null`. A number reads as an
+  # [Int], an exact [Integer] or a [Float], while `jsonb` keeps any
   # decimal exactly: a fraction read and written back may change (a
-  # column that needs the exact text is declared `String`).
+  # column that needs the exact text is declared [String]).
   def column(name: Symbol, type: Type[JSON::Value], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "jsonb", JSON::Value, null, nil, false, redact)
   end
 
   # A document column (`jsonb`) holding a value of `type`, a `data`
-  # type (an `Array` or a `Hash` is a field of one: here a `Type` value
-  # carries no type arguments, which `JSON.decode` needs): written as
-  # the value's JSON (`JSON.generate`), read with `JSON.decode[T]` on
+  # type (an [Array] or a [Hash] is a field of one: here a [Type] value
+  # carries no type arguments, which [JSON.decode] needs): written as
+  # the value's JSON ([JSON.generate]), read with `JSON.decode[T]` on
   # each read of the getter (a decoded value is not kept, until
   # quarz-lang/quarz#890: the cost of a read grows with the document;
   # read it once into a local).
-  # A type `JSON.decode` cannot take is an error when the program is
+  # A type [JSON.decode] cannot take is an error when the program is
   # compiled (at the `table` block, naming the column's decoder,
   # `__rotor_document_<name>`). A row whose document does not have the
-  # type's shape raises `JSON::DecodeError` when it is loaded, naming the
+  # type's shape raises [JSON::DecodeError] when it is loaded, naming the
   # table, the column and where; a field with a default takes it for a
   # missing key. `json: true` is what says it (`false` is refused): a
   # mistyped scalar type is not silently a document.
@@ -157,30 +157,30 @@ class Schema
     end
   end
 
-  # An array column of `String`s (`text[]`), its elements never NULL: a
-  # NULL element read raises `ArgumentError` (declare `Array[String?]`
+  # An array column of [String]s (`text[]`), its elements never NULL: a
+  # NULL element read raises [ArgumentError] (declare `Array[String?]`
   # for one that may hold them).
   def column(name: Symbol, type: Type[Array[String]], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "text[]", Array, null, nil, false, redact, String, false)
   end
 
-  # An array column of `String`s that may be nil (`text[]`).
+  # An array column of [String]s that may be nil (`text[]`).
   def column(name: Symbol, type: Type[Array[String?]], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "text[]", Array, null, nil, false, redact, String, true)
   end
 
-  # An array column of `Int`s (`bigint[]`), its elements never NULL, as
+  # An array column of [Int]s (`bigint[]`), its elements never NULL, as
   # `Array[String]`'s.
   def column(name: Symbol, type: Type[Array[Int]], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "bigint[]", Array, null, nil, false, redact, Int, false)
   end
 
-  # An array column of `Int`s that may be nil (`bigint[]`).
+  # An array column of [Int]s that may be nil (`bigint[]`).
   def column(name: Symbol, type: Type[Array[Int?]], *, null: Bool = false, redact: Bool = false) -> Void
     add(name, "bigint[]", Array, null, nil, false, redact, Int, true)
   end
 
-  # `created_at` and `updated_at`, `Time` columns (`timestamptz`) that
+  # `created_at` and `updated_at`, [Time] columns (`timestamptz`) that
   # are not NULL, which a repository sets when it inserts and updates
   # the model. Either is renamed by giving its name, or left out with
   # `false`.
@@ -195,7 +195,7 @@ class Schema
     @updated_at = updated_at.as?(Symbol)
   end
 
-  # The model belongs to `target`: the column `<name>_id` (an `Int`, or
+  # The model belongs to `target`: the column `<name>_id` (an [Int], or
   # `foreign_key:`) holds the target's key. The association's name is
   # the target's in snake_case (`belongs_to Account`: `account`, and
   # the column `account_id`), or `name:`.
@@ -237,10 +237,10 @@ class Schema
   # ```
   #
   # With `through:` a join model, the model has many of `target` through
-  # it: the join model's `belongs_to` this model and `belongs_to` the
+  # it: the join model's [belongs_to] this model and [belongs_to] the
   # target (`source:` names the latter when it has several) pair them;
   # the keys are found when the association is first used, all `table`
-  # blocks having run (`Rotor::Through.keys`). `foreign_key:` is the join
+  # blocks having run ([Rotor::Through.keys]). `foreign_key:` is the join
   # model's then, not given here.
   #
   # ```
@@ -303,14 +303,14 @@ class Schema
   end
 
   # Creates the tables of `models` from their `table` blocks, in one
-  # transaction: each column (an `Int` primary key as `GENERATED BY
+  # transaction: each column (an [Int] primary key as `GENERATED BY
   # DEFAULT AS IDENTITY`, the columns' defaults as the tables'), and for
-  # each `belongs_to` an index on its column and, once every table is
+  # each [belongs_to] an index on its column and, once every table is
   # made, its foreign key (`ALTER TABLE`, so that models may refer to
   # each other in a cycle). With `if_not_exists: true`, a table that
   # exists is left as it is. For a development database or a test's: a
   # production database's schema goes through migrations
-  # (`Rotor::Migration`).
+  # ([Rotor::Migration]).
   #
   # ```quarz no_run
   # class SchemaUser < Rotor::Model
@@ -402,7 +402,7 @@ class Schema
     tables + keys
   end
 
-  # The methods of `Rotor::Model` that a column's getter would replace.
+  # The methods of [Rotor::Model] that a column's getter would replace.
   RESERVED = [:to_h, :changed, :changed?, :clear_changes, :keep_changes, :loaded, :table_info, :read, :with, :with_values, :checkpoint, :restore, :inspect, :to_s, :preloaded, :with_preloaded, :nest, :fetched?, :decode_document, :check_document, :no_document]
 
   private def add(name: Symbol, sql: String, type: Type[Object], null: Bool, default: Value?, primary: Bool, redact: Bool = false, element: Type[Object]? = nil, nils: Bool = false, document: Type[Object]? = nil) -> Void

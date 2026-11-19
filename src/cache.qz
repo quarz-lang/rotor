@@ -1,18 +1,18 @@
 # Where a parameter made from a quoted block's captures (Quarz's
-# `Quoted#captures`) takes its value: a capture, an item of a captured
+# [Quoted#captures]) takes its value: a capture, an item of a captured
 # array, a column of a captured model, or what is made of one of those
-# (a `Float` from an `Int`, a LIKE pattern from a string).
+# (a [Float] from an [Int], a LIKE pattern from a string).
 enum Bind
   variant Capture(index: Int)
   variant Item(index: Int, item: Int)
   variant Read(index: Int, column: Symbol)
   # A captured array's items but its nils, as one parameter (as Floats
-  # when `to_float`: an array of `Int`s and `Float`s).
+  # when `to_float`: an array of [Int]s and [Float]s).
   variant Items(index: Int, to_float: Bool)
   variant ToFloat(of: Bind)
   # (`name`: `"start_with?"`, `"end_with?"` or `"include?"`.)
   variant Like(of: Bind, name: String)
-  # A captured `Duration` as its microseconds, an `interval`'s unit.
+  # A captured [Duration] as its microseconds, an `interval`'s unit.
   variant Micros(of: Bind)
   # A captured array as one parameter, an array column's new value
   # (`update { {tags: xs} }`); nowhere else is an array a value.
@@ -23,7 +23,7 @@ enum Bind
 end
 
 # What a translation looked at of a captured value: its class (nil for
-# nil) and, for an array, its items' class (`Binds.item_class`) and
+# nil) and, for an array, its items' class ([Binds.item_class]) and
 # whether it holds a nil. Not its length: an array is one parameter.
 data Kind = (cls: Type[Object]?, item: Type[Object]? = nil, nils: Bool = false)
 
@@ -52,10 +52,10 @@ class Guards
   def list -> Array[Guard] = @list.to_a
 end
 
-# The values of `Bind`s, from a block's captures.
+# The values of [Bind]s, from a block's captures.
 module Binds
   # The value `b` reads of `captures` (a model's column read as the
-  # model reads it: `Rotor::NotLoadedError` when it was not fetched).
+  # model reads it: [Rotor::NotLoadedError] when it was not fetched).
   def self.value(b: Bind, captures: Array[Object]) -> Object?
     case b
     in Bind::Capture(i) then captures[i]
@@ -104,14 +104,14 @@ module Binds
   end
 
   # `d` in microseconds (PostgreSQL's `interval` keeps no less), its
-  # nanoseconds rounded: exact for any `Duration`, the milliseconds an
-  # `Int` and the rest under one.
+  # nanoseconds rounded: exact for any [Duration], the milliseconds an
+  # [Int] and the rest under one.
   def self.micros(d: Duration) -> Int
     ms = d.to_ms
     ms * 1000 + ((d - ms.ms).to_f * 1_000_000).round.to_i
   end
 
-  # The class of `v` as a translation sees it: `JSON::Value` for a
+  # The class of `v` as a translation sees it: [JSON::Value] for a
   # document of any variant (whose class is its variant's: a translation
   # depends on none of them; the document `null` is a value, not SQL's
   # NULL), else its own.
@@ -136,8 +136,8 @@ module Binds
     end
   end
 
-  # The class of an array's items but its nils: nil for none, `Float`
-  # for `Int`s and `Float`s, `Object` for other mixtures.
+  # The class of an array's items but its nils: nil for none, [Float]
+  # for [Int]s and [Float]s, [Object] for other mixtures.
   def self.item_class(xs: Array[Object?]) -> Type[Object]?
     found: Type[Object]? = nil
     xs.each do |x|
@@ -158,7 +158,7 @@ module Binds
     guards.all? { |g| kind(value(g.bind, captures)) == g.kind }
   end
 
-  # `pieces` with each `Rotor::Piece::Bound` piece the parameter of its value in
+  # `pieces` with each [Rotor::Piece::Bound] piece the parameter of its value in
   # `captures`.
   def self.fill(pieces: Array[Piece], captures: Array[Object]) -> Array[Piece]
     return pieces unless pieces.any? { |p| p.is_a?(Piece::Bound) }
@@ -237,7 +237,7 @@ module Binds
     end
   end
 
-  # `s` (an `Int`'s parameter or literal) as a `Float`.
+  # `s` (an [Int]'s parameter or literal) as a [Float].
   def self.to_float(s: Sql, i: Int) -> Sql
     piece = if b = s.bind
               Piece::Bound.new(Bind::ToFloat.new(b))
@@ -247,7 +247,7 @@ module Binds
     Sql.new([piece], Translator::ATOM, nil, i.to_f, true)
   end
 
-  # `v` as a statement's parameter: one of its classes (`ArgumentError`
+  # `v` as a statement's parameter: one of its classes ([ArgumentError]
   # for another; a value the guards admitted is one).
   def self.parameter(v: Object?) -> Bindable?
     case v
@@ -268,7 +268,7 @@ module Binds
 end
 
 # A call's translation key: the site of its block (Quarz's
-# `Quoted#site`) and the models of the query's tables it is over.
+# [Quoted#site]) and the models of the query's tables it is over.
 data CacheKey = (site: Int, models: Array[Type[Object]])
 
 # A translation kept, with the guards it holds for.
@@ -276,7 +276,7 @@ data Cached[V] = (guards: Array[Guard], value: V)
 
 # The translations of the queries' blocks, kept for the process: a call
 # whose block was translated over the same models, with captures of the
-# same kinds (`Guard`), takes the translation kept and fills in its
+# same kinds ([Guard]), takes the translation kept and fills in its
 # parameters. At most `LIMIT` entries per key, never evicted: the kinds
 # of several captures multiply (nil or not, a class, an array's items'
 # class; not an array's length, which the SQL does not depend on), so a
@@ -334,5 +334,5 @@ end
 # What a `select`'s block is, kept for its site: the columns it reads of
 # each table (nil: all), and the column it is as it is (`select { id }`,
 # of a query of one table), or nil: what makes the query a subquery
-# (`Rotor::Query#include?`).
+# ([Rotor::Query#include?]).
 data Projection = (reads: Array[Array[Column]?], single: Column?)
