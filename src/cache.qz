@@ -124,15 +124,18 @@ module Binds
 
   # The kind of `v`.
   def self.kind(v: Object?) -> Kind
+    # (Each `Kind` written in full until quarz#921: a data value left to
+    # its defaults costs about 3,000 instructions in compiled code, and
+    # this runs for every guard of every build.)
     case v
-    in nil then Kind.new(nil)
+    in nil then Kind.new(nil, nil, false)
     in Array => xs then Kind.new(Array, item_class(xs), xs.any? { |x| x.nil? })
     # (A captured query: whether its column can be NULL, which decides
     # whether `include?` of it is three-valued. One site may capture
     # queries of a non-null and of a nullable column: a generic
     # method's `Query[T]`, `T >: String`.)
     in Subquery => q then Kind.new(v.class, nil, q.subquery_nullable?)
-    else Kind.new(Binds.class_of(v))
+    else Kind.new(Binds.class_of(v), nil, false)
     end
   end
 
@@ -162,18 +165,31 @@ module Binds
   # `captures`.
   def self.fill(pieces: Array[Piece], captures: Array[Object]) -> Array[Piece]
     return pieces unless pieces.any? { |p| p.is_a?(Piece::Bound) }
+    # (A subquery is several pieces in the place of one; any other piece
+    # is one, filled in place without an array of its own.)
+    unless pieces.any? { |p| p.is_a?(Piece::Bound) && p.as(Piece::Bound).bind.is_a?(Bind::Subquery) }
+      return pieces.map { |p| fill_one(p, captures) }
+    end
     pieces.flat_map do |p|
       case p
-      in Piece::Bound(Bind::Items => b) then [Piece::Param.new(items(value(b, captures).as(Array[Object?]))).as(Piece)]
-      in Piece::Bound(Bind::Whole => b) then [Piece::Param.new(Model.value(value(b, captures))).as(Piece)]
       in Piece::Bound(Bind::Subquery => b)
         case q = value(b, captures)
         in Subquery => sub then sub.subquery
         else raise ArgumentError.new("a subquery that is not a query: #{q.class.name}")
         end
-      in Piece::Bound(b) then [Piece::Param.new(parameter(value(b, captures))).as(Piece)]
-      else [p]
+      else [fill_one(p, captures)]
       end
+    end
+  end
+
+  # `p` with its parameter's value in `captures` if it is a
+  # [Rotor::Piece::Bound] piece (not of a subquery), else `p`.
+  private def self.fill_one(p: Piece, captures: Array[Object]) -> Piece
+    case p
+    in Piece::Bound(Bind::Items => b) then Piece::Param.new(items(value(b, captures).as(Array[Object?])))
+    in Piece::Bound(Bind::Whole => b) then Piece::Param.new(Model.value(value(b, captures)))
+    in Piece::Bound(b) then Piece::Param.new(parameter(value(b, captures)))
+    else p
     end
   end
 
