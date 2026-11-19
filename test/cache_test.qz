@@ -164,4 +164,19 @@ class CacheTest < Test::Case
     u = [2.0, 2]
     assert_equal(["UPDATE \"racks\" SET \"width\" = $1 WHERE \"id\" = $2", u], widen(2).to_sql)
   end
+
+  def test_filling_keeps_the_pieces_and_their_order
+    # (In place without a subquery, by pieces with one: the same pieces,
+    # in the same order, each bound one its parameter.)
+    t = ->(x: String) { Rotor::Piece::Text.new(x).as(Rotor::Piece) }
+    bound = ->(b: Rotor::Bind) { Rotor::Piece::Bound.new(b).as(Rotor::Piece) }
+    param = ->(v: Rotor::Bindable?) { Rotor::Piece::Param.new(v).as(Rotor::Piece) }
+    plain = [t.call("\"a\" = "), bound.call(Rotor::Bind::Capture.new(0)), t.call(" AND \"b\" > "), bound.call(Rotor::Bind::ToFloat.new(Rotor::Bind::Capture.new(1)))]
+    captures: Array[Object] = [5, 2]
+    assert_equal([t.call("\"a\" = "), param.call(5), t.call(" AND \"b\" > "), param.call(2.0)], Rotor::Binds.fill(plain, captures))
+    sub = Rack.where { width > 1.5 }.select { id }
+    nested = [t.call("\"a\" = "), bound.call(Rotor::Bind::Capture.new(0)), t.call(" AND \"id\" IN ("), bound.call(Rotor::Bind::Subquery.new(2)), t.call(") AND \"b\" > "), bound.call(Rotor::Bind::ToFloat.new(Rotor::Bind::Capture.new(1)))]
+    captures = [5, 2, sub]
+    assert_equal([t.call("\"a\" = "), param.call(5), t.call(" AND \"id\" IN (")] + sub.subquery + [t.call(") AND \"b\" > "), param.call(2.0)], Rotor::Binds.fill(nested, captures))
+  end
 end
