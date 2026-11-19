@@ -1,5 +1,5 @@
 # What a repository runs its statements through: a database and its
-# driver. `Rotor::Adapters::PG` is PostgreSQL's, over pg.
+# driver. [Rotor::Adapters::PG] is PostgreSQL's, over pg.
 abstract class Adapter
   # Runs `sql` with `params` (`$1`...): its rows, or what it changed.
   abstract def query(sql: String, params: Array[Object?]) -> Rows
@@ -18,7 +18,7 @@ abstract class Adapter
   def in_transaction? -> Bool = false
 
   # Whether the adapter takes its connections from a pool, so that one
-  # `hold` gives back is its to reset.
+  # [hold] gives back is its to reset.
   def pooled? -> Bool = false
 end
 
@@ -36,8 +36,8 @@ end
 
 # A row's values, read by column index with the column's type: nil for
 # NULL. An array column (`bigint[]`, `text[]`...) is read by the plural
-# readers (`ints?`, `strings?`...), its elements nil for NULL (one
-# dimension: a deeper array raises `ArgumentError`).
+# readers ([ints?], [strings?]...), its elements nil for NULL (one
+# dimension: a deeper array raises [ArgumentError]).
 abstract class Row
   abstract def int?(i: Int) -> Int?
   abstract def float?(i: Int) -> Float?
@@ -47,7 +47,7 @@ abstract class Row
   abstract def date?(i: Int) -> Date?
   abstract def decimal?(i: Int) -> Decimal?
   abstract def bytes?(i: Int) -> Bytes?
-  # A `json` or `jsonb` value, parsed.
+  # A [json] or `jsonb` value, parsed.
   abstract def json?(i: Int) -> JSON::Value?
   abstract def ints?(i: Int) -> Array[Int?]?
   abstract def floats?(i: Int) -> Array[Float?]?
@@ -87,8 +87,8 @@ abstract class Row
   # :ditto:
   def times(i: Int) -> Array[Time?] = times?(i) || null(i)
 
-  # The value of `i` as `type` wants it (`Int`, `Float`, `String`,
-  # `Bool`, `Time`, `Bytes` or `JSON::Value`).
+  # The value of `i` as `type` wants it ([Int], [Float], [String],
+  # [Bool], [Time], [Bytes] or [JSON::Value]).
   def value(i: Int, type: Type[Object]) -> Object?
     if type == Int
       int?(i)
@@ -190,7 +190,7 @@ module Adapters
     end
   end
 
-  # pg's result as `Rotor::Rows`.
+  # pg's result as [Rotor::Rows].
   class PGRows < Rows
     @result: ::PG::Result
 
@@ -201,7 +201,7 @@ module Adapters
     def affected -> Int? = @result.affected
   end
 
-  # pg's row as a `Rotor::Row`, through its typed readers.
+  # pg's row as a [Rotor::Row], through its typed readers.
   class PGRow < Row
     @row: ::PG::Row
 

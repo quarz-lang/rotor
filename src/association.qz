@@ -1,7 +1,7 @@
 # A model's `has_many` association, as its getter gives it (`user.posts`):
-# the associated models once preloaded (`Rotor::Repo#preload`), and the
+# the associated models once preloaded ([Rotor::Repo#preload]), and the
 # query that finds them either way. There is no lazy loading: reading
-# the models of one not preloaded raises `Rotor::NotLoadedError`.
+# the models of one not preloaded raises [Rotor::NotLoadedError].
 #
 # ```
 # class HUser < Rotor::Model
@@ -48,7 +48,7 @@ class HasMany[T <: Model]
   # The associated model's class.
   def target -> Type[T] = @target
 
-  # Calls the block with each model; raises `Rotor::NotLoadedError` when
+  # Calls the block with each model; raises [Rotor::NotLoadedError] when
   # they were not preloaded.
   def each(&: (T) -> Void) -> Void
     models!.each { |m| yield @target.rebuild(m) }
@@ -68,9 +68,9 @@ class HasMany[T <: Model]
   # run (`repo.all(user.posts.query)`); through a join model, the
   # target's rows the join model's rows pair with this one, by a
   # subquery (`"id" IN (SELECT "tag_id" FROM "post_tags" WHERE "post_id"
-  # = $1)`: each once). Raises `Rotor::SchemaError` when the target has
+  # = $1)`: each once). Raises [Rotor::SchemaError] when the target has
   # no such column (or the join model no such `belongs_to`),
-  # `Rotor::MissingAttributeError` when the model's key is not set.
+  # [Rotor::MissingAttributeError] when the model's key is not set.
   def query -> Query[T]
     HasMany.foreign_key!(@target, @foreign_key, @owner, @name) unless @through
     k = @key_column || raise SchemaError.new("#{@owner} has no primary key, which `#{@name}` needs")
@@ -93,7 +93,7 @@ class HasMany[T <: Model]
 
   def to_s -> String = inspect
 
-  # Raises unless `target` has the column `fk` (an association's key,
+  # Raises unless [target] has the column `fk` (an association's key,
   # checked when a query or a preload uses it: the target's `table` may
   # run after the association's).
   def self.foreign_key!(target: Type[Model], fk: Symbol, owner: String, name: Symbol) -> Void
@@ -120,7 +120,7 @@ module Through
   # The keys of `owner`'s association `a`: the join model's `belongs_to`
   # the target (the one `a.source` names, else the one whose target is
   # `a.target`) and its `belongs_to` the owner (another). Raises
-  # `Rotor::SchemaError` naming both classes when the join model has none
+  # [Rotor::SchemaError] naming both classes when the join model has none
   # of them, or several where one was needed.
   def self.keys(owner: Type[Object], a: Association) -> ThroughKeys
     j = a.through || raise ArgumentError.new("#{owner.name}##{a.name} goes through no join model")

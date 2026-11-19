@@ -39,32 +39,32 @@ User.columns           # => [Rotor::Column(name: :id, sql: "bigint", ...), ...]
 User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
 ```
 
-- `table` runs its block at compile time on a `Rotor::Schema`, then
+- `table` runs its block at compile time on a [Rotor::Schema], then
   generates, for each column, a getter typed by the column (`T`, or `T?`
   for `null: true`), a getter for each association (Associations, below), the constructors (below), `with` (below), and the class methods `table_name`, `columns` (`Array[Rotor::Column]`),
   `primary_key` (`Symbol?`), `primary_keys` (`Array[Symbol]`) and
   `associations` (`Array[Rotor::Association]`).
 - `primary: true` on several columns makes a composite primary key, of
   those columns in the order declared (`primary_keys`; `primary_key`
-  raises `ArgumentError` for one): `repo.get(Reading, {sensor_id: "a",
+  raises [ArgumentError] for one): `repo.get(Reading, {sensor_id: "a",
   taken_at: t})` takes a Hash of every key column (one left out or not
-  in the key raises `ArgumentError`, as does a value that is not a
-  Hash); `update`, `touch`, `delete` and `Rotor::Statement.update` and
-  `delete` write `WHERE` on every key column; `Rotor::StaleError` names
-  the whole key; `Rotor::Schema.create` writes `PRIMARY KEY (a, b)`
-  (an identity only for a single `Int` key). Associations take a
+  in the key raises [ArgumentError], as does a value that is not a
+  Hash); `update`, `touch`, `delete` and [Rotor::Statement.update] and
+  `delete` write `WHERE` on every key column; [Rotor::StaleError] names
+  the whole key; [Rotor::Schema.create] writes `PRIMARY KEY (a, b)`
+  (an identity only for a single [Int] key). Associations take a
   single key: a model with a composite key has no `has_many` (refused
   when the program is compiled), and a `belongs_to`, a `through` or a
-  preload that targets one raises `Rotor::SchemaError` when used
+  preload that targets one raises [Rotor::SchemaError] when used
   (#63).
 - An array column (#66): `column :tags, Array[String]` (`text[]`) or
   `Array[Int]` (`bigint[]`). Its elements are non-null: a NULL element
-  read raises `ArgumentError`, unless the column says they may be nil
+  read raises [ArgumentError], unless the column says they may be nil
   (`Array[String?]`, `Array[Int?]`); `null: true` lets the array itself
   be NULL. `new` and `with` take it typed in full (`tags: Array[String]`,
   checked when the program is compiled: quarz-lang/quarz#401's typed
   keywords), and the getter gives it so. The column keeps its declared
-  element (`Rotor::Column#element`, `#nils`), as a `Type` value carries
+  element ([Rotor::Column#element], `#nils`), as a [Type] value carries
   no type arguments. No `default:`. In query blocks an array column
   is `nil?` / `== nil` (`IS NULL`), an order key, a `select`'s read and
   an `update`'s value (`{tags: xs}`, a captured array, checked by the
@@ -72,112 +72,112 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `tags.include?(x)`, `size`) are a later issue, refused for now.
 - A JSON document column (#93): `column :body, JSON::Value` (`jsonb`;
   a `json` column of a table rotor did not create is declared the same
-  way). It reads as a `JSON::Value`, parsed from the text the server
+  way). It reads as a [JSON::Value], parsed from the text the server
   sends (pg's `row.json`: every row read parses the document; a
-  `select` that leaves the column out, or a `String` column, does not),
+  `select` that leaves the column out, or a [String] column, does not),
   and is written as its compact text, a parameter left untyped so that
   it takes the column's type. With `null: true` it is `JSON::Value?`:
-  nil is SQL's NULL and `JSON::Value::Null` the document `null`, apart
-  in values, parameters and `== nil`. A number reads as an `Int`, an
-  exact `Integer` beyond an `Int`, or a `Float` for a fraction or an
+  nil is SQL's NULL and [JSON::Value::Null] the document `null`, apart
+  in values, parameters and `== nil`. A number reads as an [Int], an
+  exact [Integer] beyond an [Int], or a [Float] for a fraction or an
   exponent, while `jsonb` keeps any decimal exactly: a fraction read
-  and written back may change (a `Float` keeps about 17 digits); a
-  column that needs the document's exact text is declared `String`
+  and written back may change (a [Float] keeps about 17 digits); a
+  column that needs the document's exact text is declared [String]
   (item 5 of [Parameter types](#parameter-types)). In query blocks:
-  `==` and `!=` against a document (captured, or `JSON::Value::Null`),
+  `==` and `!=` against a document (captured, or [JSON::Value::Null]),
   nil or another column, `nil?`, an `update`'s value (an `if` of two
   documents is a `CASE` whose branches are cast `::jsonb`, which a
   `json` column takes too). On a `json` column, which has no equality,
   `==` and `!=` are an error from the server. On a `jsonb` column the
-  server's equality decides, not Quarz's `JSON::Value#==`: both ignore
+  server's equality decides, not Quarz's [JSON::Value#==]: both ignore
   the members' order and compare numbers by value (`1` and `1.0`,
   `100` and `1e2` are equal to both), but jsonb keeps a number's
-  decimal exactly where Quarz reads a `Float`: a stored
+  decimal exactly where Quarz reads a [Float]: a stored
   `0.1000000000000000001`, read as `0.1`, does not match `0.1` in a
   query, though Quarz finds the document read back equal to it. (On a
-  Quarz without the fix of quarz-lang/quarz#888, an `Int` beyond 2**53
-  also equals the `Float` nearest it, `9007199254740993` and
+  Quarz without the fix of quarz-lang/quarz#888, an [Int] beyond 2**53
+  also equals the [Float] nearest it, `9007199254740993` and
   `9007199254740992.0`, where jsonb finds them different; with the fix
   Quarz compares them exactly, as jsonb does.) A changeset's change tracking is
   Quarz's `==`, so putting such a document is no change
   (test/json_column_test.qz, `PAIRS`). Reading a
   member (`body["kind"]`) is a later issue; everything else is refused
-  (the document's own methods, an order by it: a `JSON::Value` has no
+  (the document's own methods, an order by it: a [JSON::Value] has no
   order in Quarz), or does not compile (`<`, `+`). A
-  changeset takes a `JSON::Value` (`put_change`, `cast`), not text to
+  changeset takes a [JSON::Value] (`put_change`, `cast`), not text to
   parse. No `default:`.
 - A decimal column (#102): `column :total, Decimal` (`numeric`, or
   `numeric(p, s)` with `precision:` and `scale:`, which the server then
   rounds a value to on assignment), read and written exactly as a
-  `Decimal` (pg's `row.decimal`, the scale kept); no `default:`. A
-  `numeric` column of a table rotor did not create may stay `Float`.
+  [Decimal] (pg's `row.decimal`, the scale kept); no `default:`. A
+  `numeric` column of a table rotor did not create may stay [Float].
   In query blocks: the comparisons and `nil?` (a nullable one with
   Quarz's nil), `include?` of a captured array (a `numeric[]`), an
-  order key, an `update`'s value, and `+`, `-`, `*` of a `Decimal` or an
-  `Int`, exact in `numeric` as in Quarz (the result's scale may
+  order key, an `update`'s value, and `+`, `-`, `*` of a [Decimal] or an
+  [Int], exact in `numeric` as in Quarz (the result's scale may
   differ: PostgreSQL's own rule, and a `numeric(p, s)` column rounds).
-  As in Quarz (quarz-lang/quarz#891), a `Decimal` compares with
-  `Decimal`s only: against an `Int` or a `Float` it is never equal
+  As in Quarz (quarz-lang/quarz#891), a [Decimal] compares with
+  [Decimal]s only: against an [Int] or a [Float] it is never equal
   (refused) or does not compile (`<`). `round` is refused for now;
   `div` takes keywords, which a query block cannot hold. A changeset
-  casts a form's text with `Decimal.parse?` (anything else, or past
-  `Decimal`'s limits, is invalid); its change tracking is
-  `Decimal#==`, by value, so putting `19.990` over `19.99` is no
+  casts a form's text with [Decimal.parse?] (anything else, or past
+  [Decimal]'s limits, is invalid); its change tracking is
+  [Decimal#==], by value, so putting `19.990` over `19.99` is no
   change and a scale alone is not written. A row holding NaN or an
   infinity in such a column cannot be read (pg's reader raises
-  `ArgumentError` naming it). SQL goes on where Quarz stops: `numeric`
-  holds more digits than a `Decimal` (10,000 digits, 1,000 of them a
+  [ArgumentError] naming it). SQL goes on where Quarz stops: `numeric`
+  holds more digits than a [Decimal] (10,000 digits, 1,000 of them a
   fraction), so an `update` computing in SQL (`total * total` of a
   value with 600 fraction digits) can write a value the model then
   cannot read. No `numeric[]` column yet.
 - A date column (#98): `column :day, Date` (`date`), read and written
-  as a `Date` (pg's `row.date`), in a composite key too; no `default:`,
-  as for `Time`. In query blocks: `==`, `!=`, `<`, `<=`, `>`, `>=` and
+  as a [Date] (pg's `row.date`), in a composite key too; no `default:`,
+  as for [Time]. In query blocks: `==`, `!=`, `<`, `<=`, `>`, `>=` and
   `nil?` (a nullable one with Quarz's nil, as other columns), `include?`
-  of a captured array of `Date`s (a `date[]`), an order key, an
+  of a captured array of [Date]s (a `date[]`), an order key, an
   `update`'s value, and the arithmetic of days: `day + 7` and `day - 7`
-  (SQL's `date + integer`, a `Date`; an `Int` that is not a literal is
-  cast `::integer`) and `day - other` (`date - date`, an `Int` of days).
-  There SQL and Quarz part: Quarz's `Date` raises `RangeError` past the
+  (SQL's `date + integer`, a [Date]; an [Int] that is not a literal is
+  cast `::integer`) and `day - other` (`date - date`, an [Int] of days).
+  There SQL and Quarz part: Quarz's [Date] raises [RangeError] past the
   year 9999, while PostgreSQL's `date + integer` goes on to the year
   5874897 and `::integer` raises past 2**31. So `where { day + n > x }`
   with a huge `n` is an error from the server (`22003`, "value … is
   out of range for type integer", as an `integer` column's overflow
   is, "Parameter types" 2), and **an
   `update { {day: day + 3_000_000} }` can write a date beyond 9999,
-  which the model then cannot read** (`ArgumentError` from pg's reader,
+  which the model then cannot read** ([ArgumentError] from pg's reader,
   naming the value). A date built in the block (`Date.new(...)`,
-  `Date.parse(...)`) is refused, as a `Time` is: a call that reads no
+  `Date.parse(...)`) is refused, as a [Time] is: a call that reads no
   column of the rows says so (#101); build the value before the block
   and capture the variable, or name a constant (`SINCE = Date.new(2026,
-  1, 1)`, then `day >= SINCE`): a constant's `Date`, and one
+  1, 1)`, then `day >= SINCE`): a constant's [Date], and one
   `static(...)` gives, reaches the block baked and is a parameter.
   The parts and the calendar (`year`, `month`, `wday`, `next_month`,
-  `next_year`, `strftime`) are refused for now. A `Time` and a `Date`
+  `next_year`, `strftime`) are refused for now. A [Time] and a [Date]
   are never equal in Quarz: comparing them is refused (`==`), or does
-  not compile (`<`); converting a `Time` to a date needs a time zone,
-  a later issue. A changeset casts a form's text with `Date.parse?`
+  not compile (`<`); converting a [Time] to a date needs a time zone,
+  a later issue. A changeset casts a form's text with [Date.parse?]
   (ISO `2026-11-20` only; anything else is invalid). There is no
-  `date[]` column type yet. A `date` column may stay `String` (item 5
+  `date[]` column type yet. A `date` column may stay [String] (item 5
   of [Parameter types](#parameter-types)).
 - A document column of a `data` type (#94): `column :prefs, Prefs,
   json: true` is a `jsonb` column whose getter gives a `Prefs`, written
-  as the value's JSON (`JSON.generate`) and read with
+  as the value's JSON ([JSON.generate]) and read with
   `JSON.decode[Prefs]`; `new` and `with` take a `Prefs`. The type is a
-  `data` type, whose fields are what `JSON.decode` takes (numbers,
-  strings, `Bool`, `Time`, `Symbol`, `Bytes`, other `data` types,
-  arrays, hashes, nullable fields); an `Array` or `Hash` is a field of
-  one (`data Log = (entries: Array[Entry])`), as a `Type` value in
+  `data` type, whose fields are what [JSON.decode] takes (numbers,
+  strings, [Bool], [Time], [Symbol], [Bytes], other `data` types,
+  arrays, hashes, nullable fields); an [Array] or [Hash] is a field of
+  one (`data Log = (entries: Array[Entry])`), as a [Type] value in
   `table` carries no type arguments (for the same reason a generic
   `data` type, `Box` or `Box[Int]`, is an error when the program is
-  compiled). The model holds the document as its `JSON::Value`: `to_h`
+  compiled). The model holds the document as its [JSON::Value]: `to_h`
   and `inspect` (and what reads them, a serializer) give the document,
-  not the `data` value, which the getter gives. A type `JSON.decode` cannot take
+  not the `data` value, which the getter gives. A type [JSON.decode] cannot take
   is an error when the program is compiled, reported at the `table`
   line and naming the column's generated decoder
   (`__rotor_document_<column>`) and the type; `json: false` is
   refused. A row whose document does not have the type's shape raises
-  `JSON::DecodeError` when it is loaded, naming the table, the column
+  [JSON::DecodeError] when it is loaded, naming the table, the column
   and where ("accounts.prefs: $: missing field \`theme\` of Prefs");
   a field with a default takes it for a missing key, and a
   key the type has no field for is ignored. Values round-trip
@@ -192,18 +192,18 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   The getter decodes the document on each read: the cost grows with
   the document (measured, 1,000 reads: a five-field value 5.6 µs a
   read interpreted, 1.9 µs compiled; a value holding 1,000 entries
-  1,004 µs and 463 µs; a `String` column 1.5 µs and 0.3 µs), so read
+  1,004 µs and 463 µs; a [String] column 1.5 µs and 0.3 µs), so read
   it once into a local. (A model will keep the decoded value when
   Quarz lets a generated `initialize` assign a generated field,
   quarz-lang/quarz#890; nothing in the API changes then.)
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`
-  associations, `Rotor::Schema.create` and `drop` included; without
+  associations, [Rotor::Schema.create] and `drop` included; without
   `schema:` the connection's `search_path` finds the table.
   `table_name` is the name alone (`"orders"`; `table_info.schema` is
   `"archive"`), and so are the names derived from it, a changeset's
-  constraint names (`orders_email_index`) and `Rotor::Schema.create`'s
+  constraint names (`orders_email_index`) and [Rotor::Schema.create]'s
   indexes, as PostgreSQL names indexes and constraints without the
   schema (#62).
 - A model holds its values in one hash (`to_h`) and remembers the
@@ -213,9 +213,9 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   checked when the program is compiled), and starts from the columns'
   defaults for the others: the columns given are changed, in the
   columns' order; reading a column that has no default and was never set
-  raises `Rotor::MissingAttributeError` (a `null: true` one reads nil).
+  raises [Rotor::MissingAttributeError] (a `null: true` one reads nil).
   `load(values)` checks each value against its column's type.
-- A model, and a class between it and `Rotor::Model`, does not write
+- A model, and a class between it and [Rotor::Model], does not write
   `initialize`: `table` generates the model's constructors
   (`def_initialize`, Quarz's docs/14 §5), the keyword one and the one
   `with` and the repository build through
@@ -231,23 +231,23 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `has_many`'s key in the other table, by default `user_id` from this
   model's name). Two models may name each other, in one file or two.
   A target without a `table` block compiles, and raises
-  `Rotor::SchemaError` when its metadata is read; a generic target's
+  [Rotor::SchemaError] when its metadata is read; a generic target's
   type arguments are not kept. Their getters and preloads are below
   (Associations).
-- Every model runs its own `table`. Its superclass is `Rotor::Model` or
+- Every model runs its own `table`. Its superclass is [Rotor::Model] or
   a class between them without a `table` (for methods models share):
   a model whose superclass has a table does not compile (at its
   `table`, when the superclass's ran first: in a cog it depends on, or
   earlier in its own cog's order), and a subclass that inherits a table without one of its own
-  raises `Rotor::SchemaError` at its first use ("Guest has no table: it
+  raises [Rotor::SchemaError] at its first use ("Guest has no table: it
   inherits User's; a model declares its own; single-table inheritance
   is not provided").
   The members `table` generates belong to the class it ran on (its
   `with` is typed so), and single-table inheritance (one table for a
   hierarchy, with a type column) is not provided.
-- A `Time` column takes no `default:` (the compiler cannot bake a time
+- A [Time] column takes no `default:` (the compiler cannot bake a time
   into the program).
-- A model without a `table` block raises `Rotor::SchemaError` at its
+- A model without a `table` block raises [Rotor::SchemaError] at its
   first use; a second `table` block in one class does not compile
   (`already has a class method table_name`).
 
@@ -279,20 +279,20 @@ v = repo.update(v)                    # saved: v.changed => []
   primary key may be given (`User.new(id: 1)`), but a model whose
   key was assigned is not updated or deleted by it (the row it named is
   not known).
-- So models are `Shareable` (Quarz's docs/03): one can be captured by
-  `Task.spawn`, sent on a `Channel` or held by an `Atom`, and read in
+- So models are [Shareable] (Quarz's docs/03): one can be captured by
+  [Task.spawn], sent on a [Channel] or held by an [Atom], and read in
   another task with no copy and no lock.
 - As in Ecto (structs and changesets) and Slick (case classes and
   `copy`), and unlike Active Record, a model is a value: what to save is
   the model given, not a state the object accumulated.
-- A model class is `Shareable`, so it cannot declare a `var` field (the
+- A model class is [Shareable], so it cannot declare a `var` field (the
   checker refuses it); a value derived from the columns is a method.
-- Queries and statements are `Shareable` too (below).
+- Queries and statements are [Shareable] too (below).
 
 ## Queries and statements
 
 A query is a value, built from blocks that are never run: each is
-received as its tree (Quarz's `Quoted`, docs/14 §6) and translated to
+received as its tree (Quarz's [Quoted], docs/14 §6) and translated to
 SQL when the query is built, with the values it captured as parameters.
 
 ```crystal
@@ -317,7 +317,7 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
 ```
 
 - **On a conflict** (#69): `Rotor::Statement.insert(m)` is a
-  `Rotor::Insert`, whose `on_conflict(:a, :b)` (the columns of a unique
+  [Rotor::Insert], whose `on_conflict(:a, :b)` (the columns of a unique
   index or of the key), `on_conflict(constraint: "name")`, or
   `on_conflict` alone (any, for `do_nothing` only) says which conflict;
   then `do_nothing`, or `do_update` with a block of the table's row
@@ -333,7 +333,7 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   sets what its block says only.
 - **Many rows at once** (#70): `repo.insert_all(models)` inserts the
   rows of models of one class in one statement (`VALUES (...), (...)`,
-  `Rotor::Statement.insert_all`), each with the columns any of them
+  [Rotor::Statement.insert_all]), each with the columns any of them
   sets (`DEFAULT` where a model does not), their timestamps set as
   `insert` sets them, one time for all; more rows than PostgreSQL's
   65535 parameters take go in several statements, in one transaction.
@@ -353,45 +353,45 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   `&&`, `||`, `!`; `nil?`; `if`/`?:` (`CASE WHEN`); `include?` on a
   captured array or a literal one of literals (`= ANY($1)`, the array
   one parameter whatever its length; an array literal with other
-  expressions is an `IN` list); `String#start_with?`,
+  expressions is an `IN` list); [String#start_with?],
   `end_with?` and `include?` of a string value (`LIKE`, escaped);
-  `Rotor::SQL.like`, `ilike`, `lower`, `upper` and `not_nil` (below);
-  `Rotor::SQL.now`, or `now` alone (below); literals and captured
-  values. Anything else raises `Rotor::UntranslatableError`
+  [Rotor::SQL.like], `ilike`, `lower`, `upper` and `not_nil` (below);
+  [Rotor::SQL.now], or `now` alone (below); literals and captured
+  values. Anything else raises [Rotor::UntranslatableError]
   when the query is built, naming the method and where it is.
-- The database's clock (#75): `Rotor::SQL.now`, or `now` alone, is
+- The database's clock (#75): [Rotor::SQL.now], or `now` alone, is
   SQL's `now()`, the transaction's start, the same for each statement
   in it (`where { expires_at < now }`, `update { {finished_at: now} }`);
   where a block runs in Quarz (`select`), it is Quarz's clock, in UTC.
   `now` alone is found in every query block, with a receiver or with
   parameters (`where { |s| s.expires_at < now }`), in any class's
-  method or a function (#105: a function `Rotor::Compare` gives through
+  method or a function (#105: a function [Rotor::Compare] gives through
   an `extension Kernel`, quarz-lang/quarz#885, which takes no `self`).
   It is not found outside query blocks, nor as `Kernel.now`. A model's
   column or method named `now`, and a local variable of that name, come
   first, as for any name (a local is Quarz's value, not the database's
   clock). A function of the program named `now` is ambiguous beside it,
   an error at the call (before #105 the row's helper was taken
-  silently): rename it, or write `Rotor::SQL.now`.
+  silently): rename it, or write [Rotor::SQL.now].
 - `==` and `!=` keep Quarz's meaning of nil. Against a value they are
   decided by the value: `IS NULL` for nil, `=` otherwise (which an index
   serves), so a query's SQL can differ by what it captured (pg's
   statement cache prepares each text once); `!=` of a nullable column
   and a value is `IS DISTINCT FROM`, which counts nil as different. Of
-  values whose classes never meet (`name == true`, `name != 1`; `Int`s
-  and `Float`s meet, nil is `IS NULL`) they are refused when the query
+  values whose classes never meet (`name == true`, `name != 1`; [Int]s
+  and [Float]s meet, nil is `IS NULL`) they are refused when the query
   is built, as always false (`!=`: always true), where PostgreSQL would
   refuse them or compare text (#41); where both can be nil, equal only
   then, the message says to write `x.nil? && y.nil?`. Between columns or
   expressions they are `=` and `<>` when neither side can be NULL (`age
-  == (flag ? x : y)` with captured `Int`s is `"age" = CASE ... END`,
+  == (flag ? x : y)` with captured [Int]s is `"age" = CASE ... END`,
   which an index serves), and `IS [NOT] DISTINCT FROM`, which no index
   serves, when one can: a column that admits NULL, or a `CASE` with a
   nil branch, without `else` or with such a column in a branch.
   `include?` finds nil with `IS NULL`.
 - Every form rotor translates keeps Quarz's meaning; the shapes it
   cannot are refused when the query is built
-  (`Rotor::UntranslatableError`, saying what to write instead). A
+  ([Rotor::UntranslatableError], saying what to write instead). A
   comparison of something that can be NULL (`email == e`, `=` in SQL;
   `ids.include?(email)`, `IN`) is NULL where Quarz has false, which is
   the same as false in a condition: a `where`, `filter` or join
@@ -409,25 +409,25 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   index can serve, is written out: `!email.nil? && email != e` is
   `NOT "email" IS NULL AND "email" <> $1` (where `email != e` alone is
   `IS DISTINCT FROM`), and `email.nil? || !(email == e)` translates.
-- `Int#/` floors and `Int#%` takes the divisor's sign, as in Quarz
+- [Int#/] floors and [Int#%] takes the divisor's sign, as in Quarz
   (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`); `age / 2.0`
-  is a `Float`'s division, and `%` with a `Float` is refused
-  (PostgreSQL has none). An `Int`'s `/` or `%` on what may be an
-  `Int` or a `Float` (`(if b then age else score end) / 2`) is
+  is a [Float]'s division, and `%` with a [Float] is refused
+  (PostgreSQL has none). An [Int]'s `/` or `%` on what may be an
+  [Int] or a [Float] (`(if b then age else score end) / 2`) is
   refused: which one SQL does would depend on the row. Its `+`, `-`
   and `*` are computed in double precision for both (see
   [Parameter types](#parameter-types)).
 - Parameters are typed by what they meet, and cast by their value's
   class where PostgreSQL would take another type than Quarz's (see
   [Parameter types](#parameter-types)). An `if` that is nil either way
-  is `NULL`; one whose condition is a captured value other than a `Bool`
+  is `NULL`; one whose condition is a captured value other than a [Bool]
   is the branch Quarz's truthiness takes, and so is an `&&` or `||`
   whose left operand is one (`s && admin` is `admin` for a non-nil `s`,
   `s` for a nil one), and `!` of one is `TRUE` or `FALSE`; any other
-  condition that is not a `Bool` (a column, an expression; of an `if`,
+  condition that is not a [Bool] (a column, an expression; of an `if`,
   `&&`, `||` or `!`) is tested as Quarz does, true unless nil: `email ?
   1 : 0` is `CASE WHEN "email" IS NOT NULL THEN 1 ELSE 0 END` (one that
-  may be a `Bool` or another value is refused, but for an `if`, whose
+  may be a [Bool] or another value is refused, but for an `if`, whose
   branches are each tested in the `CASE`: `(on ? label : level) ? 1 : 0`
   is `CASE WHEN CASE WHEN "on" THEN "label" IS NOT NULL ELSE "level" IS
   NOT NULL END THEN 1 ELSE 0 END`, so that they need no type in common,
@@ -436,26 +436,26 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   ("email" IS NOT NULL AND "email" = $1)`. An `update` checks against
   the column the class of its value, as Quarz gives it: a known value's,
   a column's, an expression's (an `if`'s branches, arithmetic by its
-  operands: `{qty: -f}` with a `Float`, `{qty: price}` and `{name: qty}`
+  operands: `{qty: -f}` with a [Float], `{qty: price}` and `{name: qty}`
   are refused, where PostgreSQL would round or write the number as text;
-  an `Int` into a `Float` column is accepted; a column that can be NULL
+  an [Int] into a [Float] column is accepted; a column that can be NULL
   is nil there, so `{name: email}` into a non-null column is refused, as
   a nil is: write `email || name`, #42). `a && b` and `a || b` are one
   of their operands in Quarz. As a condition they test their operands as
   above (`"email" IS NOT NULL OR "name" IS NOT NULL`); as a value (an
   `update`'s, an order key, an operand, a branch of an `if` that is not
-  a `Bool`) they are that operand: `email || name` is `COALESCE("email",
+  a [Bool]) they are that operand: `email || name` is `COALESCE("email",
   "name")`, `email && name` is `CASE WHEN "email" IS NOT NULL THEN
-  "name" ELSE NULL END`, and of two `Bool`s, `vip && admin` and `vip ||
+  "name" ELSE NULL END`, and of two [Bool]s, `vip && admin` and `vip ||
   admin` are `AND` and `OR`, or, when `vip` can be NULL, `CASE WHEN
   "vip" IS TRUE THEN "admin" ELSE "vip" END` and `CASE WHEN "vip" IS
   TRUE THEN TRUE ELSE "admin" END` (Quarz's `nil && x` is nil). One that
-  may be a `Bool` or another value (`admin && name`, `email || admin`)
+  may be a [Bool] or another value (`admin && name`, `email || admin`)
   is refused as a value, and so is one of other classes that do not meet
-  (`email || age`; `Int`s and `Float`s do), and an `if` of them as a
+  (`email || age`; [Int]s and [Float]s do), and an `if` of them as a
   value other than an `update`'s (`on ? level : label` as an order key,
   #43): no SQL type holds both (decided 2026-11-07, #36). Arithmetic of
-  two `integer`s, as PostgreSQL types `Int` literals and CASEs of them,
+  two `integer`s, as PostgreSQL types [Int] literals and CASEs of them,
   casts the left one to a bigint: `2000000000 * 2` is
   `2000000000::bigint * 2`, where an `integer` would overflow; `age + 1`
   stays as it is.
@@ -466,10 +466,10 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   array is `{}`, in which `= ANY` finds nothing. Items of a class the
   target's never equals are refused as `==` is: `[1, 2].include?(name)`
   is always false, and in a literal of expressions the item that cannot
-  be equal is named (#45). The items are of one class, or `Int`s and
-  `Float`s (sent as `Float`s); pg types an array of `Int`s, `Bool`s or
-  `Bytes`, the column decides the others' (`Float`s beside a column that
-  is not a `Float`'s are cast, `$1::double precision[]`, as a `Float`
+  be equal is named (#45). The items are of one class, or [Int]s and
+  [Float]s (sent as [Float]s); pg types an array of [Int]s, [Bool]s or
+  [Bytes], the column decides the others' ([Float]s beside a column that
+  is not a [Float]'s are cast, `$1::double precision[]`, as a [Float]
   is). An array literal with expressions (`[age, 3].include?(id)`) is an
   `IN (...)` list instead: its SQL is fixed by the literal's length in
   the source, so it makes no statement per length (the reason a captured
@@ -485,7 +485,7 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   refused), built outside the block (one built in it is refused), and
   unlocked. Where its column or the tested one can be NULL, the test is
   three-valued (`NOT IN` finds nothing beside a NULL), and `!` of it
-  refused. Outside a query's block `include?` raises `ArgumentError`: a
+  refused. Outside a query's block `include?` raises [ArgumentError]: a
   query is not a collection.
 - A query built in a block has `exists?` (#72), `EXISTS (SELECT 1
   ...)`, its block reading the outer row (a correlated subquery): `Post.where
@@ -497,12 +497,12 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   by the outer table (or its alias in a join). It is never NULL, so
   `!` of it is `NOT EXISTS`. A captured query's `exists?` is refused
   (build it in the block), and outside a block `exists?` raises
-  `ArgumentError`: run the query, `repo.exists?(query)`.
+  [ArgumentError]: run the query, `repo.exists?(query)`.
 - Comparing a nullable column: `where { age > 18 }` is allowed in query
   blocks, with `age` an `Int?`. Every query block is checked with `using
   Rotor::Compare` (Quarz's docs/01 §7), whose extensions give `nil` and
-  `Int`, `Float`, `String` and `Time` the comparisons `<`, `<=`, `>` and
-  `>=` with a nil (`Int` and `Float` mixed either way): nil compares
+  [Int], [Float], [String] and [Time] the comparisons `<`, `<=`, `>` and
+  `>=` with a nil ([Int] and [Float] mixed either way): nil compares
   false (Quarz's meaning in these blocks), which is what SQL's NULL does
   in a condition. With a literal nil (`level > nil`, or an `if`,
   `unless` or `?:` whose branches are literal nils, a missing `else`
@@ -519,9 +519,9 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   before it says it is not NULL: `where { !age.nil? &&
   Rotor::SQL.not_nil(age) + 1 > 18 }`; anywhere else it is refused.
 - Identifiers are always quoted. The SQL is PostgreSQL's
-  (`Rotor::Dialect`), the one dialect for now.
+  ([Rotor::Dialect]), the one dialect for now.
 - A block's translation is kept for the process, by its call site
-  (Quarz's `Quoted#site`) and the models of the query's tables: building
+  (Quarz's [Quoted#site]) and the models of the query's tables: building
   a query again where it was built before translates nothing, and fills
   in the parameters with the values captured this time. The SQL may
   depend on what kind of values the block captured (nil is `IS NULL`, an
@@ -540,27 +540,27 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
 - Times and durations (#76): `Time + Duration` and `Time - Duration`
   are `+`/`-` of an `interval` on the `timestamptz`
   (`where { created_at > at - 24.hours }`, `update { {due: due + span} }`):
-  a captured `Duration` is a parameter of its microseconds
+  a captured [Duration] is a parameter of its microseconds
   (`($1::bigint * interval '1 microsecond')`), `n.hours` and the like
   `n` times an interval of the unit, a day being 24 hours as a
-  `Duration`'s (not a calendar day), and a `Duration` computed of others
-  (`+`, `-`, `* n`) interval arithmetic. A `Duration` has no days or months,
+  [Duration]'s (not a calendar day), and a [Duration] computed of others
+  (`+`, `-`, `* n`) interval arithmetic. A [Duration] has no days or months,
   so the arithmetic is exact, as in Quarz. `Time - Time` and comparing
-  `Duration`s are refused.
-- Queries are `Shareable` (Quarz's docs/03): a query can be a constant
-  (`ACTIVE = User.where { active }`), be captured by `Task.spawn` or sent
-  on a `Channel`, and run in another task; so can a `Rotor::Statement`.
+  [Duration]s are refused.
+- Queries are [Shareable] (Quarz's docs/03): a query can be a constant
+  (`ACTIVE = User.where { active }`), be captured by [Task.spawn] or sent
+  on a [Channel], and run in another task; so can a [Rotor::Statement].
 - `select`'s block is evaluated in Quarz, not in SQL: the query fetches
   the columns the block reads (every column when it calls another
   method of the row or passes it on), and each row, loaded with those
   only, gives the block's value. Reading a column it did not fetch
-  raises `Rotor::NotLoadedError`. Counting is `count`, a query's shape.
+  raises [Rotor::NotLoadedError]. Counting is `count`, a query's shape.
 - Row locks (#68): `for_update`, `for_no_key_update`, `for_share` and
   `for_key_share` lock the query's rows until the transaction ends
   (`FOR UPDATE`...), each with `skip_locked: true` (rows another
   transaction locked are left out: a queue's workers each claim one,
   `Job.where { !done }.order { id }.limit(1).for_update(skip_locked:
-  true)`) or `nowait: true` (a locked row raises `PG::ServerError`,
+  true)`) or `nowait: true` (a locked row raises [PG::ServerError],
   SQLSTATE 55P03), not both. The clause is written last, whatever is
   refined after it. A lock is of a query's rows themselves: it is
   refused after `select`, `count` and `exists`, and `count`, `exists`,
@@ -576,33 +576,33 @@ PostgreSQL types a parameter by what it meets; rotor casts one where
 that type would not be Quarz's. What follows from it:
 
 1. **How a parameter is typed.** Beside a column it is left untyped and
-   takes the column's type (`"age" > $1`; a `Float` against a `Float`
+   takes the column's type (`"age" > $1`; a [Float] against a [Float]
    column too, which may be `real` or `numeric`: `r == 0.1` finds the
-   `real` 0.1). An `Int` that meets anything but a column (a literal, an
+   `real` 0.1). An [Int] that meets anything but a column (a literal, an
    expression: `age < big + 1`, where `$1` would be an `integer`) is
-   cast `::bigint`, and a `Float` that meets anything but a `Float`
+   cast `::bigint`, and a [Float] that meets anything but a [Float]
    column `::double precision` (`age > 25.5`, which would be read as a
    bigint). A parameter of any class is cast by its value's class
    (`::bigint`, `::double precision`, `::text`, `::boolean`,
    `::timestamptz`, `::bytea`) in a `CASE`'s branch or bare condition,
    under a unary minus (`age > -x`), beside another parameter (`lo <
    hi`, compared as text otherwise) and under `IS NULL` (a nil there as
-   `::text`). In arithmetic a `Float` parameter is double precision
-   against any column, and an `Int` one a bigint against any column but
-   an `Int`'s, so that `r + 0.1` on a `real` column is computed as Quarz
+   `::text`). In arithmetic a [Float] parameter is double precision
+   against any column, and an [Int] one a bigint against any column but
+   an [Int]'s, so that `r + 0.1` on a `real` column is computed as Quarz
    does on the value read. An array is one parameter: pg sends an array
-   of `Int`s as a `bigint[]` (of `Bool`s, `boolean[]`; of `Bytes`,
-   `bytea[]`), the column decides the others' type (`Float`s beside a
-   column that is not a `Float`'s are cast, `$1::double precision[]`).
+   of [Int]s as a `bigint[]` (of [Bool]s, `boolean[]`; of [Bytes],
+   `bytea[]`), the column decides the others' type ([Float]s beside a
+   column that is not a [Float]'s are cast, `$1::double precision[]`).
 2. **`integer` columns of tables rotor did not create.** rotor's
-   schema makes an `Int` column a `bigint`. A table made otherwise may
+   schema makes an [Int] column a `bigint`. A table made otherwise may
    have `integer` ones, and rotor, which does not know a column's SQL
    type, does not cast by it (decided 2026-11-07, #28). A parameter
    beside such a column is an `integer`: `n == x` is exact for an `x`
    in its range, and one beyond it is an error from the server
    (`value "3000000000" is out of range for type integer`) where Quarz
    finds no row; the column's arithmetic with such a parameter or an
-   `Int` literal is an `integer`'s, which overflows the same way
+   [Int] literal is an `integer`'s, which overflows the same way
    (`n * 100000000`). A parameter cast `::bigint` compares with the
    column through PostgreSQL's cross-type operators (`integer =
    bigint` is in the `integer_ops` btree family), exactly and served
@@ -611,8 +611,8 @@ that type would not be Quarz's. What follows from it:
    `xs.include?(n)` (`"n" = ANY($1)` of a `bigint[]`) both use an
    index on `n`; arithmetic with one is a `bigint`'s.
    (test/repo_test.qz checks these on such a table.)
-3. **A `Time` in a `CASE`'s branch** is cast `::timestamptz`, the type
-   rotor's schema gives a `Time` column. Against a `timestamp` (without
+3. **A [Time] in a `CASE`'s branch** is cast `::timestamptz`, the type
+   rotor's schema gives a [Time] column. Against a `timestamp` (without
    time zone) column of a table rotor did not create, PostgreSQL
    compares through its cross-type operators, reading the column's
    values in the session's time zone. Keep such columns `timestamptz`,
@@ -620,35 +620,35 @@ that type would not be Quarz's. What follows from it:
    (Decided 2026-11-06, #31: left untyped, the comparison fails, as it
    did before; cast `::timestamp`, `timestamptz` columns would have the
    mirror problem.)
-4. **Arithmetic on what may be an `Int` or a `Float`** (`(if b then
+4. **Arithmetic on what may be an [Int] or a [Float]** (`(if b then
    age else score end) + 1`): its `+`, `-` and `*` are computed in
    double precision for both, as SQL's `CASE` of a bigint and a double
-   precision is one, so an `Int` row differs from Quarz beyond 2**53
+   precision is one, so an [Int] row differs from Quarz beyond 2**53
    (#31); its `/` and `%` are refused (above).
 5. **`jsonb`, `json` and `date` columns of tables rotor did not
-   create** may be declared `String` (#64) (a `numeric` one `Float`,
-   or `Decimal`, #102), as well as a document
-   column `JSON::Value` (#93) or a `Date` (#98, above). pg reads every column as
+   create** may be declared [String] (#64) (a `numeric` one [Float],
+   or [Decimal], #102), as well as a document
+   column [JSON::Value] (#93) or a [Date] (#98, above). pg reads every column as
    text, and a parameter beside such a column takes the column's
    type: a model reads and writes the document as JSON text and the
    date as `YYYY-MM-DD` (pg asks the server for ISO dates), and the
    server checks the value (invalid JSON, or a date like `2026-02-30`,
-   raises `PG::ServerError`). A value reads back as the server writes
+   raises [PG::ServerError]). A value reads back as the server writes
    it, not as it was given: `jsonb` normalizes the document
    (`{"b":2,"a":1}` reads `{"a": 1, "b": 2}`), `json` keeps the text.
    The server compares them, not Quarz: on a `jsonb` column `body ==
    doc` is jsonb equality, where key order and spacing do not count
-   (Quarz's `String#==` would compare the text); a `json` column has
+   (Quarz's [String#==] would compare the text); a `json` column has
    no equality (an error from the server); `day >= "2026-11-01"` and
    `order { day }` compare dates. Some of what rotor writes for
-   `String`s does not fit them: a parameter it casts `::text` (in a
+   [String]s does not fit them: a parameter it casts `::text` (in a
    `CASE`'s branch, item 1: `day >= (b ? x : y)`) is an error from
    the server; `include?`, `start_with?` and `end_with?` (`LIKE`) are
    errors; `+` on a `jsonb` column is jsonb's `||`, which
    concatenates documents (merges objects, appends to arrays).
    (test/repo_test.qz checks these.)
 
-## Running them: `Rotor::Repo`
+## Running them: [Rotor::Repo]
 
 ```crystal
 PG::Pool.open("postgres://app@localhost/shop") do |pool|
@@ -671,20 +671,20 @@ PG::Pool.open("postgres://app@localhost/shop") do |pool|
 end
 ```
 
-- `repo.query`'s block reads a row with `Rotor::Row`'s typed readers:
+- `repo.query`'s block reads a row with [Rotor::Row]'s typed readers:
   `int`, `float`, `string`, `bool`, `time`, `bytes`, `json` (a `json`
-  or `jsonb` value as a `JSON::Value`), and for an array
+  or `jsonb` value as a [JSON::Value]), and for an array
   column `ints`, `floats`, `strings`, `bools`, `times` (its elements
   nil for NULL; one dimension), each with a `?` form that gives nil
-  for a NULL value; the others raise `ArgumentError` on one.
+  for a NULL value; the others raise [ArgumentError] on one.
 
 - `run(statement)` gives the rows changed and `run(query)` the rows;
   the others are conveniences over them.
 - `all(statement)` of a statement that says `returning` gives the rows
   it changed (#73), as models of the columns returned, loaded as
   `select` loads them (reading another raises
-  `Rotor::NotLoadedError`): a query's `update` and `delete` and a
-  model's `Rotor::Statement.update`, `.delete` and `.insert` are typed
+  [Rotor::NotLoadedError]): a query's `update` and `delete` and a
+  model's [Rotor::Statement.update], `.delete` and `.insert` are typed
   by their model (`Rotor::Changes[T]`). One without `returning` is
   refused: `run` gives its count.
 - Values are decoded by the columns' types through pg's readers, times
@@ -698,11 +698,11 @@ end
 - `insert`, `update` and `touch` give the model as saved, the one given
   unchanged (so a statement that fails leaves nothing to put back).
   `update`, `touch` and `delete` of a model whose row no longer exists
-  (the statement changed no row) raise `Rotor::StaleError`, naming the
+  (the statement changed no row) raise [Rotor::StaleError], naming the
   model and its key (Ecto's `StaleEntryError`). Transactions do not
   nest.
-- `Rotor::Adapter` (`query`, `transaction`) is the boundary to the
-  database; `Rotor::Adapters::PG` is pg's, over a pool or a connection.
+- [Rotor::Adapter] (`query`, `transaction`) is the boundary to the
+  database; [Rotor::Adapters::PG] is pg's, over a pool or a connection.
 
 ## Associations
 
@@ -728,8 +728,8 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 ```
 
 - No lazy loading (as in Ecto): a getter gives what was preloaded and
-  raises `Rotor::NotLoadedError` otherwise. `has_many`'s getter is a
-  `Rotor::HasMany[T]`, `Enumerable` over the preloaded models, whose
+  raises [Rotor::NotLoadedError] otherwise. `has_many`'s getter is a
+  `Rotor::HasMany[T]`, [Enumerable] over the preloaded models, whose
   `query` is the association as a query (refined and run as any) and
   `loaded?` says whether they are there; `belongs_to`'s gives the model
   or nil, nil for a NULL key even when not preloaded.
@@ -751,10 +751,10 @@ repo.all(User.where { age > 18 }.preload { posts })   # preloaded after loading
 - Preloaded associations are carried by `with`, `restore` and the
   repository's `update`, and are not in `to_h`; a `with` that changes a
   key forgets what was preloaded for it (reading it raises
-  `Rotor::NotLoadedError`): a `belongs_to`'s foreign key its
+  [Rotor::NotLoadedError]): a `belongs_to`'s foreign key its
   association, the primary key every `has_many` (loaded for the old
   key). Ecto keeps the stale structs. A target's key column
-  is checked when a query or a preload uses it (`Rotor::SchemaError`
+  is checked when a query or a preload uses it ([Rotor::SchemaError]
   when it has none), not at the statement: the target's `table` may run
   later.
 - An association's name may not be a column's or one of the model's
@@ -791,7 +791,7 @@ repo.insert(PostTag.new(post_id: post.id, tag_id: tag.id))   # writing: the join
   the association is first used (a query, a preload), when every
   `table` block has run, whatever their order (the owner names the join
   model, which names the owner); a join model without them raises
-  `Rotor::SchemaError` naming both classes.
+  [Rotor::SchemaError] naming both classes.
 - Read-only (Ecto's `has_many :through`): `post.tags.query` is the
   target's table alone, `WHERE "id" IN (SELECT "tag_id" FROM
   "post_tags" WHERE "post_id" = $1)`, refined and run as any query; a
@@ -823,7 +823,7 @@ User.query.join(Post) { |u, p| p.editor_id == u.id }
 - In a `for`, the inner query is a model's (`Post.where { ... }`, its
   `query`) or an association's (`u.posts.query`), with `where`, `filter`,
   `order` and `desc`, then a last `map` or another iterator: anything else
-  (a `limit`, a query in a variable) raises `Rotor::UntranslatableError`.
+  (a `limit`, a query in a variable) raises [Rotor::UntranslatableError].
   Orders come after the outer query's.
 - A `for`'s rows are made by its body as Quarz code, with the columns it
   reads: the body runs for each distinct outer row, building the inner
@@ -912,14 +912,14 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   `execute(sql, down:)` (one statement each). A default is a literal of the column's type,
   or `Rotor::SQL.raw("now()")`; `on_delete:` is `:cascade`, `:set_null`,
   `:restrict` or `:no_action`. Names are quoted; one that is empty,
-  holds a NUL or has 64 bytes or more is an `ArgumentError`, as is an
+  holds a NUL or has 64 bytes or more is an [ArgumentError], as is an
   index name made from the table and columns (`<table>_<columns>_index`)
   that would be: give `name:`. Each call records an operation
-  (`Rotor::Operation`) that `Rotor::Migrator.render` writes as SQL, the
+  ([Rotor::Operation]) that [Rotor::Migrator.render] writes as SQL, the
   one place the dialect is; `Migration.plan(:up)` lists them without
   running anything.
 - **A class.** `version` is checked where the class is compiled: a
-  positive `Int`, and either `change`, or `up` and `down`, not both.
+  positive [Int], and either `change`, or `up` and `down`, not both.
   The id `create_table` adds is `GENERATED BY DEFAULT AS IDENTITY`, so
   that a model inserted with its id (a fixture, a copy) is accepted.
 - **Reversal.** Forward, `change`'s calls run as they are made, so
@@ -927,7 +927,7 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   transaction) sees what the calls above it did. Rolling back records
   `change`'s calls without running them and runs their reverses in the
   reverse order. A call that cannot be reversed raises
-  `Rotor::IrreversibleMigration` before any of them runs: `drop_table`
+  [Rotor::IrreversibleMigration] before any of them runs: `drop_table`
   without its columns (give them in a block, as `create_table`'s),
   `remove_column` without its type, `change_column` without `from:`
   (`from: Rotor::Was.new(null: true, default:
@@ -940,7 +940,7 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
 - **Transactions.** Each migration runs in a transaction of its own
   with its row in the versions table (`schema_migrations`, or
   `table:`), which `migrate` creates when it is missing: a failure
-  raises `Rotor::MigrationError` (`version`, `name`, and the error it
+  raises [Rotor::MigrationError] (`version`, `name`, and the error it
   wraps as its `cause`, nil when the migrator refused it), its
   migration rolled back whole and those before it applied. A class that says `disable_transaction!` runs outside one
   (for `create_index ..., concurrently: true`), its row written after
@@ -950,9 +950,9 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   `pg_advisory_lock` on it (its key from the versions table's name),
   and run every migration there: two processes migrating at once run
   one after the other, and the second finds nothing pending.
-  `lock_timeout:` bounds the wait (a `PG::ServerError` when it runs
+  `lock_timeout:` bounds the wait (a [PG::ServerError] when it runs
   out), the session's own `lock_timeout` restored after it. The
-  repository must not be inside a transaction (`ArgumentError`). When
+  repository must not be inside a transaction ([ArgumentError]). When
   the run ends, a transaction a migration left open is rolled back and
   the lock released; a connection taken from a pool has its settings
   reset (`RESET ALL`), so that a migration's `SET` does not reach the
@@ -961,7 +961,7 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   and those a migration's `SET` made, stay). A migration with
   `disable_transaction!` that leaves a transaction open fails.
 - **Order.** `migrate` refuses a pending version lower than the
-  highest one applied (`Rotor::MigrationError`, before running
+  highest one applied ([Rotor::MigrationError], before running
   anything) unless `allow_out_of_order: true`. Ecto and Rails run it;
   here the versions are timestamps, and an older one appearing late is
   usually a merge that went wrong, to look at before it runs. Applied
@@ -971,11 +971,11 @@ migrator.status                     # => [[20261107120000, "CreateUsers", :up], 
   `== 20261107120000 CreateUsers: migrating` and `... migrated (0.12s)`
   (`reverting`, `reverted`); nothing is printed without it.
 
-### Tables from the models: `Rotor::Schema.create`
+### Tables from the models: [Rotor::Schema.create]
 
 For a development database or a test's, `Rotor::Schema.create(repo,
 [User, Post])` creates the models' tables from their `table` blocks in
-one transaction: the columns (an `Int` primary key as an identity, the
+one transaction: the columns (an [Int] primary key as an identity, the
 models' defaults as the columns'), an index on each `belongs_to`
 column, and its foreign key, added once every table exists (so models
 may refer to each other in a cycle). `if_not_exists: true` leaves the
@@ -988,7 +988,7 @@ database goes through migrations.
 Input from outside (a form, JSON) goes through a changeset, as in
 Ecto: an immutable `Rotor::Changeset[M]` of the changes cast to the
 columns' types, validated, and carrying the errors meant for a user.
-The repository saves it and answers with a `Rotor::Outcome` rather
+The repository saves it and answers with a [Rotor::Outcome] rather
 than raising for what the user got wrong. Models keep working as they
 are (`with`, `repo.insert(model)`); a changeset is the layer for
 untrusted input.
@@ -1025,26 +1025,26 @@ end
 ```
 
 - **Casting.** `Changeset.cast(model_or_class, params, permitted)`
-  reads the `permitted` fields of `params` (by `String` name, as form
-  and JSON input give them, or by `Symbol`) and ignores the rest. Each
-  value is cast to its column's type: strings to `Int`, `Float`,
-  `Bool` (`true`/`false`, `1`/`0`, `on`/`off`) and `Time` (ISO 8601;
+  reads the `permitted` fields of `params` (by [String] name, as form
+  and JSON input give them, or by [Symbol]) and ignores the rest. Each
+  value is cast to its column's type: strings to [Int], [Float],
+  [Bool] (`true`/`false`, `1`/`0`, `on`/`off`) and [Time] (ISO 8601;
   without an offset, as an HTML `datetime-local` gives it, UTC);
-  `Bytes` only from `Bytes`. A value that does not cast (letters for a
-  number, digits other than ASCII, an `Int` beyond 64 bits, an
-  infinite `Float`, a time `Time` cannot hold) is an `is invalid`
+  [Bytes] only from [Bytes]. A value that does not cast (letters for a
+  number, digits other than ASCII, an [Int] beyond 64 bits, an
+  infinite [Float], a time [Time] cannot hold) is an `is invalid`
   error (`validation: :cast`) and no change. A string of spaces or
-  nothing is nil, except for a `String` column that admits no NULL;
+  nothing is nil, except for a [String] column that admits no NULL;
   nil for a column that admits none is `can't be blank`. A value equal to the
   model's is no change. A permitted name that is not a column raises
-  `Rotor::SchemaError`.
+  [Rotor::SchemaError].
 - **Validations** each give a new changeset: `validate_required`,
   `validate_length(min:, max:, is:)` (characters as a reader sees
   them: grapheme clusters, as Ecto counts),
   `validate_format`, `validate_number(min:, max:, greater_than:,
   less_than:)`, `validate_inclusion`, `validate_exclusion`,
   `validate_acceptance` (a checkbox parameter; skipped for
-  `Changeset.change`, which has no input), `validate_confirmation`
+  [Rotor::Changeset.change], which has no input), `validate_confirmation`
   (cast as the field is), `validate(field) { |model| message? }` and
   `validate_change(field, name) { ... }`, whose block gets the model with the changes applied
   (typed: read the field through its getter) and runs only when the
@@ -1052,7 +1052,7 @@ end
   fields. A field without a change is skipped, except by
   `validate_required`, which looks at the value the model would have;
   a field `validate_required` found blank is skipped by the others.
-- **Errors.** `errors` are `Rotor::FieldError`s: `field` (`:base` for
+- **Errors.** `errors` are [Rotor::FieldError]s: `field` (`:base` for
   the whole), `message` as a template (`should be at most %{count}
   character(s)`), `validation` (`:required`, `:length`, ...), and `meta`
   (`count`, `kind`, ...), so that an application can translate by
@@ -1061,8 +1061,8 @@ end
 - **Saving.** `repo.insert(cs)`, `repo.update(cs)` and
   `repo.delete(cs)` give `Rotor::Outcome::Ok(model)` or
   `Rotor::Outcome::Invalid(changeset)`; `insert!` and `update!` raise
-  `Rotor::InvalidChangeset` (its `errors`, and the changeset as a
-  `Shareable`: the typed one comes from `insert`'s outcome). Timestamps
+  [Rotor::InvalidChangeset] (its `errors`, and the changeset as a
+  [Shareable]: the typed one comes from `insert`'s outcome). Timestamps
   are set as for a model. `apply` gives the model with the changes
   (nil when invalid), `apply!` raises.
 - **Constraints.** `unique_constraint(field, name:)` (by default
@@ -1083,13 +1083,13 @@ end
   model having them preloaded. Two saves of one model at once may both
   insert a pair: a unique index on the join table's two keys stops
   that.
-- A changeset is `Shareable`: params keep scalar values only (an array
+- A changeset is [Shareable]: params keep scalar values only (an array
   or a hash given for a field is a cast error).
 - A column declared `redact: true` shows as `**redacted**` in the
   model's `inspect` and in the changeset's `inspect` and `to_h` (the
   model's `to_h` keeps it: the repository writes through it). A
   violation of a constraint the changeset does not declare stays a
-  `PG::ServerError`, whose detail the server writes with the value
+  [PG::ServerError], whose detail the server writes with the value
   (`Key (token)=(...) already exists`): declare the constraints of such
   columns.
 - Not yet: changesets of associations (`cast_assoc`), embedded schemas.
@@ -1110,6 +1110,6 @@ committed file, and CI and users get pg's git main.
 ## Tests
 
 `quarz test` (and `--release`, `--doc`). The repository's tests run on
-PostgreSQL through pg's `PG::Testing`: `PG_TEST_URL` when it is set,
+PostgreSQL through pg's [PG::Testing]: `PG_TEST_URL` when it is set,
 else a throwaway cluster where PostgreSQL's server programs are
 installed; with neither they are omitted.

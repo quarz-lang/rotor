@@ -19,7 +19,7 @@ module SQL
   # the condition before it says it is not NULL (`where { !age.nil? &&
   # Rotor::SQL.not_nil(age) > 18 }`), translated as the column itself (a
   # block cannot narrow a getter's result: `age` is an `Int?` there).
-  # Refused where nothing says so. Raises `ArgumentError` on nil.
+  # Refused where nothing says so. Raises [ArgumentError] on nil.
   #
   # ```
   # age: Int? = 3
@@ -34,7 +34,7 @@ module SQL
   # default that is not a literal (`Rotor::SQL.raw("now()")`).
   data Raw = (sql: String)
 
-  # `sql` as is: a `Rotor::SQL::Raw`.
+  # `sql` as is: a [Rotor::SQL::Raw].
   #
   # ```
   # Rotor::SQL.raw("now()").sql  # => "now()"
@@ -43,7 +43,7 @@ module SQL
 
   # Now, in UTC: SQL's `now()`, the transaction's start, the same for
   # every statement in it; outside a query, Quarz's clock. A query's
-  # block with a receiver may write `now` alone (`Rotor::Compare`); a
+  # block with a receiver may write `now` alone ([Rotor::Compare]); a
   # block with parameters writes this one.
   #
   # ```
