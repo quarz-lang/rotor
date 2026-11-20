@@ -797,6 +797,94 @@ class QueryTest < Test::Case
     assert_equal("`left_join` of Log, which has no primary key: a missing row is told by it", e3.message)
   end
 
+  # A level one above `n`, from one call site: its translation is kept
+  # for each kind of `n`, nil or not.
+  def next_level(n: Int?) -> Rotor::Query[Gauge] = Gauge.where { |g| g.level == n&.+(1) }
+
+  def some[V](v: V) -> V? = v
+
+  # rotor#108: `recv&.m(...)`, nil where `recv` is, the call otherwise.
+  def test_safe_navigation
+    # On what SQL may find NULL, the forms that are NULL where it is:
+    # arithmetic, `-@`, a unit, `Time + Duration`, an ordering, `LIKE`.
+    check(Gauge.order { |g| g.level&.+(1) }, "#{GS} ORDER BY \"level\" + 1", [])
+    check(Gauge.where { |g| g.level&.*(2) > 3 }, "#{GS} WHERE \"level\" * 2 > 3", [])
+    check(Gauge.order { |g| g.ratio&.-@ }, "#{GS} ORDER BY - \"ratio\"", [])
+    check(Gauge.order { |g| g.level&.hours }, "#{GS} ORDER BY (\"level\" * interval '1 hour')", [])
+    check(Gauge.where { |g| g.at&.+(1.hour) < now }, "#{GS} WHERE \"at\" + (1 * interval '1 hour') < now()", [])
+    check(Gauge.where { |g| g.label&.start_with?("a") || false }, "#{GS} WHERE \"label\" LIKE $1 OR FALSE", ["a%"])
+    # An ordering and `LIKE` stay three-valued: kept as a condition,
+    # refused as a value and under `!`.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { |g| g.level&.<(3) } }
+    assert_match(/\A`g.level&.<\(3\)` as a value is NULL, not false, in SQL when `g.level` is NULL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| !g.label&.start_with?("a") } }
+    assert_match(/\A`!g.label&.start_with\?\("a"\)` is three-valued in SQL when `g.label` can be NULL/, e.message)
+    # An argument that can be NULL (`Rotor::Compare`'s ordering, false
+    # in Quarz where only `cap` is nil): three-valued as `level < cap` is
+    # between the columns, a condition and not a value.
+    check(Gauge.where { |g| g.level&.<(g.cap) || false }, "#{GS} WHERE \"level\" < \"cap\" OR FALSE", [])
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { |g| g.level&.<(g.cap) } }
+    assert_match(/\A`g.level&.<\(g.cap\)` as a value is NULL, not false, in SQL when `g.level` is NULL/, e.message)
+    # A `String`'s `+`: SQL's `||`, NULL where either side is.
+    check(Gauge.order { |g| g.label&.+("x") }, "#{GS} ORDER BY \"label\" || $1", ["x"])
+    # Refused whatever the receiver: forms that are not NULL where it is
+    # (`IS NULL`, `IS [NOT] DISTINCT FROM`, a subquery).
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| g.label&.nil? || false } }
+    assert_match(/\A`g.label&.nil\?` \(`&.` with `nil\?`, whose SQL is not NULL where the receiver is\) cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| g.level&.==(1) || false } }
+    assert_match(/\A`g.level&.==\(1\)` \(`&.` with `==`/, e.message)
+    sub = some(Person.where { admin }.select { id })
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| sub&.include?(g.id) || false } }
+    assert_match(/\A`sub&.include\?\(g.id\)` \(`&.` with `include\?`/, e.message)
+    # Another method on what SQL may find NULL: refused.
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| g.label&.size == 1 } }
+    assert_match(/\A`g.label&.size` \(`&.` with `size` on what SQL may find NULL\) cannot be translated to SQL/, e.message)
+    # A LEFT JOIN's row: its column, NULL where the row is missing.
+    pe = "SELECT \"x0\".\"id\", \"x0\".\"title\", \"x1\".\"id\", \"x1\".\"post_id\", \"x1\".\"kind\" FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\""
+    q = XPost.query.left_join { x_events }
+    check(q.where { |p, e| e&.kind == "x" }, "#{pe} WHERE \"x1\".\"kind\" = $1", ["x"])
+    check(q.where { |p, e| e&.kind != "x" }, "#{pe} WHERE \"x1\".\"kind\" IS DISTINCT FROM $1", ["x"])
+    check(q.where { |p, e| e&.kind == p.title }, "#{pe} WHERE \"x1\".\"kind\" IS NOT DISTINCT FROM \"x0\".\"title\"", [])
+    check(q.order { |p, e| e&.kind }, "#{pe} ORDER BY \"x1\".\"kind\"", [])
+    # Nullable whatever the table says (`post_id` is not null there): an
+    # equality with another column is `IS NOT DISTINCT FROM`, and `!` of
+    # an ordering is refused.
+    check(q.where { |p, e| e&.post_id == p.id }, "#{pe} WHERE \"x1\".\"post_id\" IS NOT DISTINCT FROM \"x0\".\"id\"", [])
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| !(e&.post_id > 1 || false) } }
+    assert_match(/three-valued in SQL when `e&.post_id` can be NULL/, e.message)
+    # Only a column's getter on it: anything else on a row that may be
+    # missing is refused.
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.inspect == "x" } }
+    assert_match(/\A`e&.inspect` \(`&.` on a LEFT JOIN's row, with other than a column's getter\) cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.hash == 1 } }
+    assert_match(/\A`e&.hash` \(`&.` on a LEFT JOIN's row, with other than a column's getter\)/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.kind&.start_with?("a") == true } }
+    assert_match(/when `e&.kind` is NULL .*: compare in Quarz \(select the column\), or test `\(e&.kind\).nil\?` explicitly\z/, e.message)
+    # A receiver the translation decides (a captured value, a captured
+    # model): NULL when nil, the call when not, kept for each kind.
+    check(next_level(nil), "#{GS} WHERE \"level\" IS NULL", [])
+    check(next_level(2), "#{GS} WHERE \"level\" IS NOT DISTINCT FROM $1::bigint + 1", [2])
+    check(next_level(nil), "#{GS} WHERE \"level\" IS NULL", [])
+    who = some(Person.load({id: 1, age: 30}))
+    check(Person.where { |p| p.age == who&.age }, "#{COLS} WHERE \"age\" = $1", [30])
+    xs = some([1, 2])
+    check(Gauge.where { |g| xs&.include?(g.id) || false }, "#{GS} WHERE \"id\" = ANY($1) OR FALSE", [[1, 2]])
+  end
+
+  # rotor#108: a `select`, computed in Quarz, loads the columns a `&.`
+  # reads (its receiver, arguments and block), as a call's: the
+  # translator walks it like one.
+  def test_safe_navigation_reads
+    s = Gauge.select { |g| g.label&.size }
+    check(s, "SELECT \"label\" FROM \"gauges\"", [])
+    assert(s.load({label: nil}).nil?)
+    assert_equal(2, s.load({label: "ab"}))
+    check(Gauge.select { |g| g.level&.+(g.cap || 0) }, "SELECT \"level\", \"cap\" FROM \"gauges\"", [])
+    # A LEFT JOIN's row's column: that column (and the keys).
+    q = XPost.query.left_join { x_events }
+    check(q.select { |p, e| e&.kind }, "SELECT \"x0\".\"id\", \"x1\".\"id\", \"x1\".\"kind\" FROM \"x_posts\" AS \"x0\" LEFT JOIN \"x_events\" AS \"x1\" ON \"x1\".\"post_id\" = \"x0\".\"id\"", [])
+  end
+
   # rotor#77: the right row read without a condition saying it is there
   # does not compile (checked by `quarz` on the PATH, or by $QUARZ).
   def test_left_join_row_unnarrowed

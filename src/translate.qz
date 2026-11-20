@@ -194,10 +194,7 @@ class Translator
     in Meta::Expr::HashLit(_, l) then l
     in Meta::Expr::Interp(_, l) then l
     in Meta::Expr::Block(_, _, l) then l
-    # (Temporary, rotor#108: a node this `case` does not name yet,
-    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
-    # goes when it is named, and the `case` is exhaustive again.)
-    else 0
+    in Meta::Expr::SafeCall(_, _, _, _, _, l) then l
     end
   end
 
@@ -297,10 +294,7 @@ class Translator
     in Meta::Expr::HashLit(_, line) then untranslatable("a hash literal", line)
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
     in Meta::Expr::Block(_, _, line) then untranslatable("a block", line)
-    # (Temporary, rotor#108: a node this `case` does not name yet,
-    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
-    # goes when it is named, and the `case` is exhaustive again.)
-    else untranslatable("`&.`", 0)
+    in Meta::Expr::SafeCall(recv, m, ms, args, block, line) then safe_call(e, recv, m, ms, args, block, line)
     end
   end
 
@@ -388,9 +382,13 @@ class Translator
 
   # The error for `e`, which is NULL where `what` is, used as a value.
   def self.value_error(e: Meta::Expr, what: String, file: String) -> String
-    advice = column_named?(e, what) ? "compare in Quarz (select the column), or test `#{what}.nil?` explicitly" : nil_advice(what)
+    advice = column_named?(e, what) ? "compare in Quarz (select the column), or test `#{nil_test(what)}` explicitly" : nil_advice(what)
     "`#{show(e)}` as a value is NULL, not false, in SQL when `#{what}` is NULL (#{file}:#{line_of(e)}): #{advice}"
   end
+
+  # `what.nil?`, `what` parenthesized when it is a `&.` call
+  # (`(e&.kind).nil?`).
+  def self.nil_test(what: String) -> String = what.include?("&.") ? "(#{what}).nil?" : "#{what}.nil?"
 
   # What to do when what can be NULL is not a column, which [nil?]
   # tells nothing of in SQL: a nil captured or written.
@@ -409,6 +407,13 @@ class Translator
       else nil
       end
       (recv ? [recv.as(Meta::Expr)] : Array[Meta::Expr].new).concat(args).any? { |x| column_named?(x, what) }
+    # (A LEFT JOIN's row's column, `e&.kind`.)
+    in Meta::Expr::SafeCall(recv, _, _, args, _, _)
+      case recv
+      in Meta::Expr::SelfRef(_, _) | Meta::Expr::Arg(_, _, _) then return true if args.empty? && show(e) == what
+      else nil
+      end
+      ([recv] + args).any? { |x| column_named?(x, what) }
     in Meta::Expr::And(l, r, _) then column_named?(l, what) || column_named?(r, what)
     in Meta::Expr::Or(l, r, _) then column_named?(l, what) || column_named?(r, what)
     in Meta::Expr::Not(x, _, _) then column_named?(x, what)
@@ -452,10 +457,9 @@ class Translator
     in Meta::Expr::HashLit(_, _) then "{...}"
     in Meta::Expr::Interp(_, _) then "\"...\""
     in Meta::Expr::Block(_, _, _) then "{ ... }"
-    # (Temporary, rotor#108: a node this `case` does not name yet,
-    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
-    # goes when it is named, and the `case` is exhaustive again.)
-    else "..."
+    in Meta::Expr::SafeCall(recv, m, _, args, block, _)
+      list = args.empty? ? "" : "(#{args.map { |x| show(x) }.join(", ")})"
+      "#{shown_operand(recv)}&.#{m.name}#{list}#{block ? " { ... }" : ""}"
     end
   end
 
@@ -547,16 +551,13 @@ class Translator
   private def collect(e: Meta::Expr, scopes: Array[Scope]) -> Array[[Int, Symbol?]]
     case e
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.extension.nil?
-      s = row_in(recv, scopes)
-      if s >= 0 && @sources[s].model <= m.owner
-        t = @sources[s].table
-        if c = t.columns.find { |x| x.name == m.name }
-          return read(s, c.name)
-        end
-        if a = t.associations.find { |x| x.name == m.name }
-          k = a.kind == :has_many ? t.primary_key : a.foreign_key
-          return k ? read(s, k) : none
-        end
+      if found = getter_reads(recv, m, scopes)
+        return found
+      end
+    # (A LEFT JOIN's row's getter, `e&.kind`: the column.)
+    in Meta::Expr::SafeCall(recv, m, _, [], nil, _) if !m.singleton && m.extension.nil?
+      if found = getter_reads(recv, m, scopes)
+        return found
       end
     else
       nil
@@ -585,13 +586,29 @@ class Translator
       rows: Array[Int?] = []
       params.each { |_| rows = rows + [nil] }
       all(body, scopes + [Scope.new(params, rows, false, nil, false)])
-    # (Temporary, rotor#108: a node this `case` does not name yet,
-    # `Meta::Expr::SafeCall` once quarz-lang/quarz#912 is in; the arm
-    # goes when it is named, and the `case` is exhaustive again.)
-    # (Nothing read: safe only because `translate` refuses the node
-    # first.)
-    else none
+    # (What a `Call` of the same parts reads: a `select` computes it in
+    # Quarz, from the columns read here.)
+    in Meta::Expr::SafeCall(recv, _, _, args, block, _)
+      found = all(args + [recv], scopes)
+      block ? found + collect(block, scopes) : found
     end
+  end
+
+  # What the getter `m` called on `recv` reads, when `recv` is a row of
+  # `scopes` and `m` its column's or association's getter: the column,
+  # or the association's key. Nil for anything else.
+  private def getter_reads(recv: Meta::Expr, m: Meta::MethodRef, scopes: Array[Scope]) -> Array[[Int, Symbol?]]?
+    s = row_in(recv, scopes)
+    return nil unless s >= 0 && @sources[s].model <= m.owner
+    t = @sources[s].table
+    if c = t.columns.find { |x| x.name == m.name }
+      return read(s, c.name)
+    end
+    if a = t.associations.find { |x| x.name == m.name }
+      k = a.kind == :has_many ? t.primary_key : a.foreign_key
+      return k ? read(s, k) : none
+    end
+    nil
   end
 
   # The whole row `e` is, if it is one (`row_in`).
@@ -824,14 +841,14 @@ class Translator
   # The error for `!x`, where `what` can be NULL.
   private def negation_error(x: Meta::Expr, what: String, line: Int) -> String
     column = Translator.column_named?(x, what)
-    test = column ? "test `#{what}.nil?` explicitly" : Translator.nil_advice(what)
+    test = column ? "test `#{Translator.nil_test(what)}` explicitly" : Translator.nil_advice(what)
     advice = case x
              in Meta::Expr::Call(Meta::Expr => l, m, _, [r], nil, _) if m.name == :== && !m.singleton
                "write `#{Translator.shown_operand(l)} != #{Translator.shown_operand(r)}` (Quarz's meaning, `IS DISTINCT FROM`), or #{test}"
              in Meta::Expr::Call(Meta::Expr => l, m, _, [r], nil, _) if m.name == :!= && !m.singleton
                "write `#{Translator.shown_operand(l)} == #{Translator.shown_operand(r)}`, or #{test}"
              else
-               column ? "#{test} (`#{what}.nil? || !#{Translator.shown_operand(x)}`)" : test
+               column ? "#{test} (`#{Translator.nil_test(what)} || !#{Translator.shown_operand(x)}`)" : test
              end
     "`!#{Translator.shown_operand(x)}` is three-valued in SQL when `#{what}` can be NULL (#{@file}:#{line}): #{advice}"
   end
@@ -1094,6 +1111,63 @@ class Translator
     unknown_call(label, whole, line)
   end
 
+  # `recv&.m(args)` (`e`, rotor#108): nil where `recv` is, the call
+  # otherwise. A receiver the translation decides (a captured value, or
+  # a captured model's column, guarded) is NULL when nil and the call
+  # when not; a row is the call, a LEFT JOIN's row's column NULL where
+  # the row is missing. A receiver SQL may find NULL (a nullable column,
+  # an expression of one) takes only the forms that are NULL where it
+  # is (`propagates?`), the result nullable. Refused whatever the
+  # receiver: `nil?` (`IS NULL`), `==` and `!=` (`IS [NOT] DISTINCT
+  # FROM`, `IS NULL`), a query's `include?` and `exists?` (a subquery).
+  private def safe_call(e: Meta::Expr, recv: Meta::Expr, m: Meta::MethodRef, ms: Array[Meta::MethodRef], args: Array[Meta::Expr], block: Meta::Expr?, line: Int) -> Sql
+    shown = Translator.show(e)
+    if m.owner == Query || (!m.singleton && (m.name == :nil? || m.name == :== || m.name == :!=))
+      untranslatable("`#{shown}` (`&.` with `#{m.name}`, whose SQL is not NULL where the receiver is)", line)
+    end
+    null = Sql.new([Piece::Text.new("NULL")], ATOM, nil, nil, true, nil, shown)
+    case recv
+    in Meta::Expr::Capture(index, _, _)
+      return look(Bind::Capture.new(index)).nil? ? null : call(recv, m, ms, args, block, line)
+    else nil
+    end
+    if (i = row_of(recv)) >= 0
+      return call(recv, m, ms, args, block, line) unless @sources[i].left
+      # (A LEFT JOIN's row: only a column's getter, the column NULL where
+      # the row is missing, so nullable whatever the table says, and
+      # `nulls` naming the call. Anything else on the row is refused
+      # here, not left to what `call` makes of a row that may be
+      # missing.)
+      found = column_of(Meta::Expr::Call.new(recv, m, ms, args, block, line))
+      unless found
+        untranslatable("`#{shown}` (`&.` on a LEFT JOIN's row, with other than a column's getter)", line)
+      end
+      c = found[1].with(null: true)
+      return Sql.new([Piece::Column.new(found[0], c.name)], ATOM, c, nil, false, nil, shown)
+    end
+    r = value(recv)
+    if r.known
+      return r.value.nil? ? null : call(recv, m, ms, args, block, line)
+    end
+    return call(recv, m, ms, args, block, line) unless nullable?(r)
+    unless Translator.propagates?(m, args.size)
+      untranslatable("`#{shown}` (`&.` with `#{m.name}` on what SQL may find NULL)", line)
+    end
+    s = call(recv, m, ms, args, block, line)
+    Sql.new(s.pieces, s.prec, s.column, s.value, s.known, s.bind, s.nulls || Translator.show(recv), s.tri, s.narrow, s.test)
+  end
+
+  # Whether the SQL of `m` (taking `arity` arguments) is NULL where its
+  # receiver is: arithmetic (a [String]'s `+` is SQL's `||`), `-@`,
+  # `n.hours` and the like, the orderings, and `LIKE`. (An argument
+  # that can be NULL is left to `call`: an ordering of it stays
+  # three-valued, as between two columns.)
+  def self.propagates?(m: Meta::MethodRef, arity: Int) -> Bool
+    return !m.singleton && (m.name == :"-@" || ((m.owner == Int || m.owner == Float) && UNITS.has_key?(m.name))) if arity == 0
+    return false unless arity == 1 && !m.singleton
+    ARITHMETIC.has_key?(m.name) || [:<, :<=, :>, :>=].include?(m.name) || (m.owner == String && [:include?, :start_with?, :end_with?].include?(m.name))
+  end
+
   # Whether `e` reads a captured variable of the block.
   def self.captures?(e: Meta::Expr) -> Bool
     case e
@@ -1108,6 +1182,8 @@ class Translator
     in Meta::Expr::HashLit(ps, _) then ps.any? { |pr| Translator.captures?(pr[0]) || Translator.captures?(pr[1]) }
     in Meta::Expr::Interp(xs, _) then xs.any? { |x| Translator.captures?(x) }
     in Meta::Expr::Block(_, body, _) then body.any? { |x| Translator.captures?(x) }
+    in Meta::Expr::SafeCall(recv, _, _, args, block, _)
+      Translator.captures?(recv) || args.any? { |a| Translator.captures?(a) } || (block ? Translator.captures?(block) : false)
     else false
     end
   end
@@ -1324,6 +1400,12 @@ class Translator
       classes(recv)
     in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :start_with?, :end_with?, :exists?].include?(m.name)) && column_of(e).nil?
       [Bool]
+    # (The call's, and nil where the receiver can be: as translated.)
+    in Meta::Expr::SafeCall(recv, m, ms, args, block, line)
+      s = sql(e)
+      return [Nil] if s.known && s.value.nil?
+      ks = classes(Meta::Expr::Call.new(recv, m, ms, args, block, line))
+      s.nulls ? Translator.union(ks, [Nil]) : ks
     else
       s = sql(e)
       if s.known
@@ -1818,7 +1900,7 @@ class Translator
         raise ArgumentError.new("Rotor::SQL.not_nil of nil (#{@file}:#{line})")
       end
       if what = a.nulls
-        raise UntranslatableError.new("`Rotor::SQL.not_nil(#{Translator.show(args[0])})` where `#{what}` can be NULL (#{@file}:#{line}): write `!#{what}.nil? &&` before it")
+        raise UntranslatableError.new("`Rotor::SQL.not_nil(#{Translator.show(args[0])})` where `#{what}` can be NULL (#{@file}:#{line}): write `!#{Translator.nil_test(what)} &&` before it")
       end
       a
     in ["lower", 1] | ["upper", 1]
