@@ -1,0 +1,15 @@
+# A program `quarz check` refuses (test/decimal_column_test.qz,
+# rotor#114): its own `Decimal`s that a one-argument literal call
+# reaches through a default are ambiguous with the standard module's
+# `Decimal(text: String)` and `Decimal(n: Int)`, so such a call never
+# reaches rotor's translator as the program's. It is checked against
+# this checkout of rotor.
+[cog]
+name = "decimal_ambiguous"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

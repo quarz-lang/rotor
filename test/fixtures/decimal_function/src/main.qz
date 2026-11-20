@@ -6,15 +6,24 @@ class Bill < Rotor::Model
   end
 end
 
-# The program's own `Decimal`, of other parameters than the standard
-# module's `Decimal(text: String)` and `Decimal(n: Int)`: both are
-# quoted alike (quarz-lang/quarz#951).
+# The program's own `Decimal`s, of other parameters than the standard
+# module's `Decimal(text: String)` and `Decimal(n: Int)`, all quoted
+# alike (quarz-lang/quarz#951): none is chosen for a one-argument
+# `String` or `Int` literal, the standard module's being the most
+# specific (wider types, a rest parameter). Those a literal call reaches
+# through defaults are ambiguous with the standard module's
+# (test/fixtures/decimal_ambiguous).
 extension Kernel
   def self.Decimal(x: String | Symbol) -> String = "mine #{x}"
+  def self.Decimal(text: String, *rest: Int) -> String = "mine rest #{text}"
+  def self.Decimal(n: Int, *rest: Int) -> String = "mine rest #{n}"
+  def self.Decimal(x: Object) -> String = "mine object"
 end
 
-# A `String` literal: the standard module's, the most specific.
+# A `String` literal and an `Int` literal: the standard module's, the
+# most specific.
 puts Bill.where { |b| b.total >= Decimal("2.50") }.to_sql.inspect
+puts Bill.where { |b| b.total >= Decimal(3) }.to_sql.inspect
 # A `Symbol` literal: the program's, refused as any function.
 begin
   Bill.where { |b| b.name == Decimal(:a) }
