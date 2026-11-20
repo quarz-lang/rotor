@@ -409,6 +409,19 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   index can serve, is written out: `!email.nil? && email != e` is
   `NOT "email" IS NULL AND "email" <> $1` (where `email != e` alone is
   `IS DISTINCT FROM`), and `email.nil? || !(email == e)` translates.
+- `x&.m(...)` (#108) is nil where `x` is, the call otherwise. On a
+  nullable column or an expression of one it takes the forms whose SQL
+  is NULL where `x` is, and is nullable: arithmetic (`level&.+(1)` is
+  `"level" + 1`), `-@`, `n.hours` and the like, `Time + Duration`, the
+  orderings (`<`, `<=`, `>`, `>=`) and `LIKE` (`include?`,
+  `start_with?`, `end_with?`). The orderings and `LIKE` stay
+  three-valued, as on a column: a condition (`label&.start_with?("a")
+  || false`), refused as a value and under `!`. A captured value's or
+  a captured model's is decided when the query is built: NULL for nil,
+  the call otherwise. A LEFT JOIN's row's column (`c&.code`) is the
+  column, NULL where nothing matched. Refused whatever `x` is: `nil?`,
+  `==` and `!=` (their SQL, `IS NULL` and `IS [NOT] DISTINCT FROM`, is
+  not NULL where `x` is), and a query's `include?` and `exists?`.
 - [Int#/] floors and [Int#%] takes the divisor's sign, as in Quarz
   (`floor(a::numeric / b)::bigint`, `(a % b + b) % b`); `age / 2.0`
   is a [Float]'s division, and `%` with a [Float] is refused
@@ -843,9 +856,9 @@ User.query.join(Post) { |u, p| p.editor_id == u.id }
   it read the right row where a condition says it is there, as Quarz
   narrows a nilable value: `c.nil?` (the anti-join,
   `where { |o, c| c.nil? }`), `!c.nil? && c.code == "X"`,
-  `c.nil? ? "" : c.code` and `if c then ... end` (a `CASE`); `&.`
-  cannot be quoted (quarz-lang/quarz#886), and reading `c.code` without
-  such a condition does not compile. `select`, `order`, `count` and
+  `c.nil? ? "" : c.code` and `if c then ... end` (a `CASE`), or
+  through `&.`: `c&.code`, NULL where nothing matched. Reading
+  `c.code` without such a condition does not compile. `select`, `order`, `count` and
   `exists` work on it; `update` and `delete` do not (of one table's
   query). `preload` stays the way to load an association's models: a
   `has_many`'s LEFT JOIN repeats the row for each of them.
