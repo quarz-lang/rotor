@@ -1692,37 +1692,61 @@ class Translator
     end
   end
 
-  # Whether `m` is one of the built-in functions `Date(text)` and
-  # `Time(text)` (quarz-lang/quarz#932): `Kernel`'s, neither a module
-  # method nor an extension's. Another function of the name (a
-  # program's `def Date`, an extension's) is not, and is refused as any
-  # function is.
-  def self.conversion?(m: Meta::MethodRef) -> Bool = m.owner == Kernel && !m.singleton && m.extension.nil? && (m.name == :Date || m.name == :Time)
+  # Whether `m` is one of the conversion functions: the built-in
+  # `Date(text)` and `Time(text)` (quarz-lang/quarz#932), `Kernel`'s and
+  # neither a module method nor an extension's; or `Decimal(text)` and
+  # `Decimal(n)`, which the standard module `decimal`'s top-level
+  # `extension Kernel` gives (quarz-lang/quarz#942), quoted as a module
+  # method of `Kernel` whose `extension` is nil (a top-level one's).
+  # Another function of the name (a program's `def Date`, a scoped
+  # extension's) is not, and is refused as any function is; one of the
+  # program's own top-level extensions with `Decimal`'s shape and other
+  # parameters is told apart by its argument ([conversion] takes a
+  # [String] or, for `Decimal`, an [Int], and refuses anything else).
+  def self.conversion?(m: Meta::MethodRef) -> Bool
+    return false unless m.owner == Kernel && m.extension.nil?
+    m.singleton ? m.name == :Decimal : (m.name == :Date || m.name == :Time)
+  end
 
-  # `Date(text)` or `Time(text)` (`whole`, the function `m`): the value
-  # `Date.parse` or `Time.parse` reads from the text, a parameter, read
-  # when the query is built (its [ArgumentError] raised then). The text
-  # is a literal (read once, as the literal is the same at every build)
-  # or a captured [String] (read at each build: the translation keeps
-  # the capture, [Rotor::Bind::Parsed], never the value it read).
-  # Anything else is refused: a column's text, which SQL's cast would
-  # read by rules of its own, with a message saying so.
+  # `Date(text)`, `Time(text)`, `Decimal(text)` or `Decimal(n)` (`whole`,
+  # the function `m`): the value `Date.parse`, `Time.parse`,
+  # `Decimal.parse` or `Decimal.of` reads from its argument, a parameter,
+  # read when the query is built (its [ArgumentError] raised then). The
+  # argument is a literal (read once, as the literal is the same at every
+  # build), a [String], or an [Int] for `Decimal`; or, for `Date` and
+  # `Time`, a captured [String] (read at each build: the translation
+  # keeps the capture, [Rotor::Bind::Parsed], never the value it read).
+  # Anything else is refused: a column's value, which SQL's cast would
+  # read by rules of its own, and `Decimal` of a capture, with messages
+  # saying what to write.
   private def conversion(m: Meta::MethodRef, arg: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     case arg
     in Meta::Expr::Lit(String => text, _) then return param(Binds.parse(m.name, text), line)
-    in Meta::Expr::Capture(index, _, _)
+    in Meta::Expr::Lit(Int => n, _) if m.name == :Decimal then return param(Binds.parse(m.name, n), line)
+    in Meta::Expr::Capture(index, name, _)
+      # (`Decimal` of a capture: not taken. Whether the call is the
+      # standard module's `Decimal` or a program's own function of that
+      # name taking the capture's type depends on that type, which the
+      # tree does not carry: both are quoted alike, README.)
+      if m.name == :Decimal
+        raise UntranslatableError.new("`#{Translator.show(whole)}` of a captured value cannot be translated to SQL (#{@file}:#{line}): build the `Decimal` before the block and capture it (`d = Decimal(#{name})`, then `d` in the block)")
+      end
       capture = Bind::Capture.new(index)
-      case look(capture)
-      in String => text
+      v = look(capture)
+      if v.is_a?(String)
         b = Bind::Parsed.new(capture, m.name)
-        v = bindable(Binds.parse(m.name, text), line)
-        return Sql.new([Piece::Bound.new(b)], ATOM, nil, v, true, b)
-      else nil
+        parsed = bindable(Binds.parse(m.name, v.as(Object)), line)
+        return Sql.new([Piece::Bound.new(b)], ATOM, nil, parsed, true, b)
       end
     else nil
     end
     if reads(arg).any? { |r| r.nil? || !r.empty? }
-      raise UntranslatableError.new("`#{Translator.show(whole)}` reads a column's text, which SQL would read by rules of its own, not `#{m.name}.parse`'s (#{@file}:#{line}): compare in Quarz (select the column), or keep the value in a `#{m.name == :Date ? "date" : "timestamptz"}` column")
+      sql = case m.name
+            in :Date then "date"
+            in :Time then "timestamptz"
+            else "numeric"
+            end
+      raise UntranslatableError.new("`#{Translator.show(whole)}` reads a column's value, which SQL would read by rules of its own, not `#{m.name}(...)`'s (#{@file}:#{line}): compare in Quarz (select the column), or keep the value in a `#{sql}` column")
     end
     unknown_call(Translator.label(m), whole, line)
   end

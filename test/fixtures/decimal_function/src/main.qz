@@ -1,0 +1,23 @@
+class Bill < Rotor::Model
+  table "bills" do
+    column :id, Int, primary: true
+    column :total, Decimal
+    column :name, String
+  end
+end
+
+# The program's own `Decimal`, of other parameters than the standard
+# module's `Decimal(text: String)` and `Decimal(n: Int)`: both are
+# quoted alike (quarz-lang/quarz#951).
+extension Kernel
+  def self.Decimal(x: String | Symbol) -> String = "mine #{x}"
+end
+
+# A `String` literal: the standard module's, the most specific.
+puts Bill.where { |b| b.total >= Decimal("2.50") }.to_sql.inspect
+# A `Symbol` literal: the program's, refused as any function.
+begin
+  Bill.where { |b| b.name == Decimal(:a) }
+rescue Rotor::UntranslatableError => e
+  puts e.message
+end

@@ -118,7 +118,17 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   differ: PostgreSQL's own rule, and a `numeric(p, s)` column rounds).
   As in Quarz (quarz-lang/quarz#891), a [Decimal] compares with
   [Decimal]s only: against an [Int] or a [Float] it is never equal
-  (refused) or does not compile (`<`). `round` is refused for now;
+  (refused) or does not compile (`<`). A decimal written in the block
+  is `Decimal("19.99")` or `Decimal(3)` of a literal (#114, the
+  standard module's functions, quarz-lang/quarz#942): `Decimal.parse`'s
+  or `Decimal.of`'s value, read when the query is built (an invalid text
+  raises its [ArgumentError] then), a parameter. Of a captured value it
+  is refused for now: whether the call is the standard module's
+  `Decimal` or a program's own function of that name depends on the
+  capture's type, which a quoted block does not carry
+  (quarz-lang/quarz#951); build the [Decimal] before the block and
+  capture it. A column's value is refused, as for `Date(...)`.
+  `round` is refused for now;
   `div` takes keywords, which a query block cannot hold. A changeset
   casts a form's text with [Decimal.parse?] (anything else, or past
   [Decimal]'s limits, is invalid); its change tracking is
