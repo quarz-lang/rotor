@@ -199,13 +199,17 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `update`'s value; comparing it, reading a field (`prefs.theme`),
   ordering by it and a value of the type in an `update` are refused
   for now (give a model its value with `with` and `repo.update` it).
-  The getter decodes the document on each read: the cost grows with
-  the document (measured, 1,000 reads: a five-field value 5.6 µs a
-  read interpreted, 1.9 µs compiled; a value holding 1,000 entries
-  1,004 µs and 463 µs; a [String] column 1.5 µs and 0.3 µs), so read
-  it once into a local. (A model will keep the decoded value when
-  Quarz lets a generated `initialize` assign a generated field,
-  quarz-lang/quarz#890; nothing in the API changes then.)
+  **Each model made decodes its document columns once**, into fields
+  the getters read (quarz-lang/quarz#890): a model loaded from a row,
+  and a copy made with `with`, `with_values` (a `repo.update`'s
+  timestamps), `restore`, `clear_changes` or a changeset's `apply`,
+  whether its documents changed or not. A read then costs what a
+  [String] column's does. Measured in compiled code (instructions at
+  -O2): a read of a five-field value 4.7k (a [String] column's 1.7k;
+  24k when the getter decoded each read), of a value holding 1,000
+  entries 4.9k (6.0M); a `with` of another column 56k and 6.0M (33k
+  for both when nothing was kept). Carrying an unchanged document's
+  value over to the copy is #116.
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`

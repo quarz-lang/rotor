@@ -39,6 +39,27 @@ class Kept < Rotor::Model
   end
 end
 
+# A class between `Rotor::Model` and a model, which declares no table,
+# and a model of it with two document columns of different classes, one
+# nullable (the kept fields are the model's own).
+class DocBase < Rotor::Model
+  def label -> String = "base"
+end
+
+data Theme = (name: String)
+
+class BasedDoc < DocBase
+  table "based_docs" do
+    column :id, Int, primary: true
+    column :prefs, Prefs, json: true
+    column :theme, Theme, json: true, null: true
+  end
+end
+
+# A subclass of a model with a table: refused, as for any model.
+class SubDoc < DocAccount
+end
+
 class DocumentColumnTextTest < Test::Case
   COLS = "SELECT \"id\", \"prefs\", \"log\" FROM \"doc_accounts\""
 
@@ -84,6 +105,52 @@ class DocumentColumnTextTest < Test::Case
     assert_equal("doc_accounts.prefs: $: missing field `theme` of Prefs", e.message)
     e = assert_raise(JSON::DecodeError) { DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: JSON.parse("{\"entries\": [{\"at\": \"1\"}]}")}) }
     assert_match(/\Adoc_accounts\.log: \$\.entries\[0\]/, e.message)
+  end
+
+  # The document is decoded once, when the model is made, into a field
+  # the getter reads; a model made from another (`with`, `restore`, a
+  # changeset's apply) decodes its own documents, so each holds the
+  # values of its documents, changed or not.
+  def test_kept_value
+    a = DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: JSON.parse("{\"entries\": [{\"at\": 1, \"note\": null}]}")})
+    assert_equal(Prefs.new("x"), a.prefs)
+    assert_equal(a.prefs, a.prefs)
+    assert_equal(Ledger.new([Entry.new(1, nil)]), a.log)
+    # `with` of another column: the same values.
+    b = a.with(id: 2)
+    assert_equal(Prefs.new("x"), b.prefs)
+    assert_equal(Ledger.new([Entry.new(1, nil)]), b.log)
+    # `with` of a document column: its new value, the other's kept.
+    c = a.with(prefs: Prefs.new("y", 5))
+    assert_equal(Prefs.new("y", 5), c.prefs)
+    assert_equal(Prefs.new("x"), a.prefs)
+    assert_equal(Ledger.new([Entry.new(1, nil)]), c.log)
+    d = a.with(log: nil)
+    assert_nil(d.log)
+    # `restore` of a checkpoint, `clear_changes`, a changeset's apply.
+    assert_equal(Prefs.new("y", 5), a.restore(c.checkpoint).prefs)
+    assert_equal(Prefs.new("y", 5), c.clear_changes.prefs)
+    applied = Rotor::Changeset.change(a).put_change(:log, Ledger.new([])).apply || raise "invalid"
+    assert_equal(Ledger.new([]), applied.log)
+    assert_equal(Prefs.new("x"), applied.prefs)
+    # A partial load without the column: not loaded, as any column.
+    part = DocAccount.load_partial({id: 1})
+    e = assert_raise(Rotor::NotLoadedError) { part.prefs }
+    assert_equal("DocAccount#prefs was not loaded: the query fetched id", e.message)
+  end
+
+  # Two document columns of different classes on a model of a class
+  # without a table; a model's subclass is refused as ever.
+  def test_kept_values_of_a_model_below_a_base
+    m = BasedDoc.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), theme: JSON.parse("{\"name\": \"t\"}")})
+    assert_equal(Prefs.new("x"), m.prefs)
+    assert_equal(Theme.new("t"), m.theme)
+    assert_equal("base", m.label)
+    n = m.with(theme: nil)
+    assert_nil(n.theme)
+    assert_equal(Prefs.new("x"), n.prefs)
+    e = assert_raise(Rotor::SchemaError) { SubDoc.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: nil}) }
+    assert_equal("SubDoc has no table: it inherits DocAccount's; a model declares its own; single-table inheritance is not provided", e.message)
   end
 
   # `m.with(every: v).every == v` for every kind of field.

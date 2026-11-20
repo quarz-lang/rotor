@@ -315,7 +315,6 @@ class Model
       c = column_of(k)
       check_value(c, v)
       attrs = attrs.put(k, Model.stored_value(c, v))
-      check_document(c, attrs[k]?)
       changed = changed + [k] unless changed.include?(k)
       if l = loaded
         loaded = l + [k] unless l.include?(k)
@@ -348,7 +347,6 @@ class Model
     values.each_pair do |k, v|
       c = column_of(k)
       attrs = attrs.put(k, Model.stored_value(c, v))
-      check_document(c, attrs[k]?)
     end
     restore(Checkpoint.new(attrs, [], partial ? values.keys : nil, @assocs))
   end
@@ -492,6 +490,12 @@ class Model
   def no_document(column: Symbol, document: JSON::Value) -> Object
     raise ArgumentError.new("#{self.class.name} has no document column `#{column}`")
   end
+
+  # :nodoc:
+  # The value the column `name` holds, as stored (a document column's
+  # `JSON::Value`), without the checks of a getter: what a document
+  # column's kept field is decoded from.
+  private def raw_document(name: Symbol) -> Value? = @attrs[name]?
 
   # :nodoc:
   # Raises `JSON::DecodeError` unless `d`, the value of column `c`, is
