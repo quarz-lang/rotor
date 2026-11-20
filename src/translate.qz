@@ -1746,7 +1746,10 @@ class Translator
             in :Time then "timestamptz"
             else "numeric"
             end
-      raise UntranslatableError.new("`#{Translator.show(whole)}` reads a column's value, which SQL would read by rules of its own, not `#{m.name}(...)`'s (#{@file}:#{line}): compare in Quarz (select the column), or keep the value in a `#{sql}` column")
+      # (A text for `Date` and `Time`; a text or a number for `Decimal`.)
+      what = m.name == :Decimal ? "value" : "text"
+      reader = m.name == :Decimal ? "`Decimal(...)`'s" : "`#{m.name}.parse`'s"
+      raise UntranslatableError.new("`#{Translator.show(whole)}` reads a column's #{what}, which SQL would read by rules of its own, not #{reader} (#{@file}:#{line}): compare in Quarz (select the column), or keep the value in a `#{sql}` column")
     end
     unknown_call(Translator.label(m), whole, line)
   end
