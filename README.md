@@ -146,12 +146,22 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   is, "Parameter types" 2), and **an
   `update { {day: day + 3_000_000} }` can write a date beyond 9999,
   which the model then cannot read** ([ArgumentError] from pg's reader,
-  naming the value). A date built in the block (`Date.new(...)`,
-  `Date.parse(...)`) is refused, as a [Time] is: a call that reads no
-  column of the rows says so (#101); build the value before the block
-  and capture the variable, or name a constant (`SINCE = Date.new(2026,
-  1, 1)`, then `day >= SINCE`): a constant's [Date], and one
-  `static(...)` gives, reaches the block baked and is a parameter.
+  naming the value). A date written in the block is `Date(text)` (#114,
+  quarz-lang/quarz#932), and a time `Time(text)`, of a literal or a
+  captured [String]: `where { |s| s.day >= Date("2026-01-01") }` and
+  `Date(since)` read the text when the query is built, with
+  `Date.parse`'s or `Time.parse`'s meaning and its [ArgumentError]
+  then, and the value is a parameter (a captured text is read again at
+  each build, never kept with the translation). A column's text is
+  refused (`Date(s.site)`: SQL's cast reads other forms than
+  `Date.parse`; compare in Quarz, or keep the value in a `date`
+  column). Other ways of building one (`Date.new(...)`,
+  `Date.parse(...)`, `Time.utc(...)`) are refused: a call that reads no
+  column of the rows says so (#101), and names `Date("2026-01-01")`
+  where it is the shorter form; or build the value before the block and
+  capture the variable, or name a constant (`SINCE = Date.new(2026, 1,
+  1)`, then `day >= SINCE`): a constant's [Date], and one `static(...)`
+  gives, reaches the block baked and is a parameter.
   The parts and the calendar (`year`, `month`, `wday`, `next_month`,
   `next_year`, `strftime`) are refused for now. A [Time] and a [Date]
   are never equal in Quarz: comparing them is refused (`==`), or does

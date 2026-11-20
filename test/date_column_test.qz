@@ -11,6 +11,10 @@ class DayStat < Rotor::Model
   end
 end
 
+# A function of the built-in's name and another signature (rotor#114):
+# not `Kernel`'s, so a block refuses it as any function.
+def Date(day: Int) -> Date = Date.new(2026, 1, day)
+
 # Constants a block names: baked into it (quarz-lang/quarz#897).
 DATE_SINCE = Date.new(2026, 1, 1)
 class DateConsts
@@ -86,8 +90,8 @@ class DateColumnTextTest < Test::Case
     # A date built in the block from no column: refused, saying what to
     # write (rotor#101); one built from a column keeps the general
     # message.
-    assert_equal("`Date.new(2026, 1, 1)` does not read the row: build it before the block and capture the variable (`value = Date.new(2026, 1, 1)`, then `value` in the block), or name a constant (`SINCE = Date.new(2026, 1, 1)`)", refusal { DayStat.where { |x| x.day >= Date.new(2026, 1, 1) }.to_sql[0] })
-    assert_equal("`Date.parse(\"2026-01-01\")` does not read the row: build it before the block and capture the variable (`value = Date.parse(\"2026-01-01\")`, then `value` in the block), or name a constant (`SINCE = Date.parse(\"2026-01-01\")`)", refusal { DayStat.where { |x| x.day >= Date.parse("2026-01-01") }.to_sql[0] })
+    assert_equal("`Date.new(2026, 1, 1)` does not read the row: write `Date(\"2026-01-01\")`, read when the query is built, or build it before the block and capture the variable (`value = Date.new(2026, 1, 1)`, then `value` in the block), or name a constant (`SINCE = Date.new(2026, 1, 1)`)", refusal { DayStat.where { |x| x.day >= Date.new(2026, 1, 1) }.to_sql[0] })
+    assert_equal("`Date.parse(\"2026-01-01\")` does not read the row: write `Date(\"2026-01-01\")`, read when the query is built, or build it before the block and capture the variable (`value = Date.parse(\"2026-01-01\")`, then `value` in the block), or name a constant (`SINCE = Date.parse(\"2026-01-01\")`)", refusal { DayStat.where { |x| x.day >= Date.parse("2026-01-01") }.to_sql[0] })
     assert_equal("`Time.utc(2026, 1, 1)` does not read the row: build it before the block and capture the variable (`value = Time.utc(2026, 1, 1)`, then `value` in the block), or name a constant (`SINCE = Time.utc(2026, 1, 1)`)", refusal { DayStat.where { |x| x.seen_at.nil? || Rotor::SQL.not_nil(x.seen_at) >= Time.utc(2026, 1, 1) }.to_sql[0] })
     y = 2026
     # (Of a captured variable: no constant offered, which could not name
@@ -98,6 +102,49 @@ class DateColumnTextTest < Test::Case
     assert_equal("#{COLS} WHERE \"day\" >= $1", DayStat.where { |x| x.day >= DATE_SINCE }.to_sql[0])
     expected: Array[Object?] = [Date.new(2026, 1, 1)]
     assert_equal(expected, DayStat.where { |x| x.day >= DateConsts::SINCE }.to_sql[1])
+  end
+
+  # A date of a captured text, from one call site.
+  def since(text: String) -> Rotor::Query[DayStat] = DayStat.where { |x| x.day >= Date(text) }
+
+  # rotor#114: `Date(text)` and `Time(text)` (quarz-lang/quarz#932) in a
+  # block: the value read from a literal or a captured `String` when the
+  # query is built, a parameter; `Date.parse`'s or `Time.parse`'s error
+  # then. A column's text is refused.
+  def test_conversion_functions
+    sql, params = DayStat.where { |x| x.day >= Date("2026-01-01") }.to_sql
+    assert_equal("#{COLS} WHERE \"day\" >= $1", sql)
+    expected: Array[Object?] = [Date.new(2026, 1, 1)]
+    assert_equal(expected, params)
+    t = "2026-01-02T03:04:05Z"
+    sql, params = DayStat.where { |x| x.seen_at.nil? || Rotor::SQL.not_nil(x.seen_at) >= Time(t) }.to_sql
+    assert_equal("#{COLS} WHERE \"seen_at\" IS NULL OR \"seen_at\" >= $1", sql)
+    times: Array[Object?] = [Time.parse(t)]
+    assert_equal(times, params)
+    # A value, and an `update`'s.
+    assert_equal("#{COLS} ORDER BY \"day\" - $1::date", DayStat.query.order { |x| x.day - Date("2026-01-01") }.to_sql[0])
+    assert_equal("UPDATE \"day_stats\" SET \"ends\" = $1", DayStat.query.update { |x| {ends: Date("2026-12-31")} }.to_sql[0])
+    # One call site, two texts: the translation keeps the capture, not
+    # the date it read (and a text that is not a date raises when the
+    # query is built, leaving the next build to read its own).
+    first: Array[Object?] = [Date.new(2026, 1, 1)]
+    second: Array[Object?] = [Date.new(2027, 6, 30)]
+    assert_equal(first, since("2026-01-01").to_sql[1])
+    assert_equal(second, since("2027-06-30").to_sql[1])
+    e = assert_raise(ArgumentError) { since("2026-02-30") }
+    assert_equal("\"2026-02-30\" is not a date written YYYY-MM-DD", e.message)
+    assert_equal(first, since("2026-01-01").to_sql[1])
+    e = assert_raise(ArgumentError) { DayStat.where { |x| x.day >= Date("2026-13-01") } }
+    assert_equal("\"2026-13-01\" is not a date written YYYY-MM-DD", e.message)
+    e = assert_raise(ArgumentError) { DayStat.where { |x| x.seen_at.nil? || Rotor::SQL.not_nil(x.seen_at) >= Time("yesterday") } }
+    assert_equal("no time information in \"yesterday\"", e.message)
+    # A column's text: refused, saying why and what to do.
+    assert_equal("`Date(x.site)` reads a column's text, which SQL would read by rules of its own, not `Date.parse`'s: compare in Quarz (select the column), or keep the value in a `date` column", refusal { DayStat.where { |x| x.day >= Date(x.site) }.to_sql[0] })
+    # Another function of the name, the file's own: refused.
+    assert_equal("the function `main#Date` cannot be translated to SQL", refusal { DayStat.where { |x| x.day >= Date(3) }.to_sql[0] })
+    # Another text built in the block: as any call that reads no column.
+    y = "2026"
+    assert_equal("`Date(y + \"-01-01\")` does not read the row: build it before the block and capture the variable (`value = Date(y + \"-01-01\")`, then `value` in the block)", refusal { DayStat.where { |x| x.day >= Date(y + "-01-01") }.to_sql[0] })
   end
 
   # `static(...)` of a dependency's `static def` giving a `Date`: baked
