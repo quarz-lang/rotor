@@ -136,18 +136,15 @@ module Binds
 
   # The kind of `v`.
   def self.kind(v: Object?) -> Kind
-    # (Each `Kind` written in full until quarz#921: a data value left to
-    # its defaults costs about 3,000 instructions in compiled code, and
-    # this runs for every guard of every build.)
     case v
-    in nil then Kind.new(nil, nil, false)
+    in nil then Kind.new(nil)
     in Array => xs then Kind.new(Array, item_class(xs), xs.any? { |x| x.nil? })
     # (A captured query: whether its column can be NULL, which decides
     # whether `include?` of it is three-valued. One site may capture
     # queries of a non-null and of a nullable column: a generic
     # method's `Query[T]`, `T >: String`.)
     in Subquery => q then Kind.new(v.class, nil, q.subquery_nullable?)
-    else Kind.new(Binds.class_of(v), nil, false)
+    else Kind.new(Binds.class_of(v))
     end
   end
 
