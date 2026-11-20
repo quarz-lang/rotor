@@ -22,6 +22,9 @@ class Schema
   # which has no document column).
   @class_def: Meta::ClassDef[Model]?
   var @decoder: Meta::Method[Model, (Symbol, JSON::Value) -> Object]?
+  # The latest link of the chain that collects the decoded documents
+  # (`Model#documents`), as `@decoder` is (rotor#116).
+  var @pairs: Meta::Method[Model, () -> Hash[Symbol, [Value?, Shareable]]]?
   var @columns: Array[Column] = []
   var @associations: Array[Association] = []
   var @created_at: Symbol? = nil
@@ -29,13 +32,18 @@ class Schema
 
   # A schema for the model named `model` (its class name); `table`
   # gives the model's class and its documents' first decoder too.
-  def initialize(@model: String, @class_def: Meta::ClassDef[Model]? = nil, @decoder: Meta::Method[Model, (Symbol, JSON::Value) -> Object]? = nil)
+  def initialize(@model: String, @class_def: Meta::ClassDef[Model]? = nil, @decoder: Meta::Method[Model, (Symbol, JSON::Value) -> Object]? = nil, @pairs: Meta::Method[Model, () -> Hash[Symbol, [Value?, Shareable]]]? = nil)
   end
 
   # :nodoc:
   # The latest of the documents' decoders: `Model#decode_document`
   # calls it.
   def decoder -> Meta::Method[Model, (Symbol, JSON::Value) -> Object]? = @decoder
+
+  # :nodoc:
+  # The latest link of the documents' collecting chain: `Model#documents`
+  # calls it.
+  def pairs -> Meta::Method[Model, () -> Hash[Symbol, [Value?, Shareable]]]? = @pairs
 
   # The columns declared so far, in order.
   def columns -> Array[Column] = @columns
@@ -116,8 +124,11 @@ class Schema
   # type (an [Array] or a [Hash] is a field of one: here a [Type] value
   # carries no type arguments, which [JSON.decode] needs): written as
   # the value's JSON ([JSON.generate]), read with `JSON.decode[T]` once,
-  # when the model is made (loaded, `with`, `restore`), into a field the
-  # getter reads (quarz-lang/quarz#890's initializer).
+  # when the model is made (loaded, `new`), into a field the getter reads
+  # (quarz-lang/quarz#890's initializer); a copy (`with`, `restore`, ...)
+  # whose document is the very one of the model it was made from takes
+  # that model's decoded value instead (rotor#116). `T` is [Shareable],
+  # as a model's values are.
   # A type [JSON.decode] cannot take is an error when the program is
   # compiled (at the `table` block, naming the column's decoder,
   # `__rotor_document_<name>`). A row whose document does not have the
@@ -125,7 +136,7 @@ class Schema
   # table, the column and where; a field with a default takes it for a
   # missing key. `json: true` is what says it (`false` is refused): a
   # mistyped scalar type is not silently a document.
-  static def column[T](name: Symbol, type: Type[T], *, json: Bool, null: Bool = false, redact: Bool = false) -> Void
+  static def column[T <: Shareable](name: Symbol, type: Type[T], *, json: Bool, null: Bool = false, redact: Bool = false) -> Void
     raise ArgumentError.new("#{@model}'s column `#{name}`: `json: false` declares nothing; leave it out for a scalar column") unless json
     t = type.as(Type[Object])
     if t == Array || t == Hash || t == Set
@@ -148,12 +159,26 @@ class Schema
     kept = cls.def_field(:"__rotor_doc_#{name}", type, nil, nullable: true) do
       case raw_document(n)
       in JSON::Value => d
-        begin
+        # (The value the model this one was made from decoded from this
+        # very document, handed over (`Checkpoint#docs`, rotor#116): a
+        # copy of an unchanged document decodes nothing.)
+        reused = (h = handed(n, d)) ? type.cast?(h) : nil
+        reused || begin
           JSON.decode[T](d)
         rescue JSON::DecodeError => e
           raise JSON::DecodeError.new("#{table_info.name}.#{n}: #{e.message}")
         end
       else nil
+      end
+    end
+    prevp = @pairs || raise ArgumentError.new("#{@model}'s document column `#{name}` is declared outside a model's `table`")
+    cls.doc ":nodoc:"
+    @pairs = cls.def_method(:"__rotor_documents_#{name}") do -> Hash[Symbol, [Value?, Shareable]]
+      out = prevp.bind(self).call
+      if v = kept.get(self)
+        out.put(n, [raw_document(n), v])
+      else
+        out
       end
     end
     cls.doc "The `#{name}` column's value, decoded from its document when the model was made."

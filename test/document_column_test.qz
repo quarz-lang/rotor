@@ -139,6 +139,69 @@ class DocumentColumnTextTest < Test::Case
     assert_equal("DocAccount#prefs was not loaded: the query fetched id", e.message)
   end
 
+  # rotor#116: a model made from another takes each unchanged document's
+  # decoded value from it (the same object: nothing decoded again), on
+  # every path that copies `@attrs`' document as it is (`with` of another
+  # column, `with_values`, `restore` of its `checkpoint`, `clear_changes`,
+  # `keep_changes`, a changeset's `apply`); a changed document is decoded
+  # anew, and a copy of the copy carries the new value, not the old.
+  def test_documents_carried_over
+    a = DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: JSON.parse("{\"entries\": [{\"at\": 1, \"note\": null}]}")})
+    p = a.prefs
+    l = a.log || raise "log"
+    copies: Array[DocAccount] = [
+      a.with(id: 2),
+      a.with_values({id: 3}),
+      a.restore(a.checkpoint),
+      a.clear_changes,
+      a.with(id: 4).keep_changes([:id]),
+      Rotor::Changeset.change(a).put_change(:id, 5).apply || raise "invalid"
+    ]
+    copies.each do |b|
+      assert(b.prefs.equal?(p), b.inspect)
+      assert((b.log || raise "log").equal?(l), b.inspect)
+    end
+    # A changed document: decoded anew; the other carried.
+    c = a.with(prefs: Prefs.new("y", 5))
+    assert_equal(Prefs.new("y", 5), c.prefs)
+    assert(!c.prefs.equal?(p))
+    assert((c.log || raise "log").equal?(l))
+    applied = Rotor::Changeset.change(a).put_change(:prefs, Prefs.new("z")).apply || raise "invalid"
+    assert_equal(Prefs.new("z"), applied.prefs)
+    assert((applied.log || raise "log").equal?(l))
+    # A copy of the copy: the new value, carried.
+    d = c.with(id: 9)
+    assert(d.prefs.equal?(c.prefs))
+    # Changed twice: the last value.
+    assert_equal(Prefs.new("w"), a.with(prefs: Prefs.new("y")).with(prefs: Prefs.new("w")).prefs)
+    # An equal but distinct value: another document, decoded anew (equal,
+    # not the same object).
+    e = a.with(prefs: Prefs.new("x"))
+    assert_equal(p, e.prefs)
+    assert(!e.prefs.equal?(p))
+  end
+
+  # rotor#116: what is handed over is used only for the very document it
+  # was decoded from: a checkpoint restored into another model carries
+  # its own values; a checkpoint whose documents were decoded from other
+  # documents than its `attrs` hold (made by hand) is decoded anew, never
+  # its stale values. A checkpoint's equality is its `attrs`, `changed`,
+  # `loaded` and `assocs`, as before: the decoded documents are a cache.
+  def test_handed_documents_are_never_stale
+    a = DocAccount.load({id: 1, prefs: JSON.parse("{\"theme\": \"x\"}"), log: nil})
+    o = DocAccount.load({id: 2, prefs: JSON.parse("{\"theme\": \"o\"}"), log: nil})
+    r = o.restore(a.checkpoint)
+    assert(r.prefs.equal?(a.prefs))
+    point = a.checkpoint
+    mixed = Rotor::Checkpoint.new(o.checkpoint.attrs, [], nil, {}, point.docs)
+    m = a.restore(mixed)
+    assert_equal(Prefs.new("o"), m.prefs)
+    assert(!m.prefs.equal?(a.prefs))
+    plain = Rotor::Checkpoint.new(point.attrs, point.changed, point.loaded, point.assocs)
+    assert_equal(plain, point)
+    assert_equal(plain.hash, point.hash)
+  end
+
   # Two document columns of different classes on a model of a class
   # without a table; a model's subclass is refused as ever.
   def test_kept_values_of_a_model_below_a_base
@@ -196,7 +259,11 @@ class DocumentColumnTextTest < Test::Case
     # (Checked by `quarz` on the PATH, or by $QUARZ.)
     out = Process.sh("cd test/fixtures/document_wrong_type && exec \"${QUARZ:-quarz}\" check")
     assert(!out.success?)
-    assert_match(/main\.qz:6:\d+: error: `def_method\(:__rotor_document_owner\)`: `JSON\.decode` in the block cannot decode into Owner: `Owner` is a class/, out.stderr)
+    # A class (not Shareable, nor decodable): refused at the `column`
+    # line by `column`'s bound, `T <: Shareable` (rotor#116); the
+    # checker's wording, which does not name the bound yet, is
+    # quarz-lang/quarz#960's to improve.
+    assert_match(/main\.qz:8:\d+: error: [^\n]*`column`.*type bounds not satisfied/m, out.stderr)
     assert_match(/main\.qz:12:\d+: error: .*json: false/, out.stderr)
     assert_match(/main\.qz:26:\d+: error: .*wrap the Array in one/, out.stderr)
     # A generic `data` type, without or with type arguments: a `Type`

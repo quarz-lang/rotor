@@ -184,7 +184,8 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   json: true` is a `jsonb` column whose getter gives a `Prefs`, written
   as the value's JSON ([JSON.generate]) and read with
   `JSON.decode[Prefs]`; `new` and `with` take a `Prefs`. The type is a
-  `data` type, whose fields are what [JSON.decode] takes (numbers,
+  [Shareable] `data` type (a model's values are Shareable: a class is
+  refused at the `column` line, #116), whose fields are what [JSON.decode] takes (numbers,
   strings, [Bool], [Time], [Symbol], [Bytes], other `data` types,
   arrays, hashes, nullable fields); an [Array] or [Hash] is a field of
   one (`data Log = (entries: Array[Entry])`), as a [Type] value in
@@ -209,17 +210,20 @@ User.load({id: 1, name: "Bob"}).name   # => "Bob", unchanged
   `update`'s value; comparing it, reading a field (`prefs.theme`),
   ordering by it and a value of the type in an `update` are refused
   for now (give a model its value with `with` and `repo.update` it).
-  **Each model made decodes its document columns once**, into fields
-  the getters read (quarz-lang/quarz#890): a model loaded from a row,
-  and a copy made with `with`, `with_values` (a `repo.update`'s
-  timestamps), `restore`, `clear_changes` or a changeset's `apply`,
-  whether its documents changed or not. A read then costs what a
-  [String] column's does. Measured in compiled code (instructions at
-  -O2): a read of a five-field value 4.7k (a [String] column's 1.7k;
-  24k when the getter decoded each read), of a value holding 1,000
-  entries 4.9k (6.0M); a `with` of another column 56k and 6.0M (33k
-  for both when nothing was kept). Carrying an unchanged document's
-  value over to the copy is #116.
+  **A document is decoded once**, into a field the getter reads
+  (quarz-lang/quarz#890): when a model is loaded from a row or made
+  with `new`, and when a copy (`with`, `with_values` for a
+  `repo.update`'s timestamps, `restore`, `clear_changes`, a changeset's
+  `apply`) holds another document for the column. A copy's unchanged
+  document keeps its decoded value, handed over from the model it was
+  made from (#116: the very `JSON::Value`, decoded once). A read
+  costs what a [String] column's does. Measured in compiled code
+  (instructions at -O2, a five-field value and one holding 1,000
+  entries): a read 4.7k and 4.9k (a [String] column's 1.7k); a load
+  138k and 6.2M (the decode); a `with` of another column, which keeps
+  the document, 62k for both (it was 59k and 6.1M while each copy
+  decoded again); a `with` of the document column 106k and 105k (its
+  new value decoded); a `restore` 37k for both.
 - `table "orders", schema: "archive"` names a table in another
   PostgreSQL schema: every statement rotor writes qualifies it
   (`"archive"."orders"`), queries, joins, preloads, `through`
