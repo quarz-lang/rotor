@@ -115,10 +115,9 @@ class Schema
   # A document column (`jsonb`) holding a value of `type`, a `data`
   # type (an [Array] or a [Hash] is a field of one: here a [Type] value
   # carries no type arguments, which [JSON.decode] needs): written as
-  # the value's JSON ([JSON.generate]), read with `JSON.decode[T]` on
-  # each read of the getter (a decoded value is not kept, until
-  # quarz-lang/quarz#890: the cost of a read grows with the document;
-  # read it once into a local).
+  # the value's JSON ([JSON.generate]), read with `JSON.decode[T]` once,
+  # when the model is made (loaded, `with`, `restore`), into a field the
+  # getter reads (quarz-lang/quarz#890's initializer).
   # A type [JSON.decode] cannot take is an error when the program is
   # compiled (at the `table` block, naming the column's decoder,
   # `__rotor_document_<name>`). A row whose document does not have the
@@ -142,17 +141,31 @@ class Schema
     @decoder = cls.def_method(:"__rotor_document_#{name}", [:column, :document]) do |column: Symbol, document: JSON::Value| -> Object
       column == n ? JSON.decode[T](document) : prev.bind(self).call(column, document)
     end
-    cls.doc "The `#{name}` column's value, decoded from its document."
-    # (Decoded on each read: a decoded value cannot be kept typed yet, a
-    # generated `initialize` not assigning a generated field that is
-    # not `var`, quarz-lang/quarz#890.)
+    # (The value decoded once, when the model is made: a field whose
+    # initializer every generated `initialize` runs, quarz-lang/quarz#890.
+    # A row of another shape raises there, naming the table, the column
+    # and where; a column not loaded, or NULL, holds nil.)
+    kept = cls.def_field(:"__rotor_doc_#{name}", type, nil, nullable: true) do
+      case raw_document(n)
+      in JSON::Value => d
+        begin
+          JSON.decode[T](d)
+        rescue JSON::DecodeError => e
+          raise JSON::DecodeError.new("#{table_info.name}.#{n}: #{e.message}")
+        end
+      else nil
+      end
+    end
+    cls.doc "The `#{name}` column's value, decoded from its document when the model was made."
     if null
       cls.def_method(name) do -> T?
-        (d = read_nullable(n).as?(JSON::Value)) ? JSON.decode[T](d) : nil
+        read_nullable(n)
+        kept.get(self)
       end
     else
       cls.def_method(name) do -> T
-        JSON.decode[T](read_attr(n).as(JSON::Value))
+        read_attr(n)
+        kept.get(self) || raise MissingAttributeError.new("#{self.class.name}##{n} is not set")
       end
     end
   end
