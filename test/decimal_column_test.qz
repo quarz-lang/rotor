@@ -63,6 +63,61 @@ class DecimalColumnTextTest < Test::Case
     assert_equal("#{COLS} WHERE \"total\" > - $1::numeric", Invoice.where { |x| x.total > -d }.to_sql[0])
   end
 
+  # rotor#114: `Decimal(text)` and `Decimal(n)` of a literal, the
+  # standard module's `decimal` functions (quarz-lang/quarz#942), read
+  # when the query is built, a parameter; `Decimal.parse`'s error then.
+  # Of a capture they are refused for now (quarz-lang/quarz#951: whether
+  # the call is the standard module's depends on the capture's type,
+  # which the tree does not carry), and so is a column's value.
+  def test_decimal_function
+    sql, params = Invoice.where { |x| x.total >= Decimal("19.99") }.to_sql
+    assert_equal("#{COLS} WHERE \"total\" >= $1", sql)
+    expected: Array[Object?] = [dec("19.99")]
+    assert_equal(expected, params)
+    # (The scale as written: `Decimal.parse`'s.)
+    shown: Array[String] = []
+    Invoice.where { |x| x.total >= Decimal("1.50") }.to_sql[1].each { |v| shown = shown + [v.to_s] }
+    assert_equal(["1.50"], shown)
+    ints: Array[Object?] = [Decimal.of(3)]
+    assert_equal(ints, Invoice.where { |x| x.total > Decimal(3) }.to_sql[1])
+    assert_equal("UPDATE \"invoices\" SET \"rate\" = $1", Invoice.query.update { |x| {rate: Decimal("0.25")} }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"total\" + $1::numeric > $2", Invoice.where { |x| x.total + Decimal("1") > Decimal("2") }.to_sql[0])
+    # An invalid text raises when the query is built.
+    e = assert_raise(ArgumentError) { Invoice.where { |x| x.total >= Decimal("1,5") } }
+    assert_equal("not a decimal: \"1,5\"", e.message)
+    # A capture: build the `Decimal` before the block.
+    t = "19.99"
+    assert_equal("`Kernel.Decimal(t)` of a captured value cannot be translated to SQL: build the `Decimal` before the block and capture it (`d = Decimal(t)`, then `d` in the block)", refusal { Invoice.where { |x| x.total >= Decimal(t) } })
+    n = 3
+    assert_equal("`Kernel.Decimal(n)` of a captured value cannot be translated to SQL: build the `Decimal` before the block and capture it (`d = Decimal(n)`, then `d` in the block)", refusal { Invoice.where { |x| x.total >= Decimal(n) } })
+    # A column's value.
+    assert_equal("`Kernel.Decimal(x.id)` reads a column's value, which SQL would read by rules of its own, not `Decimal(...)`'s: compare in Quarz (select the column), or keep the value in a `numeric` column", refusal { Invoice.where { |x| x.total >= Decimal(x.id) } })
+  end
+
+  # rotor#114: beside a program's own `Decimal`s of other parameters
+  # (test/fixtures/decimal_function: top-level `extension Kernel`
+  # functions of `String | Symbol`, `(text: String, *rest: Int)`,
+  # `(n: Int, *rest: Int)` and `Object`), a `String` or `Int` literal is
+  # the standard module's, translated; a `Symbol` literal is the
+  # program's, refused as any function (all are quoted alike,
+  # quarz-lang/quarz#951). Own functions a one-argument literal call
+  # reaches through a default (`(text: String, strict: Bool = false)`,
+  # `(n: Int, *, scale: Int = 0)`, test/fixtures/decimal_ambiguous) make
+  # the call ambiguous with the standard module's: the program does not
+  # compile.
+  def test_decimal_function_beside_a_programs_own
+    out = Process.sh("cd test/fixtures/decimal_function && exec \"${QUARZ:-quarz}\" run")
+    assert(out.success?, out.stderr)
+    select = "[\"SELECT \\\"id\\\", \\\"total\\\", \\\"name\\\" FROM \\\"bills\\\" WHERE \\\"total\\\" >= $1\", "
+    assert_equal("#{select}[2.50]]", out.stdout.lines[0].chomp)
+    assert_equal("#{select}[3]]", out.stdout.lines[1].chomp)
+    assert_match(/\A`Kernel\.Decimal\(:a\)` does not read the row/, out.stdout.lines[2])
+    out = Process.sh("cd test/fixtures/decimal_ambiguous && exec \"${QUARZ:-quarz}\" check")
+    assert(!out.success?)
+    assert_match(/main\.qz:13:29: error: the call of `Decimal` is ambiguous: these overloads fit it equally[^\n]*\n    Decimal\(text: String\) -> Decimal\n    Decimal\(text: String, strict: Bool = \.\.\.\) -> Decimal/, out.stderr)
+    assert_match(/main\.qz:14:29: error: the call of `Decimal` is ambiguous/, out.stderr)
+  end
+
   def test_refused
     d = dec("19.99")
     f = 19.99

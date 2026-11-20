@@ -1,0 +1,13 @@
+# A program with its own `Decimal` function beside the standard
+# module's (test/decimal_column_test.qz, rotor#114): a top-level
+# `extension Kernel` function of `String | Symbol`. It is run against
+# this checkout of rotor.
+[cog]
+name = "decimal_function"
+version = "0.1.0"
+
+[dependencies]
+Rotor = { git = "https://github.com/quarz-lang/rotor", branch = "main" }
+
+[patch]
+Rotor = { path = "../../.." }

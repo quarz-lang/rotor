@@ -105,15 +105,27 @@ module Binds
       end
     in Bind::Parsed(x, name)
       case v = value(x, captures)
-      in String => s then parse(name, s)
+      in String => t then parse(name, t)
       else v
       end
     end
   end
 
-  # The value `Date(text)` or `Time(text)` (`name`) reads from `text`:
-  # [Date.parse]'s or [Time.parse]'s, its [ArgumentError] raised.
-  def self.parse(name: Symbol, text: String) -> Object = name == :Date ? Date(text) : Time(text)
+  # The value `Date(text)`, `Time(text)`, `Decimal(text)` or `Decimal(n)`
+  # (`name`) reads from `v`: [Date.parse]'s, [Time.parse]'s,
+  # [Decimal.parse]'s or [Decimal.of]'s, its [ArgumentError] raised.
+  def self.parse(name: Symbol, v: Object) -> Object
+    case v
+    in String => text
+      case name
+      in :Date then Date(text)
+      in :Time then Time(text)
+      else Decimal(text)
+      end
+    in Int => n then Decimal(n)
+    else raise ArgumentError.new("#{name}(#{v.inspect}): not a conversion rotor reads")
+    end
+  end
 
   # `d` in microseconds (PostgreSQL's `interval` keeps no less), its
   # nanoseconds rounded: exact for any [Duration], the milliseconds an

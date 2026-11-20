@@ -1,0 +1,14 @@
+class Bill < Rotor::Model
+  table "bills" do
+    column :id, Int, primary: true
+    column :total, Decimal
+  end
+end
+
+extension Kernel
+  def self.Decimal(text: String, strict: Bool = false) -> Decimal = Decimal.parse(text)
+  def self.Decimal(n: Int, *, scale: Int = 0) -> Decimal = Decimal.of(n)
+end
+
+Bill.where { |b| b.total >= Decimal("2.50") }
+Bill.where { |b| b.total >= Decimal(3) }
