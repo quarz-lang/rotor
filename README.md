@@ -557,9 +557,10 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   over its models) keeps at most 8 entries, never evicted; a kind
   beyond that is translated on each build, as without the cache: the
   kinds of several captures multiply (four nullable ones make 16). A `where` of three
-  conditions with an order and a limit builds in about 11 µs compiled,
-  22 µs with its `to_sql` (measured 2026-11-20 with quarz 60e02d10, at
-  -O2 on one core).
+  conditions with an order and a limit builds in about 120k
+  instructions compiled, 248k with its `to_sql` (measured 2026-11-20
+  with quarz 78c37912, at -O2 on one core; about 11 µs and 22 µs when
+  timed with no other load, the same day with quarz 60e02d10).
 - Where an order's NULLs go (#74): `nulls_first` and `nulls_last` after
   an order (`order { seen_at }.desc.nulls_last`, `.asc.nulls_first`;
   `asc` is the order as given, written to say so). Without them the
