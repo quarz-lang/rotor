@@ -819,6 +819,14 @@ class QueryTest < Test::Case
     assert_match(/\A`g.level&.<\(3\)` as a value is NULL, not false, in SQL when `g.level` is NULL/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| !g.label&.start_with?("a") } }
     assert_match(/\A`!g.label&.start_with\?\("a"\)` is three-valued in SQL when `g.label` can be NULL/, e.message)
+    # An argument that can be NULL (`Rotor::Compare`'s ordering, false
+    # in Quarz where only `cap` is nil): three-valued as `level < cap` is
+    # between the columns, a condition and not a value.
+    check(Gauge.where { |g| g.level&.<(g.cap) || false }, "#{GS} WHERE \"level\" < \"cap\" OR FALSE", [])
+    e = assert_raise(Rotor::UntranslatableError) { Gauge.order { |g| g.level&.<(g.cap) } }
+    assert_match(/\A`g.level&.<\(g.cap\)` as a value is NULL, not false, in SQL when `g.level` is NULL/, e.message)
+    # A `String`'s `+`: SQL's `||`, NULL where either side is.
+    check(Gauge.order { |g| g.label&.+("x") }, "#{GS} ORDER BY \"label\" || $1", ["x"])
     # Refused whatever the receiver: forms that are not NULL where it is
     # (`IS NULL`, `IS [NOT] DISTINCT FROM`, a subquery).
     e = assert_raise(Rotor::UntranslatableError) { Gauge.where { |g| g.label&.nil? || false } }
@@ -838,6 +846,18 @@ class QueryTest < Test::Case
     check(q.where { |p, e| e&.kind != "x" }, "#{pe} WHERE \"x1\".\"kind\" IS DISTINCT FROM $1", ["x"])
     check(q.where { |p, e| e&.kind == p.title }, "#{pe} WHERE \"x1\".\"kind\" IS NOT DISTINCT FROM \"x0\".\"title\"", [])
     check(q.order { |p, e| e&.kind }, "#{pe} ORDER BY \"x1\".\"kind\"", [])
+    # Nullable whatever the table says (`post_id` is not null there): an
+    # equality with another column is `IS NOT DISTINCT FROM`, and `!` of
+    # an ordering is refused.
+    check(q.where { |p, e| e&.post_id == p.id }, "#{pe} WHERE \"x1\".\"post_id\" IS NOT DISTINCT FROM \"x0\".\"id\"", [])
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| !(e&.post_id > 1 || false) } }
+    assert_match(/three-valued in SQL when `e&.post_id` can be NULL/, e.message)
+    # Only a column's getter on it: anything else on a row that may be
+    # missing is refused.
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.inspect == "x" } }
+    assert_match(/\A`e&.inspect` \(`&.` on a LEFT JOIN's row, with other than a column's getter\) cannot be translated to SQL/, e.message)
+    e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.hash == 1 } }
+    assert_match(/\A`e&.hash` \(`&.` on a LEFT JOIN's row, with other than a column's getter\)/, e.message)
     e = assert_raise(Rotor::UntranslatableError) { q.where { |p, e| e&.kind&.start_with?("a") == true } }
     assert_match(/when `e&.kind` is NULL .*: compare in Quarz \(select the column\), or test `\(e&.kind\).nil\?` explicitly\z/, e.message)
     # A receiver the translation decides (a captured value, a captured
