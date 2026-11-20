@@ -260,10 +260,10 @@ class DocumentColumnTextTest < Test::Case
     out = Process.sh("cd test/fixtures/document_wrong_type && exec \"${QUARZ:-quarz}\" check")
     assert(!out.success?)
     # A class (not Shareable, nor decodable): refused at the `column`
-    # line by `column`'s bound, `T <: Shareable` (rotor#116); the
-    # checker's wording, which does not name the bound yet, is
-    # quarz-lang/quarz#960's to improve.
-    assert_match(/main\.qz:8:\d+: error: [^\n]*`column`.*type bounds not satisfied/m, out.stderr)
+    # line by `column`'s bound, `T <: Shareable` (rotor#116). The
+    # checker names the bound and why since quarz-lang/quarz#960; the
+    # older wording is accepted until quarz's main has it, then dropped.
+    assert_match(/main\.qz:8:\d+: error: [^\n]*`column`.*(`T <: Shareable`: `Owner` is not Shareable|type bounds not satisfied)/m, out.stderr)
     assert_match(/main\.qz:12:\d+: error: .*json: false/, out.stderr)
     assert_match(/main\.qz:26:\d+: error: .*wrap the Array in one/, out.stderr)
     # A generic `data` type, without or with type arguments: a `Type`
