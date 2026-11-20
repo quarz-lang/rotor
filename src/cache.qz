@@ -14,6 +14,9 @@ enum Bind
   variant Like(of: Bind, name: String)
   # A captured [Duration] as its microseconds, an `interval`'s unit.
   variant Micros(of: Bind)
+  # A captured [String] read by `Date(text)` or `Time(text)` (`name`,
+  # `:Date` or `:Time`) at each build: [Binds.parse].
+  variant Parsed(of: Bind, name: Symbol)
   # A captured array as one parameter, an array column's new value
   # (`update { {tags: xs} }`); nowhere else is an array a value.
   variant Whole(index: Int)
@@ -100,8 +103,17 @@ module Binds
       in Duration => d then micros(d)
       else v
       end
+    in Bind::Parsed(x, name)
+      case v = value(x, captures)
+      in String => s then parse(name, s)
+      else v
+      end
     end
   end
+
+  # The value `Date(text)` or `Time(text)` (`name`) reads from `text`:
+  # [Date.parse]'s or [Time.parse]'s, its [ArgumentError] raised.
+  def self.parse(name: Symbol, text: String) -> Object = name == :Date ? Date(text) : Time(text)
 
   # `d` in microseconds (PostgreSQL's `interval` keeps no less), its
   # nanoseconds rounded: exact for any [Duration], the milliseconds an

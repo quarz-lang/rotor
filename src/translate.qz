@@ -942,6 +942,11 @@ class Translator
     if Translator.bare_now?(m) && args.empty?
       return node([Piece::Text.new("now()")], ATOM)
     end
+    # (`Date(text)` and `Time(text)`, the built-in functions: a value
+    # read from a text when the query is built, #114.)
+    if recv.nil? && Translator.conversion?(m) && args.size == 1
+      return conversion(m, args[0], Meta::Expr::Call.new(recv, m, ms, args, block, line), line)
+    end
     if recv.nil?
       untranslatable("the function #{label}", line)
     end
@@ -1200,9 +1205,26 @@ class Translator
       # (A constant only where the call reads no captured variable,
       # which a constant could not name.)
       constant = Translator.captures?(whole) ? "" : ", or name a constant (`SINCE = #{shown}`)"
-      raise UntranslatableError.new("`#{shown}` does not read the row: build it before the block and capture the variable (`value = #{shown}`, then `value` in the block)#{constant} (#{@file}:#{line})")
+      # (A date or a time a function writes shorter, in the block.)
+      shorter = if f = Translator.function_form(whole) then "write `#{f}`, read when the query is built, or " else "" end
+      raise UntranslatableError.new("`#{shown}` does not read the row: #{shorter}build it before the block and capture the variable (`value = #{shown}`, then `value` in the block)#{constant} (#{@file}:#{line})")
     end
     untranslatable(label, line)
+  end
+
+  # `whole` written with `Date(text)` or `Time(text)`, which the block
+  # takes (#114), if it is a date or time of a literal or captured text
+  # (`Date.parse(s)`, `Time.parse("...")`), or of literal parts
+  # (`Date.new(2026, 1, 1)`): `Date(s)`, `Date("2026-01-01")`. Nil
+  # otherwise.
+  def self.function_form(whole: Meta::Expr) -> String?
+    case whole
+    in Meta::Expr::Call(Meta::Expr, m, _, [Meta::Expr::Lit(String, _) | Meta::Expr::Capture(_, _, _) => text], nil, _) if m.singleton && m.name == :parse && (m.owner == Date || m.owner == Time)
+      "#{m.owner.name}(#{show(text)})"
+    in Meta::Expr::Call(Meta::Expr, m, _, [Meta::Expr::Lit(Int => y, _), Meta::Expr::Lit(Int => mo, _), Meta::Expr::Lit(Int => d, _)], nil, _) if m.singleton && m.name == :new && m.owner == Date
+      "Date(#{("%04d-%02d-%02d" % [y, mo, d]).inspect})"
+    else nil
+    end
   end
 
   # A column's getter called on a model the block captured
@@ -1668,6 +1690,41 @@ class Translator
     else
       untranslatable("`include?` of a query built in the block: build it outside, and use it here", line)
     end
+  end
+
+  # Whether `m` is one of the built-in functions `Date(text)` and
+  # `Time(text)` (quarz-lang/quarz#932): `Kernel`'s, neither a module
+  # method nor an extension's. Another function of the name (a
+  # program's `def Date`, an extension's) is not, and is refused as any
+  # function is.
+  def self.conversion?(m: Meta::MethodRef) -> Bool = m.owner == Kernel && !m.singleton && m.extension.nil? && (m.name == :Date || m.name == :Time)
+
+  # `Date(text)` or `Time(text)` (`whole`, the function `m`): the value
+  # `Date.parse` or `Time.parse` reads from the text, a parameter, read
+  # when the query is built (its [ArgumentError] raised then). The text
+  # is a literal (read once, as the literal is the same at every build)
+  # or a captured [String] (read at each build: the translation keeps
+  # the capture, [Rotor::Bind::Parsed], never the value it read).
+  # Anything else is refused: a column's text, which SQL's cast would
+  # read by rules of its own, with a message saying so.
+  private def conversion(m: Meta::MethodRef, arg: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
+    case arg
+    in Meta::Expr::Lit(String => text, _) then return param(Binds.parse(m.name, text), line)
+    in Meta::Expr::Capture(index, _, _)
+      capture = Bind::Capture.new(index)
+      case look(capture)
+      in String => text
+        b = Bind::Parsed.new(capture, m.name)
+        v = bindable(Binds.parse(m.name, text), line)
+        return Sql.new([Piece::Bound.new(b)], ATOM, nil, v, true, b)
+      else nil
+      end
+    else nil
+    end
+    if reads(arg).any? { |r| r.nil? || !r.empty? }
+      raise UntranslatableError.new("`#{Translator.show(whole)}` reads a column's text, which SQL would read by rules of its own, not `#{m.name}.parse`'s (#{@file}:#{line}): compare in Quarz (select the column), or keep the value in a `#{m.name == :Date ? "date" : "timestamptz"}` column")
+    end
+    unknown_call(Translator.label(m), whole, line)
   end
 
   # Whether `m` is the `now` written bare in a query's block:
