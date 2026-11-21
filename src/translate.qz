@@ -989,9 +989,9 @@ class Translator
       untranslatable(label, line) unless args.size == 1
       return in_query(r, args[0], line)
     end
-    # (`x.between?(a, b)`: the range literal's form is the one translated.)
-    if m.owner == Comparable && name == "between?"
-      untranslatable("`#{Translator.show(whole)}` (write `(a..b).include?(x)`)", line)
+    # `x.between?(a, b)`: `(a..b).include?(x)`'s two comparisons (#126).
+    if m.owner == Comparable && name == "between?" && args.size == 2
+      return bounds_test(r, args[0], args[1], false, whole, line)
     end
     # A range's `include?` or `cover?`: two comparisons, [range_test].
     if m.owner == Range && (name == "include?" || name == "cover?") && args.size == 1
@@ -1440,7 +1440,7 @@ class Translator
       out
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.name == :"-@" && column_of(e).nil?
       classes(recv)
-    in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :start_with?, :end_with?, :exists?].include?(m.name)) && column_of(e).nil?
+    in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :cover?, :between?, :start_with?, :end_with?, :exists?].include?(m.name)) && column_of(e).nil?
       [Bool]
     # (The call's, and nil where the receiver can be: as translated.)
     in Meta::Expr::SafeCall(recv, m, ms, args, block, line)
@@ -1916,18 +1916,24 @@ class Translator
   # A range not written in the block (a captured `Range`) is refused.
   private def range_test(range: Meta::Expr, x: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
     case range
-    in Meta::Expr::RangeLit(lo, hi, exclusive, _)
-      low = lo ? compare(x, ">=", lo, whole, line) : nil
-      high = hi ? compare(x, exclusive ? "<" : "<=", hi, whole, line) : nil
-      if low && high
-        return three(binary(low, "AND", high, AND, true), low.tri || high.tri)
-      end
-      return low if low
-      return high if high
-      untranslatable("a range of no bound", line)
+    in Meta::Expr::RangeLit(lo, hi, exclusive, _) then bounds_test(x, lo, hi, exclusive, whole, line)
     else
       untranslatable("a range not written in the block (`#{Translator.show(whole)}`: write the range in it, `(a..b).include?(x)`)", line)
     end
+  end
+
+  # `x >= lo AND x <= hi` (`< hi` when `exclusive`), the one comparison
+  # for a bound left out: a range literal's `include?` and `cover?`
+  # ([range_test]) and `x.between?(lo, hi)`, each comparison [compare]'s.
+  private def bounds_test(x: Meta::Expr, lo: Meta::Expr?, hi: Meta::Expr?, exclusive: Bool, whole: Meta::Expr, line: Int) -> Sql
+    low = lo ? compare(x, ">=", lo, whole, line) : nil
+    high = hi ? compare(x, exclusive ? "<" : "<=", hi, whole, line) : nil
+    if low && high
+      return three(binary(low, "AND", high, AND, true), low.tri || high.tri)
+    end
+    return low if low
+    return high if high
+    untranslatable("a range of no bound", line)
   end
 
   # `xs.include?(x)` for an array literal with other than literals:
