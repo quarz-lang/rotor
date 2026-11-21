@@ -224,10 +224,10 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
       begin
         data.check_document(c, v.as(JSON::Value))
       rescue JSON::DecodeError
-        raise ArgumentError.new("#{value.inspect} is not a value of #{data.class.name}##{field}")
+        raise ArgumentError.new("#{c.shown(value)} is not a value of #{data.class.name}##{field}")
       end
     elsif !(v.nil? || Changeset.same_class?(c, v))
-      raise ArgumentError.new("#{v.inspect} is not a value of #{data.class.name}##{field}")
+      raise ArgumentError.new("#{c.shown(v)} is not a value of #{data.class.name}##{field}")
     end
     raise ArgumentError.new("#{data.class.name}##{field} cannot be nil") if v.nil? && !c.null
     # (A document column's change by its type's `==`: the documents

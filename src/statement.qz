@@ -171,7 +171,7 @@ class Statement
         elsif !x.is_a?(c.type)
           raise ArgumentError.new("#{model_name}##{name} takes #{c.type.name}, not #{x.class.name} (#{file}:#{Translator.line_of(value)})")
         elsif (el = c.element) && !Model.fits_array?(c, x)
-          raise ArgumentError.new("#{model_name}##{name} takes an Array of #{el.name}#{c.nils ? "?" : ""}, not #{x.inspect} (#{file}:#{Translator.line_of(value)})")
+          raise ArgumentError.new("#{model_name}##{name} takes an Array of #{el.name}#{c.nils ? "?" : ""}, not #{c.shown(x)} (#{file}:#{Translator.line_of(value)})")
         end
       end
       sets = sets + [Piece::Text.new(", ")] if i > 0

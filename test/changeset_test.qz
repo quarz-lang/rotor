@@ -291,6 +291,19 @@ class ValidationTest < Test::Case
     assert_match(/password: \*\*redacted\*\*/, cs.inspect)
   end
 
+  # rotor#130: a value of the wrong type for a redacted column is not
+  # quoted in the error; another column's still is.
+  def test_redacted_value_not_in_a_type_error
+    u = KUser.load({id: 1, email: "a@b.c", name: "Ann"})
+    params: Hash[String, Object?] = {}
+    fields: Array[Symbol] = []
+    cs = Rotor::Changeset.cast(u, params, fields)
+    e = assert_raise(ArgumentError) { cs.put_change(:password, 987654321) }
+    assert_equal("a redacted value is not a value of KUser#password", e.message)
+    e = assert_raise(ArgumentError) { cs.put_change(:age, "987654321") }
+    assert_equal("\"987654321\" is not a value of KUser#age", e.message)
+  end
+
   def test_shareable
     cs = KUser.registration({"email" => "ann@example.com", "name" => "Ann"})
     t = Task.spawn { cs.valid? }

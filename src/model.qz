@@ -487,7 +487,7 @@ class Model
     # (An array's elements: a `Type` value carries no type arguments,
     # the column keeps them.)
     if (e = c.element) && !Model.fits_array?(c, v)
-      raise ArgumentError.new("#{self.class.name}##{c.name} takes an Array of #{e.name}#{c.nils ? "?" : ""}, not #{v.inspect}")
+      raise ArgumentError.new("#{self.class.name}##{c.name} takes an Array of #{e.name}#{c.nils ? "?" : ""}, not #{c.shown(v)}")
     end
   end
 
