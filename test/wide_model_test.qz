@@ -1,0 +1,91 @@
+require "test"
+
+# A model of more than 64 columns (quarz#1002): `new` and `with` are
+# generated with one keyword per column, and those past the 64th are
+# kept as the others are, and written.
+class Wide < Rotor::Model
+  table "wide" do
+    column :id, Int, primary: true
+    column :c1, Int, null: true
+    column :c2, Int, null: true
+    column :c3, Int, null: true
+    column :c4, Int, null: true
+    column :c5, Int, null: true
+    column :c6, Int, null: true
+    column :c7, Int, null: true
+    column :c8, Int, null: true
+    column :c9, Int, null: true
+    column :c10, Int, null: true
+    column :c11, Int, null: true
+    column :c12, Int, null: true
+    column :c13, Int, null: true
+    column :c14, Int, null: true
+    column :c15, Int, null: true
+    column :c16, Int, null: true
+    column :c17, Int, null: true
+    column :c18, Int, null: true
+    column :c19, Int, null: true
+    column :c20, Int, null: true
+    column :c21, Int, null: true
+    column :c22, Int, null: true
+    column :c23, Int, null: true
+    column :c24, Int, null: true
+    column :c25, Int, null: true
+    column :c26, Int, null: true
+    column :c27, Int, null: true
+    column :c28, Int, null: true
+    column :c29, Int, null: true
+    column :c30, Int, null: true
+    column :c31, Int, null: true
+    column :c32, Int, null: true
+    column :c33, Int, null: true
+    column :c34, Int, null: true
+    column :c35, Int, null: true
+    column :c36, Int, null: true
+    column :c37, Int, null: true
+    column :c38, Int, null: true
+    column :c39, Int, null: true
+    column :c40, Int, null: true
+    column :c41, Int, null: true
+    column :c42, Int, null: true
+    column :c43, Int, null: true
+    column :c44, Int, null: true
+    column :c45, Int, null: true
+    column :c46, Int, null: true
+    column :c47, Int, null: true
+    column :c48, Int, null: true
+    column :c49, Int, null: true
+    column :c50, Int, null: true
+    column :c51, Int, null: true
+    column :c52, Int, null: true
+    column :c53, Int, null: true
+    column :c54, Int, null: true
+    column :c55, Int, null: true
+    column :c56, Int, null: true
+    column :c57, Int, null: true
+    column :c58, Int, null: true
+    column :c59, Int, null: true
+    column :c60, Int, null: true
+    column :c61, Int, null: true
+    column :c62, Int, null: true
+    column :c63, Int, null: true
+    column :c64, Int, null: true
+    column :c65, Int, null: true
+    column :c66, Int, null: true
+  end
+end
+
+class WideModelTest < Test::Case
+  def test_columns_past_the_64th_are_kept_and_written
+    m = Wide.new(c1: 1, c65: 65)
+    assert_equal(1, m.c1)
+    assert_equal(65, m.c65)
+    assert_nil(m.c66)
+    w = m.with(c66: 66)
+    assert_equal(65, w.c65)
+    assert_equal(66, w.c66)
+    sql, params = Rotor::Statement.insert(w).to_sql
+    assert_equal("INSERT INTO \"wide\" (\"c1\", \"c65\", \"c66\") VALUES ($1, $2, $3)", sql)
+    assert_equal("[1, 65, 66]", params.inspect)
+  end
+end
