@@ -1440,7 +1440,10 @@ class Translator
       out
     in Meta::Expr::Call(Meta::Expr => recv, m, _, [], nil, _) if !m.singleton && m.name == :"-@" && column_of(e).nil?
       classes(recv)
-    in Meta::Expr::Call(Meta::Expr, m, _, _, nil, _) if !m.singleton && (COMPARISONS.has_key?(m.name) || [:nil?, :include?, :cover?, :between?, :start_with?, :end_with?, :exists?].include?(m.name)) && column_of(e).nil?
+    # (A call of methods all declared to give a `Bool`, as each says of
+    # itself, quarz's `Meta::MethodRef#result` (#128): not a list of
+    # names, where a method left out was read as a value to test.)
+    in Meta::Expr::Call(Meta::Expr, m, ms, _, nil, _) if !m.singleton && ms.all? { |r| r.result == Bool } && column_of(e).nil?
       [Bool]
     # (The call's, and nil where the receiver can be: as translated.)
     in Meta::Expr::SafeCall(recv, m, ms, args, block, line)
