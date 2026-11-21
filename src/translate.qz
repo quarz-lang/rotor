@@ -195,6 +195,7 @@ class Translator
     in Meta::Expr::Interp(_, l) then l
     in Meta::Expr::Block(_, _, l) then l
     in Meta::Expr::SafeCall(_, _, _, _, _, l) then l
+    in Meta::Expr::RangeLit(_, _, _, l) then l
     end
   end
 
@@ -295,6 +296,8 @@ class Translator
     in Meta::Expr::Interp(_, line) then untranslatable("an interpolated string", line)
     in Meta::Expr::Block(_, _, line) then untranslatable("a block", line)
     in Meta::Expr::SafeCall(recv, m, ms, args, block, line) then safe_call(e, recv, m, ms, args, block, line)
+    # (`(a..b).include?(x)` is the call's, [between].)
+    in Meta::Expr::RangeLit(_, _, _, line) then untranslatable("a range by itself (`(a..b).include?(x)` translates)", line)
     end
   end
 
@@ -419,6 +422,7 @@ class Translator
     in Meta::Expr::Not(x, _, _) then column_named?(x, what)
     in Meta::Expr::If(c, t, f, _) then column_named?(c, what) || column_named?(t, what) || (f ? column_named?(f.as(Meta::Expr), what) : false)
     in Meta::Expr::ArrayLit(xs, _) then xs.any? { |x| column_named?(x, what) }
+    in Meta::Expr::RangeLit(lo, hi, _, _) then (lo ? column_named?(lo, what) : false) || (hi ? column_named?(hi, what) : false)
     else false
     end
   end
@@ -460,6 +464,8 @@ class Translator
     in Meta::Expr::SafeCall(recv, m, _, args, block, _)
       list = args.empty? ? "" : "(#{args.map { |x| show(x) }.join(", ")})"
       "#{shown_operand(recv)}&.#{m.name}#{list}#{block ? " { ... }" : ""}"
+    in Meta::Expr::RangeLit(lo, hi, exclusive, _)
+      "#{lo ? shown_operand(lo) : ""}#{exclusive ? "..." : ".."}#{hi ? shown_operand(hi) : ""}"
     end
   end
 
@@ -467,7 +473,7 @@ class Translator
   def self.shown_operand(e: Meta::Expr) -> String
     text = show(e)
     case e
-    in Meta::Expr::And(_, _, _) | Meta::Expr::Or(_, _, _) | Meta::Expr::If(_, _, _, _) then "(#{text})"
+    in Meta::Expr::And(_, _, _) | Meta::Expr::Or(_, _, _) | Meta::Expr::If(_, _, _, _) | Meta::Expr::RangeLit(_, _, _, _) then "(#{text})"
     in Meta::Expr::Call(Meta::Expr, m, _, [_], nil, _) if COMPARISONS.has_key?(m.name) || ARITHMETIC.has_key?(m.name) then "(#{text})"
     else text
     end
@@ -591,6 +597,11 @@ class Translator
     in Meta::Expr::SafeCall(recv, _, _, args, block, _)
       found = all(args + [recv], scopes)
       block ? found + collect(block, scopes) : found
+    in Meta::Expr::RangeLit(lo, hi, _, _)
+      xs: Array[Meta::Expr] = []
+      xs = xs + [lo] if lo
+      xs = xs + [hi] if hi
+      all(xs, scopes)
     end
   end
 
@@ -978,6 +989,14 @@ class Translator
       untranslatable(label, line) unless args.size == 1
       return in_query(r, args[0], line)
     end
+    # (`x.between?(a, b)`: the range literal's form is the one translated.)
+    if m.owner == Comparable && name == "between?"
+      untranslatable("`#{Translator.show(whole)}` (write `(a..b).include?(x)`)", line)
+    end
+    # A range's `include?` or `cover?`: two comparisons, [range_test].
+    if m.owner == Range && (name == "include?" || name == "cover?") && args.size == 1
+      return range_test(r, args[0], whole, line)
+    end
     # A `Duration` computed of others: `interval + interval`, `interval -
     # interval`, `interval * number`.
     if m.owner == Duration && args.size == 1 && (name == "+" || name == "-" || name == "*")
@@ -1189,6 +1208,7 @@ class Translator
     in Meta::Expr::Block(_, body, _) then body.any? { |x| Translator.captures?(x) }
     in Meta::Expr::SafeCall(recv, _, _, args, block, _)
       Translator.captures?(recv) || args.any? { |a| Translator.captures?(a) } || (block ? Translator.captures?(block) : false)
+    in Meta::Expr::RangeLit(lo, hi, _, _) then (lo ? Translator.captures?(lo) : false) || (hi ? Translator.captures?(hi) : false)
     else false
     end
   end
@@ -1885,6 +1905,29 @@ class Translator
     found = three(node(pieces, CMP), maybe)
     return found unless nils
     three(binary(found, "OR", is_null(target, "IS NULL"), OR, true), maybe)
+  end
+
+  # `(lo..hi).include?(x)` (or `cover?`) of a range written in the block
+  # (`Meta::Expr::RangeLit`, quarz#653): `x >= lo AND x <= hi`, `x < hi`
+  # for `lo...hi`, the one comparison for a bound left out (`18..`,
+  # `..65`). Each is [compare]'s, with its checks and its three-valued
+  # result where `x` can be NULL (Quarz's `include?` of nil is false), as
+  # `x >= lo && x <= hi` would be; the same predicate as SQL's `BETWEEN`.
+  # A range not written in the block (a captured `Range`) is refused.
+  private def range_test(range: Meta::Expr, x: Meta::Expr, whole: Meta::Expr, line: Int) -> Sql
+    case range
+    in Meta::Expr::RangeLit(lo, hi, exclusive, _)
+      low = lo ? compare(x, ">=", lo, whole, line) : nil
+      high = hi ? compare(x, exclusive ? "<" : "<=", hi, whole, line) : nil
+      if low && high
+        return three(binary(low, "AND", high, AND, true), low.tri || high.tri)
+      end
+      return low if low
+      return high if high
+      untranslatable("a range of no bound", line)
+    else
+      untranslatable("a range not written in the block (`#{Translator.show(whole)}`: write the range in it, `(a..b).include?(x)`)", line)
+    end
   end
 
   # `xs.include?(x)` for an array literal with other than literals:
