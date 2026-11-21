@@ -233,6 +233,26 @@ class RepoTest < Test::Case
     Member.new(name: name, age: age)
   end
 
+  # A range written in the block (quarz#653) on a column that can be
+  # NULL: `x >= lo AND x <= hi` holds for no NULL row, as Quarz's
+  # `include?(nil)` is false; its negation, three-valued, is written with
+  # `nil?` and gives the NULL row, as in Quarz.
+  def test_a_range_literal_against_the_server
+    with_repo do |repo|
+      t0 = Time.utc(2026, 1, 1)
+      times: Array[Time?] = [nil, t0, t0 + 1.day, t0 + 3.days]
+      times.each { |t| repo.insert(Note.new(body: "n", seen: t)) }
+      lo = t0
+      hi = t0 + 2.days
+      ids = ->(q: Rotor::Query[Note]) { repo.all(q.order { id }).map { |n| n.id } }
+      assert_equal([2, 3], ids.call(Note.where { (lo..hi).include?(seen) }))
+      assert_equal([2], ids.call(Note.where { (lo...t0 + 1.day).include?(seen) }))
+      assert_equal([3, 4], ids.call(Note.where { (t0 + 1.day..).include?(seen) }))
+      assert_equal([1, 4], ids.call(Note.where { seen.nil? || !(lo..hi).include?(seen) }))
+      assert_equal([], ids.call(Note.where { (hi..lo).include?(seen) }))
+    end
+  end
+
   def test_insert_sets_the_key_and_timestamps
     with_repo do |repo|
       before = Time.now

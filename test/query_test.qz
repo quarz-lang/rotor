@@ -121,6 +121,47 @@ class QueryTest < Test::Case
     )
   end
 
+  # A range written in the block (quarz#653), `include?` or `cover?`:
+  # `x >= lo AND x <= hi`, `< hi` for `...`, one comparison for a bound
+  # left out; as written, so `5..1` holds for no row. Each comparison is
+  # `compare`'s: a captured `x` is a parameter in each (two of the same
+  # value), an expression is written twice.
+  def test_range_literals
+    lo = 3
+    t0 = Time.utc(2026, 1, 1)
+    t1 = Time.utc(2026, 2, 1)
+    d0 = Date.new(2026, 1, 1)
+    check(Person.where { (18..65).include?(age) }, "#{COLS} WHERE \"age\" >= 18 AND \"age\" <= 65", [])
+    check(Person.where { (18...65).include?(age) }, "#{COLS} WHERE \"age\" >= 18 AND \"age\" < 65", [])
+    check(Person.where { (18..).include?(age) }, "#{COLS} WHERE \"age\" >= 18", [])
+    check(Person.where { (..65).include?(age) }, "#{COLS} WHERE \"age\" <= 65", [])
+    check(Person.where { (1..9).cover?(age) }, "#{COLS} WHERE \"age\" >= 1 AND \"age\" <= 9", [])
+    check(Gauge.where { (lo..cap).include?(level) }, "#{GS} WHERE \"level\" >= $1 AND \"level\" <= \"cap\"", [3])
+    check(Person.where { (1..9).include?(lo) && admin }, "#{COLS} WHERE $1::bigint >= 1 AND $2::bigint <= 9 AND \"admin\"", [3, 3])
+    check(Person.where { (1..9).include?(age + 1) }, "#{COLS} WHERE \"age\" + 1 >= 1 AND \"age\" + 1 <= 9", [])
+    check(Person.where { (5..1).include?(age) }, "#{COLS} WHERE \"age\" >= 5 AND \"age\" <= 1", [])
+    check(Person.where { !(18..65).include?(age) }, "#{COLS} WHERE NOT (\"age\" >= 18 AND \"age\" <= 65)", [])
+    check(Gauge.where { (t0..t1).include?(at) }, "#{GS} WHERE \"at\" >= $1 AND \"at\" <= $2", [t0, t1])
+    check(Gauge.where { (0.5..1.5).include?(ratio) }, "#{GS} WHERE \"ratio\" >= $1 AND \"ratio\" <= $2", [0.5, 1.5])
+  end
+
+  # What a range literal does not translate: its negation where the
+  # column can be NULL (three-valued, as `!(x < 5)`), a range not written
+  # in the block, a range by itself, and `between?`.
+  def test_range_literal_refusals
+    r = 1..5
+    x = assert_raise(Rotor::UntranslatableError) { Gauge.where { !(1..9).include?(level) }.to_sql }
+    assert_match(/\A`!\(1\.\.9\)\.include\?\(level\)` is three-valued in SQL when `level` can be NULL \(.*query_test\.qz:\d+\): test `level\.nil\?` explicitly \(`level\.nil\? \|\| !\(1\.\.9\)\.include\?\(level\)`\)\z/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Gauge.where { !(level < 9) }.to_sql }
+    assert_match(/is three-valued in SQL when `level` can be NULL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { r.include?(age) }.to_sql }
+    assert_match(/\Aa range not written in the block \(`r\.include\?\(age\)`: write the range in it, `\(a\.\.b\)\.include\?\(x\)`\) cannot be translated to SQL/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.query.order { (1..age) }.to_sql }
+    assert_match(/\Aa range by itself/, x.message)
+    x = assert_raise(Rotor::UntranslatableError) { Person.where { age.between?(1, 5) }.to_sql }
+    assert_match(/\A`age\.between\?\(1, 5\)` \(write `\(a\.\.b\)\.include\?\(x\)`\) cannot be translated to SQL/, x.message)
+  end
+
   def test_nil
     e: String? = nil
     f: String? = "a@b"

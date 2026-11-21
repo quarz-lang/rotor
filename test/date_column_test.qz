@@ -56,6 +56,10 @@ class DateColumnTextTest < Test::Case
     # is false.)
     assert_equal("#{COLS} WHERE \"ends\" < $1", DayStat.where { |s| s.ends < d }.to_sql[0])
     assert_equal("#{COLS} WHERE \"ends\" IS NULL", DayStat.where { |s| s.ends.nil? }.to_sql[0])
+    # A range written in the block (quarz#653): its bounds compared as
+    # any `Date` (`Date + Int` a `date + integer`).
+    assert_equal("#{COLS} WHERE \"day\" >= $1 AND \"day\" < $2::date + 7", DayStat.where { |s| (d...d + 7).include?(s.day) }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"ends\" >= \"day\" AND \"ends\" <= $1", DayStat.where { |s| (s.day..d).include?(s.ends) }.to_sql[0])
     # `include?` of a captured array.
     days = [d, d + 1]
     sql, params = DayStat.where { |s| days.include?(s.day) }.to_sql
