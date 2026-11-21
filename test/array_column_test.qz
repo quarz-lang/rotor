@@ -10,7 +10,25 @@ class Tagged < Rotor::Model
   end
 end
 
+# A redacted array column (rotor#130).
+class SecretCodes < Rotor::Model
+  table "secret_codes" do
+    column :id, Int, primary: true
+    column :codes, Array[String], redact: true
+  end
+end
+
 class ArrayColumnTextTest < Test::Case
+  # rotor#130: a redacted array column's value is not quoted in its type
+  # errors, loaded or given as an update's value.
+  def test_a_redacted_column_is_not_quoted
+    e = assert_raise(ArgumentError) { SecretCodes.load({id: 1, codes: ["s3cret", nil]}) }
+    assert_equal("SecretCodes#codes takes an Array of String, not a redacted value", e.message)
+    wrong = ["s3cret", nil]
+    message = refusal { SecretCodes.query.update { |t| {codes: wrong} } }
+    assert_equal("SecretCodes#codes takes an Array of String, not a redacted value", message)
+  end
+
   def test_columns
     assert_equal(["bigint", "text[]", "bigint[]"], Tagged.columns.map { |c| c.sql })
     tags = Tagged.columns[1]

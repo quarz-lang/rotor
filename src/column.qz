@@ -2,7 +2,7 @@
 type Value = Int | Float | String | Bool | Time | Date | Decimal | Bytes | Array[Int] | Array[String] | Array[Int?] | Array[String?] | JSON::Value
 
 # A column of a model's table, as its `table` block declares it.
-data Column = (
+data Column(
   # The column's name, which is also its getter's.
   name: Symbol,
   # Its SQL type (`bigint`, `double precision`, `text`, `boolean`,
@@ -30,6 +30,10 @@ data Column = (
   # another column.
   document: Type[Object]? = nil
 )
+  # `value` as an error message quotes it: its [inspect], or
+  # `a redacted value` for a column declared `redact: true`.
+  def shown(value: Object?) -> String = redact ? "a redacted value" : value.inspect
+end
 
 # An association of a model, as its `table` block declares it: what the
 # queries of a later version follow.
