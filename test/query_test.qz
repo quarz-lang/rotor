@@ -136,6 +136,8 @@ class QueryTest < Test::Case
     check(Person.where { (18..).include?(age) }, "#{COLS} WHERE \"age\" >= 18", [])
     check(Person.where { (..65).include?(age) }, "#{COLS} WHERE \"age\" <= 65", [])
     check(Person.where { (1..9).cover?(age) }, "#{COLS} WHERE \"age\" >= 1 AND \"age\" <= 9", [])
+    check(Person.where { (1..9).cover?(age) && admin }, "#{COLS} WHERE \"age\" >= 1 AND \"age\" <= 9 AND \"admin\"", [])
+    check(Person.where { !(1..9).cover?(age) }, "#{COLS} WHERE NOT (\"age\" >= 1 AND \"age\" <= 9)", [])
     check(Gauge.where { (lo..cap).include?(level) }, "#{GS} WHERE \"level\" >= $1 AND \"level\" <= \"cap\"", [3])
     check(Person.where { (1..9).include?(lo) && admin }, "#{COLS} WHERE $1::bigint >= 1 AND $2::bigint <= 9 AND \"admin\"", [3, 3])
     check(Person.where { (1..9).include?(age + 1) }, "#{COLS} WHERE \"age\" + 1 >= 1 AND \"age\" + 1 <= 9", [])
@@ -147,7 +149,7 @@ class QueryTest < Test::Case
 
   # What a range literal does not translate: its negation where the
   # column can be NULL (three-valued, as `!(x < 5)`), a range not written
-  # in the block, a range by itself, and `between?`.
+  # in the block, and a range by itself.
   def test_range_literal_refusals
     r = 1..5
     x = assert_raise(Rotor::UntranslatableError) { Gauge.where { !(1..9).include?(level) }.to_sql }
@@ -158,8 +160,22 @@ class QueryTest < Test::Case
     assert_match(/\Aa range not written in the block \(`r\.include\?\(age\)`: write the range in it, `\(a\.\.b\)\.include\?\(x\)`\) cannot be translated to SQL/, x.message)
     x = assert_raise(Rotor::UntranslatableError) { Person.query.order { (1..age) }.to_sql }
     assert_match(/\Aa range by itself/, x.message)
-    x = assert_raise(Rotor::UntranslatableError) { Person.where { age.between?(1, 5) }.to_sql }
-    assert_match(/\A`age\.between\?\(1, 5\)` \(write `\(a\.\.b\)\.include\?\(x\)`\) cannot be translated to SQL/, x.message)
+  end
+
+  # `x.between?(a, b)` (#126): `(a..b).include?(x)`'s two comparisons.
+  # (`Comparable#between?` takes a receiver that is not nil: a column
+  # that can be NULL has none, as `Rotor::Compare` gives `Nil` only the
+  # comparison operators.)
+  def test_between
+    lo = 3
+    t0 = Time.utc(2026, 1, 1)
+    t1 = Time.utc(2026, 2, 1)
+    check(Person.where { age.between?(18, 65) }, "#{COLS} WHERE \"age\" >= 18 AND \"age\" <= 65", [])
+    check(Person.where { age.between?(lo, age + 1) }, "#{COLS} WHERE \"age\" >= $1 AND \"age\" <= \"age\" + 1", [3])
+    check(Person.where { age.between?(1, 9) && admin }, "#{COLS} WHERE \"age\" >= 1 AND \"age\" <= 9 AND \"admin\"", [])
+    check(Person.where { joined.between?(t0, t1) }, "#{COLS} WHERE \"joined\" >= $1 AND \"joined\" <= $2", [t0, t1])
+    check(Person.where { score.between?(0.5, 1.5) }, "#{COLS} WHERE \"score\" >= $1 AND \"score\" <= $2", [0.5, 1.5])
+    check(Person.where { !age.between?(18, 65) }, "#{COLS} WHERE NOT (\"age\" >= 18 AND \"age\" <= 65)", [])
   end
 
   def test_nil

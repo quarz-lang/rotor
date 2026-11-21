@@ -378,7 +378,10 @@ Rotor::Statement.insert(u).on_conflict(:email).do_update { |old, new| {name: new
   both and does not compile: write `where { |u| true }`.
 - What translates: the columns' getters; `== != < <= > >=`, `+ - * / %`
   (`+` of strings is `||`) on numbers, strings, booleans and times;
-  `&&`, `||`, `!`; `nil?`; `if`/`?:` (`CASE WHEN`); `include?` on a
+  `&&`, `||`, `!`; `nil?`; `if`/`?:` (`CASE WHEN`); `include?` or
+  `cover?` of a range written in the block, and `between?` (`x >= a
+  AND x <= b`, `< b` for `a...b`, one comparison for a bound left out:
+  `(18..65).include?(age)`, `age.between?(18, 65)`); `include?` on a
   captured array or a literal one of literals (`= ANY($1)`, the array
   one parameter whatever its length; an array literal with other
   expressions is an `IN` list); [String#start_with?],

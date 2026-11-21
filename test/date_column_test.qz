@@ -60,6 +60,7 @@ class DateColumnTextTest < Test::Case
     # any `Date` (`Date + Int` a `date + integer`).
     assert_equal("#{COLS} WHERE \"day\" >= $1 AND \"day\" < $2::date + 7", DayStat.where { |s| (d...d + 7).include?(s.day) }.to_sql[0])
     assert_equal("#{COLS} WHERE \"ends\" >= \"day\" AND \"ends\" <= $1", DayStat.where { |s| (s.day..d).include?(s.ends) }.to_sql[0])
+    assert_equal("#{COLS} WHERE \"day\" >= $1 AND \"day\" <= $2::date + 7", DayStat.where { |s| s.day.between?(d, d + 7) }.to_sql[0])
     # `include?` of a captured array.
     days = [d, d + 1]
     sql, params = DayStat.where { |s| days.include?(s.day) }.to_sql

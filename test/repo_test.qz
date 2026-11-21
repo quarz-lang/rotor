@@ -237,6 +237,18 @@ class RepoTest < Test::Case
   # NULL: `x >= lo AND x <= hi` holds for no NULL row, as Quarz's
   # `include?(nil)` is false; its negation, three-valued, is written with
   # `nil?` and gives the NULL row, as in Quarz.
+  # `x.between?(a, b)` (#126) against the server: both bounds kept.
+  def test_between_against_the_server
+    with_repo do |repo|
+      [17, 18, 40, 65, 66].each { |a| repo.insert(member("m#{a}", a)) }
+      lo = 18
+      got = repo.all(Member.where { age.between?(lo, 65) }.order { id }).map { |m| m.age }
+      assert_equal([18, 40, 65], got)
+      got = repo.all(Member.where { !age.between?(lo, 65) }.order { id }).map { |m| m.age }
+      assert_equal([17, 66], got)
+    end
+  end
+
   def test_a_range_literal_against_the_server
     with_repo do |repo|
       t0 = Time.utc(2026, 1, 1)
