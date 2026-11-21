@@ -162,6 +162,16 @@ class QueryTest < Test::Case
     assert_match(/\Aa range by itself/, x.message)
   end
 
+  # Whether a call gives a `Bool` is its methods' declared result (#128):
+  # a `Bool` method's call is a condition (`&&` takes it as is), and a
+  # call of another result tested for its truthiness is `IS NOT NULL`,
+  # as before.
+  def test_a_call_is_a_bool_by_its_methods_result
+    check(Person.where { age.between?(1, 9) && admin }, "#{COLS} WHERE \"age\" >= 1 AND \"age\" <= 9 AND \"admin\"", [])
+    check(Person.where { (age + 1 ? admin : false) }, "#{COLS} WHERE CASE WHEN \"age\" + 1 IS NOT NULL THEN \"admin\" ELSE FALSE END", [])
+    check(Person.where { (name + "x" ? admin : false) }, "#{COLS} WHERE CASE WHEN \"name\" || $1 IS NOT NULL THEN \"admin\" ELSE FALSE END", ["x"])
+  end
+
   # `x.between?(a, b)` (#126): `(a..b).include?(x)`'s two comparisons.
   # (`Comparable#between?` takes a receiver that is not nil: a column
   # that can be NULL has none, as `Rotor::Compare` gives `Nil` only the
