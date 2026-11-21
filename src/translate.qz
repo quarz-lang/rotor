@@ -1442,8 +1442,10 @@ class Translator
       classes(recv)
     # (A call of methods all declared to give a `Bool`, as each says of
     # itself, quarz's `Meta::MethodRef#result` (#128): not a list of
-    # names, where a method left out was read as a value to test.)
-    in Meta::Expr::Call(Meta::Expr, m, ms, _, nil, _) if !m.singleton && ms.all? { |r| r.result == Bool } && column_of(e).nil?
+    # names, where a method left out was read as a value to test. The
+    # method the call was resolved to and each a union receiver's members
+    # run: `methods` need not hold `method`, docs/14 §6.)
+    in Meta::Expr::Call(Meta::Expr, m, ms, _, nil, _) if !m.singleton && m.result == Bool && ms.all? { |r| r.result == Bool } && column_of(e).nil?
       [Bool]
     # (The call's, and nil where the receiver can be: as translated.)
     in Meta::Expr::SafeCall(recv, m, ms, args, block, line)
