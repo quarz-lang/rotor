@@ -91,17 +91,50 @@ module Preloads
     end
   end
 
+  # The rows by the key `key_of` gives each (rows without one left out),
+  # in their order: each key's rows gather in an `Array::Builder`,
+  # appended in place. Pushing onto an array a hash still holds would copy
+  # it, quadratic in the rows of one key (rotor#133, the shape of
+  # quarz-lang/quarz#1123).
+  #
+  # :nodoc:
+  def self.group[T](rows: Array[T], &key_of: (T) -> Value?) -> Hash[Value, Array[T]]
+    groups = Hash::Builder[Value, Array::Builder[T]].new
+    rows.each do |row|
+      k = key_of.call(row)
+      add(groups, k, row) unless k.nil?
+    end
+    finish(groups)
+  end
+
+  # :nodoc:
+  # Appends `row` to the group of `k`.
+  private def self.add[T](groups: Hash::Builder[Value, Array::Builder[T]], k: Value, row: T) -> Void
+    bucket = groups[k]?
+    if bucket
+      bucket << row
+    else
+      groups[k] = Array::Builder[T].new.push(row)
+    end
+    nil
+  end
+
+  # :nodoc:
+  # The groups as a hash of arrays, handed over without copying.
+  private def self.finish[T](groups: Hash::Builder[Value, Array::Builder[T]]) -> Hash[Value, Array[T]]
+    Hash.build do |out|
+      groups.each { |k, b| out[k] = b.to_a }
+    end
+  end
+
   # Each model's `a` (a `has_many`): those it has preloaded, else the
   # target's rows whose foreign key is its key.
   private def self.has_many(repo: Repo, models: Array[Model], info: TableInfo, a: Association) -> Array[Array[Model]]
     pk = info.single_key("`#{info.name}`", "`#{a.name}`")
     HasMany.foreign_key!(a.target, a.foreign_key, models[0].class.name, a.name)
     keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
-    by_key: Hash[Value, Array[Model]] = {}
-    fetch(repo, a.target, a.foreign_key, keys).each do |row|
-      k = Model.value(row.read(a.foreign_key))
-      next if k.nil?
-      by_key = by_key.put(k, (by_key[k]? || []) + [row])
+    by_key = group(fetch(repo, a.target, a.foreign_key, keys)) do |row|
+      Model.value(row.read(a.foreign_key))
     end
     models.map do |m|
       if found = m.preloaded(a.name)
@@ -122,7 +155,7 @@ module Preloads
     pk = info.single_key("`#{info.name}`", "`#{a.name}`")
     k = Through.keys(models[0].class, a)
     keys = distinct(models.select { |m| m.preloaded(a.name).nil? }.map { |m| Model.key_of(m, pk) })
-    by_key: Hash[Value, Array[Model]] = {}
+    groups = Hash::Builder[Value, Array::Builder[Model]].new
     seen: Hash[[Value, Value?], Bool] = {}
     unless keys.empty?
       repo.all(a.target.query.through_owners(k, keys)).each do |pair|
@@ -132,9 +165,10 @@ module Preloads
         t = Model.value(row.read(k.target_pk))
         next if seen.key?([o, t])
         seen = seen.put([o, t], true)
-        by_key = by_key.put(o, (by_key[o]? || []) + [row])
+        add(groups, o, row)
       end
     end
+    by_key = finish(groups)
     models.map do |m|
       if found = m.preloaded(a.name)
         found
