@@ -1,0 +1,26 @@
+require "test"
+
+# rotor#133: preloading groups the rows of a has_many (or a through) by
+# their key, each key's rows appended in place: linear in the rows of one
+# key, which pushing onto an array the hash still held made quadratic
+# (80,000 rows of one key took 74 s).
+class PreloadGroupTest < Test::Case
+  def test_rows_keep_their_order_by_key
+    rows = [1, 2, 3, 4, 5, 6]
+    groups = Rotor::Preloads.group(rows) { |r| r % 3 == 0 ? nil : r % 2 }
+    assert_equal([1, 5], groups[1])
+    assert_equal([2, 4], groups[0])
+    assert_equal(2, groups.size)
+  end
+
+  # Many rows under one key: a bound a debug build keeps by far when the
+  # grouping is linear (the quadratic one took minutes at this size).
+  def test_one_key_with_many_rows_is_linear
+    rows = (0...100_000).to_a
+    t = Time.monotonic
+    groups = Rotor::Preloads.group(rows) { |_| 1 }
+    took = Time.monotonic - t
+    assert_equal(100_000, groups[1].size)
+    assert_true(took < 20.seconds, "grouping 100,000 rows of one key took #{took}")
+  end
+end
