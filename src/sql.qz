@@ -10,9 +10,26 @@ module SQL
   # Rotor::SQL.like("Ann", "A%")  # => true
   # Rotor::SQL.like("Ann", "a%")  # => false
   # ```
+  #
+  # A pattern built from input takes the input's `%` and `_` as wildcards:
+  # pass the input through [escape_like] (`start_with?`, `end_with?` and
+  # `include?` escape their argument themselves).
+  #
+  # ```
+  # Rotor::SQL.like("50 off", "50_off")                           # => true
+  # Rotor::SQL.like("50 off", Rotor::SQL.escape_like("50_off"))   # => false
+  # Rotor::SQL.like("50_off!", "#{Rotor::SQL.escape_like("50_off")}%")  # => true
+  # ```
   def self.like(s: String, pattern: String) -> Bool = Regexp.new("\\A#{like_regexp(pattern)}\\z", "m").match?(s)
 
-  # `like` with case folded: SQL's ILIKE.
+  # `like` with case folded: SQL's ILIKE. As for `like`, input in the
+  # pattern goes through [escape_like], or its `%` and `_` are wildcards.
+  #
+  # ```
+  # Rotor::SQL.ilike("Ann", "a%")                                  # => true
+  # Rotor::SQL.ilike("A_n", Rotor::SQL.escape_like("a_n"))         # => true
+  # Rotor::SQL.ilike("Abn", Rotor::SQL.escape_like("a_n"))         # => false
+  # ```
   def self.ilike(s: String, pattern: String) -> Bool = like(s.downcase, pattern.downcase)
 
   # `c`, which is not nil: in a query's block, a nullable column where
