@@ -156,6 +156,35 @@ class DecimalColumnTextTest < Test::Case
     assert_equal("1.0 is not a value of Invoice#total", e.message)
   end
 
+  # rotor#135: a value past a `numeric(p, s)` column's range is the
+  # field's own error, as the server decides it: rounded to the scale,
+  # half away from zero, at most p - s integer digits.
+  def test_changeset_range
+    assert_equal("[[nil, nil], [nil, nil], [5, 2], [nil, nil]]", Invoice.columns.map { |c| [c.precision, c.scale] }.inspect)
+    a = Invoice.load({id: 1, total: dec("1.00"), rate: nil, approx: nil})
+    rate = ->(text: String) do
+      params: Hash[String, Object?] = {"rate" => text}
+      Rotor::Changeset.cast(a, params, [:rate])
+    end
+    ["999.99", "999.994", "-999.994", "0.001", "0.0049", "1.123456"].each do |text|
+      assert(rate.call(text).valid?, text)
+    end
+    ["999.995", "-999.995", "1000", "1e999", "1e3"].each do |text|
+      cs = rate.call(text)
+      assert_equal(["is out of range"], cs.errors_on(:rate), text)
+      assert_equal(:range, cs.errors[0].validation)
+      assert_equal("{precision: 5, scale: 2}", cs.errors[0].meta.inspect, text)
+      assert(cs.changes.empty?)
+    end
+    # A plain `numeric` has no range of its own.
+    params: Hash[String, Object?] = {"total" => "1e999"}
+    assert(Rotor::Changeset.cast(a, params, [:total]).valid?)
+    assert(Rotor::Changeset.fits_numeric?(dec("0.5"), 1, 0))
+    assert(!Rotor::Changeset.fits_numeric?(dec("9.5"), 1, 0))
+    assert(Rotor::Changeset.fits_numeric?(dec("-0.5"), 1, 1))
+    assert(!Rotor::Changeset.fits_numeric?(dec("-0.95"), 1, 1))
+  end
+
   def test_schema
     models: Array[Type[Rotor::Model]] = [Invoice]
     sql = Rotor::Schema.operations(models).flat_map { |op| Rotor::Migrator.render(op) }
@@ -210,6 +239,13 @@ class DecimalColumnTest < Test::Case
       # A `numeric(5, 2)` column rounds on assignment (the server's).
       assert_equal("0.13", got.rate.as(Decimal).to_s)
       b = repo.insert(Invoice.new(total: dec("19.990")))
+      # rotor#135: a value the column cannot hold is an Outcome, not a
+      # server error (22003).
+      params: Hash[String, Object?] = {"rate" => "1000"}
+      case repo.update(Rotor::Changeset.cast(b, params, [:rate]))
+      in Rotor::Outcome::Invalid(cs) then assert_equal(["is out of range"], cs.errors_on(:rate))
+      in Rotor::Outcome::Ok(_) then flunk("saved")
+      end
       assert_equal("19.990", (repo.get(Invoice, b.id) || raise "not found").total.to_s)
       # Exact comparison on the server.
       d = dec("0.1")

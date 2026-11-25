@@ -103,6 +103,9 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
       in [true, v]
         if v.nil? && !c.null
           errors = errors + [FieldError.new(f, "can't be blank", :required)]
+        elsif (p = c.precision) && (s = c.scale) && (d = v.as?(Decimal)) && !Changeset.fits_numeric?(d, p, s)
+          # (The server would refuse it, 22003: an error of the field.)
+          errors = errors + [FieldError.new(f, "is out of range", :range, {precision: p, scale: s})]
         elsif current[f]? != v
           changes = changes.put(f, v)
         end
@@ -145,7 +148,8 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     in String => s
       x = s.strip
       if t == String
-        [true, s]
+        # (A NUL, which PostgreSQL's text cannot hold, does not cast.)
+        s.include?("\0") ? [false, nil] : [true, s]
       elsif t == Int
         Changeset.int?(x) ? [true, x.to_i] : [false, nil]
       elsif t == Float
@@ -588,6 +592,21 @@ data Changeset[M <: Model](data: M, changes: Hash[Symbol, Value?], errors: Array
     x = s.match?(/\A\d{4}-\d\d-\d\d \d/) ? s.sub(" ", "T") : s
     return x unless x.match?(/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?\z/)
     x.size == 16 ? "#{x}:00Z" : "#{x}Z"
+  end
+
+  # Whether `d` fits a `numeric(precision, scale)` column, as the server
+  # decides: rounded to `scale` fraction digits, half away from zero, it
+  # has at most `precision - scale` integer digits. (More fraction digits
+  # fit: the server rounds them.)
+  #
+  # ```
+  # Rotor::Changeset.fits_numeric?(Decimal.parse("9.994"), 3, 2)   # => true
+  # Rotor::Changeset.fits_numeric?(Decimal.parse("9.995"), 3, 2)   # => false
+  # Rotor::Changeset.fits_numeric?(Decimal.parse("-0.5"), 1, 1)    # => true
+  # ```
+  def self.fits_numeric?(d: Decimal, precision: Int, scale: Int) -> Bool
+    whole = d.round(scale, Decimal::Rounding::HalfUp).to_s.delete("-").partition(".")[0].sub(/\A0+/, "")
+    whole.size <= precision - scale
   end
 
   # Whether `v` is of column `c`'s class exactly (a change put by code).

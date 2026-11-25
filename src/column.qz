@@ -28,7 +28,12 @@ data Column(
   # For a document column (`json: true`): the `data` type its getter
   # gives, its value held as the [JSON::Value] stored ([type]); nil for
   # another column.
-  document: Type[Object]? = nil
+  document: Type[Object]? = nil,
+  # For a `numeric(precision, scale)` column: its precision and scale,
+  # which a changeset checks a value against ([Rotor::Changeset.cast]);
+  # nil for another column, a plain `numeric` included.
+  precision: Int? = nil,
+  scale: Int? = nil
 )
   # `value` as an error message quotes it: its [inspect], or
   # `a redacted value` for a column declared `redact: true`.
