@@ -120,6 +120,10 @@ class CastTest < Test::Case
     assert_equal(["is invalid"], nested.errors_on(:name))
     assert_equal(["is invalid"], nested.errors_on(:age))
     assert(!nested.params.key?("name"))
+    # rotor#135: a NUL, which PostgreSQL's text cannot hold.
+    nul = cast({"name" => "a\0b"}, [:name])
+    assert_equal(["is invalid"], nul.errors_on(:name))
+    assert_equal(:cast, nul.errors[0].validation)
   end
 
   def test_empty_and_nil
@@ -379,6 +383,17 @@ class ChangesetRepoTest < Test::Case
     case outcome
     in Rotor::Outcome::Ok(v) then flunk("saved: #{v.inspect}")
     in Rotor::Outcome::Invalid(cs) then cs
+    end
+  end
+
+  # rotor#135: a value the server would refuse is the changeset's error,
+  # and the save an Outcome, not a PG::ServerError.
+  def test_a_nul_is_an_outcome_not_a_server_error
+    with_repo do |repo|
+      u = ok(repo.insert(KUser.registration({"email" => "ann@example.com", "name" => "Ann"})))
+      bad = invalid(repo.update(Rotor::Changeset.cast(u, {"name" => "An\0n"}, [:name])))
+      assert_equal(["is invalid"], bad.errors_on(:name))
+      assert_equal(["Ann"], repo.all(KUser.query).map { |x| x.name })
     end
   end
 
