@@ -460,7 +460,9 @@ class Repo
   # (A statement by the model's key changed no row.)
   private def stale!(model: Model) -> Nothing
     values = model.to_h
-    named = model.table_info.primary_keys.map { |k| " #{k}: #{values[k]?.inspect}" }.join(",")
+    info = model.table_info
+    hidden = info.columns.select { |c| c.redact }.map { |c| c.name }
+    named = info.primary_keys.map { |k| " #{k}: #{show_attr(hidden, k, values[k]?)}" }.join(",")
     raise StaleError.new("#{model.class.name}#{named}: its row no longer exists")
   end
 
