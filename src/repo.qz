@@ -221,11 +221,13 @@ class Repo
   # connection (pg's statement cache), one per row count, and a cached
   # insert of many rows holds much memory on the server (about 850 KiB
   # for 1000 rows of 5 columns), so a plain insert and one with
-  # `do_nothing` go in statements whose row counts are powers of two,
-  # the largest first (1000 rows: 512, 256, 128, 64, 32 and 8): at most
-  # one text per power for a table's columns, whatever the batches'
-  # sizes (rotor#137). A `do_update` keeps one statement for the whole
-  # batch: PostgreSQL refuses a statement whose rows conflict with each
+  # `do_nothing` of more than `SPLIT_ABOVE` (16) rows go in statements
+  # whose row counts are powers of two, the largest first (1000 rows:
+  # 512, 256, 128, 64, 32 and 8): at most one text per power for a
+  # table's columns, whatever the batches' sizes (rotor#137). A batch
+  # of 16 rows or fewer is one statement, as on its own: small texts
+  # cost little, and a split would cost round trips. A `do_update`
+  # keeps one statement for the whole batch: PostgreSQL refuses a statement whose rows conflict with each
   # other there (21000, "cannot affect row a second time"), while rows
   # in two statements would update in turn, so splitting would change
   # that error into a success. Past PostgreSQL's 65535 parameters any
@@ -245,6 +247,12 @@ class Repo
   MAX_PARAMS = 65535
 
   # :nodoc:
+  # The most rows of a plain or `do_nothing` insert that go in one
+  # statement whatever their number ([insert_all]); a larger batch is
+  # split into statements of powers of two rows.
+  SPLIT_ABOVE = 16
+
+  # :nodoc:
   # `insert_all` with statements of at most `max_params` parameters.
   def insert_chunked[M <: Model](insert: Insert[M], max_params: Int) -> Array[M]
     now = Repo.now
@@ -255,7 +263,7 @@ class Repo
     room = max_params - insert.conflict_params
     size = per_row == 0 ? stamped.size : room / per_row
     raise ArgumentError.new("`insert_all`: a row of #{per_row} parameters and a conflict clause of #{insert.conflict_params} pass #{max_params}") if size < 1
-    chunks = if insert.updates?
+    chunks = if insert.updates? || stamped.size <= SPLIT_ABOVE
                stamped.each_slice(size).to_a
              else
                out: Array[Array[M]] = []
