@@ -87,6 +87,31 @@ class QueryTest < Test::Case
     check(Person.query, COLS, [])
   end
 
+  # rotor#136: a key's value is cast to its column's type, as a changeset
+  # casts a parameter; one that does not cast is refused.
+  def test_where_key_casts_the_value
+    by_id = "#{COLS} WHERE \"id\" = $1"
+    check(Person.query.where_key(:id, 7), by_id, [7])
+    check(Person.query.where_key(:id, "7"), by_id, [7])
+    check(Person.query.where_key(:id, " +007 "), by_id, [7])
+    check(Person.query.where_key(:score, 2), "#{COLS} WHERE \"score\" = $1", [2.0])
+    # A value of the column's class as it is: an empty String too.
+    check(Person.query.where_key(:email, ""), "#{COLS} WHERE \"email\" = $1", [""])
+    check(Person.query.where_key(:email, nil), "#{COLS} WHERE \"email\" IS NULL", [])
+    check(Person.query.where_key(:admin, false), "#{COLS} WHERE \"admin\" = $1", [false])
+    check(Person.query.where_key(:admin, "off"), "#{COLS} WHERE \"admin\" = $1", [false])
+    ["abc", "0x10", "1_000", " ", "7.0"].each do |v|
+      e = assert_raise(ArgumentError) { Person.query.where_key(:id, v) }
+      assert_equal("`people.id` (Int) does not take this String", e.message)
+    end
+    e = assert_raise(ArgumentError) { Person.query.where_key(:id, 7.5) }
+    assert_equal("`people.id` (Int) does not take this Float", e.message)
+    e = assert_raise(ArgumentError) { Person.query.where_key(:id, true) }
+    assert_equal("`people.id` (Int) does not take this Bool", e.message)
+    e = assert_raise(ArgumentError) { Person.query.where_key(:name, 7) }
+    assert_equal("`people.name` (String) does not take this Int", e.message)
+  end
+
   def test_comparisons
     min = 18
     check(Person.where { age > 18 }, "#{COLS} WHERE \"age\" > 18", [])

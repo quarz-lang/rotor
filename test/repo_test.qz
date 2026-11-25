@@ -265,6 +265,24 @@ class RepoTest < Test::Case
     end
   end
 
+  # rotor#136: `get` casts a String key as a changeset would; one that
+  # does not cast names no record, a value of another class is refused.
+  def test_get_casts_the_key
+    with_repo do |repo|
+      m = repo.insert(member("Ann"))
+      ["#{m.id}", " #{m.id} ", "+#{m.id}", "00#{m.id}"].each do |s|
+        assert_equal(m.id, (repo.get(Member, s) || raise "not found: #{s.inspect}").id)
+      end
+      ["abc", "", " ", "0x#{m.id}", "#{m.id}.0", "99999999999999999999"].each do |s|
+        assert_nil(repo.get(Member, s), s.inspect)
+      end
+      assert_nil(repo.get(Member, {id: "abc"}))
+      e = assert_raise(ArgumentError) { repo.get(Member, 1.0) }
+      assert_equal("`members.id` (Int) does not take this Float", e.message)
+      assert_raise(ArgumentError) { repo.get(Member, {id: true}) }
+    end
+  end
+
   def test_insert_sets_the_key_and_timestamps
     with_repo do |repo|
       before = Time.now
