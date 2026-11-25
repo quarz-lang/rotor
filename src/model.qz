@@ -2,7 +2,9 @@
 # columns a query fetched (nil: all), and the associations preloaded
 # (by name: the associated models, none or one for a `belongs_to`): what
 # a model is made of ([Rotor::Model#checkpoint], [Rotor::Model#restore]).
-data Checkpoint(attrs: Hash[Symbol, Value?], changed: Array[Symbol], loaded: Array[Symbol]?, assocs: Hash[Symbol, Array[Model]] = {}, docs: Hash[Symbol, [Value?, Shareable]] = {})
+# `hidden` names the columns declared `redact: true` (set by `checkpoint`),
+# for `inspect`; it is no part of the value.
+data Checkpoint(attrs: Hash[Symbol, Value?], changed: Array[Symbol], loaded: Array[Symbol]?, assocs: Hash[Symbol, Array[Model]] = {}, docs: Hash[Symbol, [Value?, Shareable]] = {}, hidden: Array[Symbol] = [])
   # Equal by what a model is made of, as before `docs` (rotor#116): the
   # decoded documents handed over are a cache of `attrs`' documents, not
   # part of the value.
@@ -14,6 +16,23 @@ data Checkpoint(attrs: Hash[Symbol, Value?], changed: Array[Symbol], loaded: Arr
   end
 
   def hash -> Int = [attrs, changed, loaded, assocs].hash
+
+  # The checkpoint as text, a redacted column's value hidden as in the
+  # model's `inspect` (the decoded documents are a cache of `attrs`:
+  # their columns only are named).
+  def inspect -> String
+    shown = attrs.map { |k, v| "#{k}: #{show_attr(hidden, k, v)}" }.join(", ")
+    "#<Rotor::Checkpoint attrs: {#{shown}}, changed: #{changed.inspect}, loaded: #{loaded.inspect}, " \
+      "assocs: #{assocs.inspect}, docs: #{docs.keys.inspect}>"
+  end
+
+  def to_s -> String = inspect
+end
+
+# A column's value as a model's `inspect` shows it: `**redacted**` for a
+# column declared `redact: true` (`hidden` names them), else its `inspect`.
+def show_attr(hidden: Array[Symbol], name: Symbol, value: Value?) -> String
+  hidden.include?(name) ? "**redacted**" : value.inspect
 end
 
 # The base class of a model: a row of a table, with typed accessors that
@@ -379,7 +398,9 @@ class Model
   end
 
   # What the model is made of.
-  def checkpoint -> Checkpoint = Checkpoint.new(@attrs, @changed, @loaded, @assocs, handover(@attrs))
+  def checkpoint -> Checkpoint
+    Checkpoint.new(@attrs, @changed, @loaded, @assocs, handover(@attrs), table_info.columns.select { |c| c.redact }.map { |c| c.name })
+  end
 
   # The models preloaded for the association `name`, or nil when it was
   # not ([Rotor::Repo#preload]).
@@ -444,7 +465,7 @@ class Model
   # declared `redact: true` hidden.
   def inspect -> String
     hidden = table_info.columns.select { |c| c.redact }.map { |c| c.name }
-    "#<#{self.class.name} #{@attrs.map { |k, v| "#{k}: #{hidden.include?(k) ? "**redacted**" : v.inspect}" }.join(", ")}>"
+    "#<#{self.class.name} #{@attrs.map { |k, v| "#{k}: #{show_attr(hidden, k, v)}" }.join(", ")}>"
   end
 
   def to_s -> String = inspect

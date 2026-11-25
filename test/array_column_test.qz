@@ -29,6 +29,18 @@ class ArrayColumnTextTest < Test::Case
     assert_equal("SecretCodes#codes takes an Array of String, not a redacted value", message)
   end
 
+  # rotor#134: a checkpoint's inspect hides a redacted column as the
+  # model's does.
+  def test_a_checkpoint_hides_a_redacted_column
+    m = SecretCodes.load({id: 1, codes: ["s3cret"]})
+    text = m.checkpoint.inspect
+    refute(text.include?("s3cret"))
+    assert(text.include?("codes: **redacted**"))
+    assert(text.include?("id: 1"))
+    assert_equal(text, m.checkpoint.to_s)
+    refute(m.inspect.include?("s3cret"))
+  end
+
   def test_columns
     assert_equal(["bigint", "text[]", "bigint[]"], Tagged.columns.map { |c| c.sql })
     tags = Tagged.columns[1]

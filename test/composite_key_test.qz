@@ -10,6 +10,14 @@ class CReading < Rotor::Model
   end
 end
 
+# A redacted key (rotor#134): its value stays out of a StaleError's message.
+class CVault < Rotor::Model
+  table "c_vaults" do
+    column :token, String, primary: true, redact: true
+    column :label, String
+  end
+end
+
 # A `belongs_to` whose target has a composite key: refused when used.
 class CNote < Rotor::Model
   table "c_notes" do
@@ -124,8 +132,8 @@ class CompositeKeyTest < Test::Case
       c = PG.connect(server.url)
       begin
         # (Dropped first: PG_TEST_URL's server outlives a run.)
-        c.exec("DROP TABLE IF EXISTS c_notes, c_readings, c_switches, c_flags, c_lamps")
-        models: Array[Type[Rotor::Model]] = [CReading, CSwitch, CFlag, CLamp]
+        c.exec("DROP TABLE IF EXISTS c_notes, c_readings, c_switches, c_flags, c_lamps, c_vaults, c_vaults")
+        models: Array[Type[Rotor::Model]] = [CReading, CSwitch, CFlag, CLamp, CVault]
         Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
         c.exec("CREATE TABLE c_notes (id bigserial PRIMARY KEY, c_reading_id bigint NOT NULL)")
       ensure
@@ -152,7 +160,7 @@ class CompositeKeyTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE c_readings, c_notes, c_switches, c_flags, c_lamps")
+      c.exec("TRUNCATE c_readings, c_notes, c_switches, c_flags, c_lamps, c_vaults")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -183,6 +191,17 @@ class CompositeKeyTest < Test::Case
       assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
       e = assert_raise(Rotor::StaleError) { repo.update(r.with(value: 3)) }
       assert_match(/\ACReading sensor_id: "a", taken_at: .+: its row no longer exists\z/, e.message)
+    end
+  end
+
+  # rotor#134: a StaleError's message shows a redacted key as the model's
+  # inspect does.
+  def test_a_stale_message_hides_a_redacted_key
+    with_repo do |repo|
+      v = repo.insert(CVault.new(token: "tok-s3cret", label: "a"))
+      repo.delete(v)
+      e = assert_raise(Rotor::StaleError) { repo.delete(v) }
+      assert_equal("CVault token: **redacted**: its row no longer exists", e.message)
     end
   end
 
