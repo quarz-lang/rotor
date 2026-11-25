@@ -397,6 +397,10 @@ class Insert[M <: Model] < Changes[M]
   def conflict? -> Bool = @conflict
 
   # :nodoc:
+  # Whether its conflict clause is a `do_update`.
+  def updates? -> Bool = !@update.nil?
+
+  # :nodoc:
   # The same insert of `model`'s row (the repository's, its timestamps
   # set).
   def with_models(models: Array[M]) -> Insert[M] = Insert[M].new(models, @action, @where, @conflict, @update)

@@ -140,6 +140,33 @@ class Counting < Rotor::Adapter
   def transaction(&: (Rotor::Adapter) -> Object?) -> Object? = @inner.transaction { |a| yield a }
 end
 
+# An adapter that records the statements it runs, those of a
+# transaction it opens too (as "BEGIN" ... "COMMIT"), for the
+# statements of `insert_all` (rotor#137).
+class Recorder < Rotor::Adapter
+  @inner: Rotor::Adapter
+  @log: Atom[Array[String]]
+
+  def initialize(@inner: Rotor::Adapter, @log: Atom[Array[String]] = Atom[Array[String]].new([])); end
+
+  # What ran, in order.
+  def log -> Array[String] = @log.get
+
+  def query(sql: String, params: Array[Object?]) -> Rotor::Rows
+    @log.update { |xs| xs + [sql] }
+    @inner.query(sql, params)
+  end
+
+  def transaction(&: (Rotor::Adapter) -> Object?) -> Object?
+    @log.update { |xs| xs + ["BEGIN"] }
+    r = @inner.transaction { |a| yield Recorder.new(a, @log) }
+    @log.update { |xs| xs + ["COMMIT"] }
+    r
+  end
+
+  def in_transaction? -> Bool = @inner.in_transaction?
+end
+
 # Against a real server (PG::Testing): the repository's statements.
 class RepoTest < Test::Case
   SERVER = Atom[PG::Testing::Server | String].new("not started")
@@ -773,6 +800,89 @@ class RepoTest < Test::Case
       e = assert_raise(ArgumentError) { repo.upsert(Rotor::Statement.insert_all(batch).on_conflict.do_nothing) }
       assert_equal("`upsert` of the rows of several models: `insert_all` runs those", e.message)
     end
+  end
+
+  # The rows of each INSERT in `log` (the other entries as they are).
+  def shapes(log: Array[String]) -> Array[String]
+    log.map { |s| s.start_with?("INSERT") ? (s.split("), (").size).to_s : s }
+  end
+
+  # rotor#137: a plain insert and a `do_nothing` of more than 16 rows
+  # go in statements of powers of two rows, largest first, in one
+  # transaction; 16 rows or fewer, and a `do_update`, stay one statement,
+  # split only past the parameter limit, as before.
+  def test_insert_all_statements
+    with_repo do |repo|
+      rows = ->(prefix: String, n: Int) { (1..n).map { |i| Sensor.new(serial: "#{prefix}#{i}", name: "n") } }
+      shapes_of = ->(f: (Rotor::Repo) -> Object?) do
+        rec = Recorder.new(repo.adapter)
+        f.call(Rotor::Repo.new(rec))
+        shapes(rec.log)
+      end
+      # Small: one statement, as it is, no transaction of its own.
+      assert_equal(["7"], shapes_of.call(->(r: Rotor::Repo) { r.insert_all(rows.call("a", 7)) }))
+      assert_equal(["16"], shapes_of.call(->(r: Rotor::Repo) { r.insert_all(rows.call("b", 16)) }))
+      assert_equal(["BEGIN", "16", "1", "COMMIT"], shapes_of.call(->(r: Rotor::Repo) { r.insert_all(rows.call("c", 17)) }))
+      assert_equal(["BEGIN", "64", "32", "4", "COMMIT"], shapes_of.call(->(r: Rotor::Repo) { r.insert_all(rows.call("d", 100)) }))
+      assert_equal(["BEGIN", "16", "1", "COMMIT"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.insert_all(Rotor::Statement.insert_all(rows.call("e", 17)).on_conflict(:serial).do_nothing) }))
+      # `do_update`: one statement for the batch, whatever its size.
+      assert_equal(["100"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.insert_all(Rotor::Statement.insert_all(rows.call("d", 100)).on_conflict(:serial).do_update { |old, new| {hits: old.hits + 1} }) }))
+      # The parameter limit (15: 3 rows of 5): a batch above 16 in powers
+      # of two up to it; 16 or fewer, and `do_update`, in as few
+      # statements as hold it, as before.
+      assert_equal(["BEGIN", "2", "2", "2", "2", "2", "2", "2", "2", "1", "COMMIT"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.insert_chunked(Rotor::Statement.insert_all(rows.call("f", 17)), 15) }))
+      assert_equal(["BEGIN", "3", "3", "1", "COMMIT"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.insert_chunked(Rotor::Statement.insert_all(rows.call("g", 7)), 15) }))
+      assert_equal(["BEGIN", "3", "3", "3", "3", "3", "2", "COMMIT"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.insert_chunked(Rotor::Statement.insert_all(rows.call("f", 17)).on_conflict(:serial).do_update { |old, new| {hits: old.hits + 1} }, 15) }))
+      # Inside a transaction: nothing of its own (the BEGIN is the caller's).
+      assert_equal(["BEGIN", "16", "1", "COMMIT"],
+                   shapes_of.call(->(r: Rotor::Repo) { r.transaction { |tx| tx.insert_all(rows.call("h", 17)) } }))
+      # Atomic: a failure in the last statement leaves nothing of the others.
+      before = repo.count(Sensor.query)
+      bad = rows.call("i", 16) + [Sensor.new(serial: "a1", name: "n")]
+      rec = Recorder.new(repo.adapter)
+      assert_raise(PG::ServerError) { Rotor::Repo.new(rec).insert_all(bad) }
+      assert_equal(["BEGIN", "16", "1"], shapes(rec.log))
+      assert_equal(before, repo.count(Sensor.query))
+    end
+  end
+
+  # rotor#137: rows of one batch that conflict with each other, where
+  # the split separates them (17 rows: 16 + 1, the first and the last
+  # conflicting), give what one statement gives: an error without a
+  # clause, the first kept with `do_nothing`, PostgreSQL's 21000 with
+  # `do_update` (one statement, not split).
+  def test_insert_all_rows_that_conflict_with_each_other
+    with_repo do |repo|
+      batch = [Sensor.new(serial: "x", name: "first")] + (1..15).map { |i| Sensor.new(serial: "y#{i}", name: "n") } +
+              [Sensor.new(serial: "x", name: "last")]
+      e = assert_raise(PG::ServerError) { repo.insert_all(batch) }.as(PG::ServerError)
+      assert_equal("23505", e.code)
+      assert_equal(0, repo.count(Sensor.query))
+      kept = repo.insert_all(Rotor::Statement.insert_all(batch).on_conflict(:serial).do_nothing)
+      assert_equal(16, kept.size)
+      assert_equal(["first"], repo.all(Sensor.where { serial == "x" }).map { |s| s.name })
+      assert_equal(16, repo.count(Sensor.query))
+      repo.adapter.query("TRUNCATE sensors", [])
+      e = assert_raise(PG::ServerError) { repo.insert_all(Rotor::Statement.insert_all(batch).on_conflict(:serial).do_update { |old, new| {name: new.name} }) }.as(PG::ServerError)
+      assert_equal("21000", e.code)
+      assert_equal(0, repo.count(Sensor.query))
+    end
+  end
+
+  def test_chunk_sizes
+    assert_equal([512, 256, 128, 64, 32, 8], Rotor::Repo.chunk_sizes(1000, 65535 / 5))
+    assert_equal([1], Rotor::Repo.chunk_sizes(1, 100))
+    assert_equal([512, 256, 128, 64, 32, 16, 8, 4, 2, 1], Rotor::Repo.chunk_sizes(1023, 13107))
+    # Many columns: 7 a row, at most 9362 rows a statement.
+    assert_equal([8192, 8192, 2048, 1024, 512, 32], Rotor::Repo.chunk_sizes(20000, 65535 / 7))
+    # A cap that is not a power of two: the largest power under it.
+    assert_equal([2, 2, 2, 2, 2, 2], Rotor::Repo.chunk_sizes(12, 3))
+    assert_equal(Array[Int].new, Rotor::Repo.chunk_sizes(0, 10))
   end
 
   # rotor#69: an insert that says what to do on a conflict.

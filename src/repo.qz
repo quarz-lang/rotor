@@ -197,11 +197,11 @@ class Repo
   end
 
   # Inserts the rows of `models` (of one class), their timestamps set
-  # first as [insert] sets them (one time for all), in one statement
-  # ([Rotor::Statement.insert_all]), or several when one would pass
-  # PostgreSQL's 65535 parameters, those in one transaction (the one
-  # open, or one of their own): the rows as they read back (their keys,
-  # the database's defaults), as models. Nothing is run for no models.
+  # first as [insert] sets them (one time for all), as
+  # `insert_all(Rotor::Statement.insert_all(models))` does (below: its
+  # statements, and their transaction): the rows as they read back
+  # (their keys, the database's defaults), as models. Nothing is run
+  # for no models.
   def insert_all[M <: Model](models: Array[M]) -> Array[M]
     return Array[M].new if models.empty?
     insert_all(Statement.insert_all(models))
@@ -216,10 +216,41 @@ class Repo
   # PostgreSQL does not promise that RETURNING follows the order of
   # the VALUES rows: match the rows to the models by a key when the
   # order matters.
+  #
+  # The statements. Each statement's text is prepared and kept by the
+  # connection (pg's statement cache), one per row count, and a cached
+  # insert of many rows holds much memory on the server (about 850 KiB
+  # for 1000 rows of 5 columns), so a plain insert and one with
+  # `do_nothing` of more than `SPLIT_ABOVE` (16) rows go in statements
+  # whose row counts are powers of two, the largest first (1000 rows:
+  # 512, 256, 128, 64, 32 and 8): at most one text per power for a
+  # table's columns, whatever the batches' sizes (rotor#137). A batch
+  # of 16 rows or fewer is one statement, as on its own: small texts
+  # cost little, and a split would cost round trips. A `do_update`
+  # keeps one statement for the whole batch: PostgreSQL refuses a statement whose rows conflict with each
+  # other there (21000, "cannot affect row a second time"), while rows
+  # in two statements would update in turn, so splitting would change
+  # that error into a success. Past PostgreSQL's 65535 parameters any
+  # insert is split, a `do_update` into as few statements as hold it:
+  # then two rows that conflict with each other are refused when they
+  # share a statement and update in turn when they do not, a known
+  # limit (rotor#145).
+  #
+  # Several statements run in one transaction: the one open (inside
+  # it, nothing of their own; a failure aborts that transaction, as any
+  # failed statement does), or else one of their own (BEGIN ... COMMIT,
+  # rolled back on a failure), so a failure in a later statement leaves
+  # nothing of the earlier ones. One statement runs as it is.
   def insert_all[M <: Model](insert: Insert[M]) -> Array[M] = insert_chunked(insert, MAX_PARAMS)
 
   # The most parameters PostgreSQL takes in one statement.
   MAX_PARAMS = 65535
+
+  # :nodoc:
+  # The most rows of a plain or `do_nothing` insert that go in one
+  # statement whatever their number ([insert_all]); a larger batch is
+  # split into statements of powers of two rows.
+  SPLIT_ABOVE = 16
 
   # :nodoc:
   # `insert_all` with statements of at most `max_params` parameters.
@@ -232,7 +263,17 @@ class Repo
     room = max_params - insert.conflict_params
     size = per_row == 0 ? stamped.size : room / per_row
     raise ArgumentError.new("`insert_all`: a row of #{per_row} parameters and a conflict clause of #{insert.conflict_params} pass #{max_params}") if size < 1
-    chunks = stamped.each_slice(size).to_a
+    chunks = if insert.updates? || stamped.size <= SPLIT_ABOVE
+               stamped.each_slice(size).to_a
+             else
+               out: Array[Array[M]] = []
+               at = 0
+               Repo.chunk_sizes(stamped.size, size).each do |n|
+                 out = out.push(stamped[at...(at + n)])
+                 at += n
+               end
+               out
+             end
     run_chunk = ->(r: Repo, ms: Array[M]) {
       sql, params = insert.with_models(ms).with_update_time.returning.to_sql
       r.adapter.query(sql, params).rows.map { |row| template.restore(Checkpoint.new(Hash[Symbol, Value?].new, [], nil)).loaded(Repo.values(row, columns)) }
@@ -243,6 +284,29 @@ class Repo
     else
       transaction { |tx| chunks.flat_map { |ms| run_chunk.call(tx, ms) } }
     end
+  end
+
+  # :nodoc:
+  # The row counts of the statements of an insert of `n` rows, at most
+  # `cap` each: powers of two, the largest first, each the largest that
+  # fits what is left and `cap` (`n`'s binary digits when `cap` is
+  # larger).
+  #
+  # ```
+  # Rotor::Repo.chunk_sizes(1000, 13107)   # => [512, 256, 128, 64, 32, 8]
+  # Rotor::Repo.chunk_sizes(5, 4)          # => [4, 1]
+  # Rotor::Repo.chunk_sizes(12, 3)         # => [2, 2, 2, 2, 2, 2]
+  # ```
+  def self.chunk_sizes(n: Int, cap: Int) -> Array[Int]
+    out: Array[Int] = []
+    left = n
+    while left > 0
+      c = 1
+      c = c * 2 while c * 2 <= left && c * 2 <= cap
+      out = out.push(c)
+      left -= c
+    end
+    out
   end
 
   # :nodoc:
