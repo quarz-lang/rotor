@@ -100,6 +100,16 @@ class Repo
   # taken_at: t}`), which a single key may take too; [ArgumentError]
   # for a Hash that names a column not in the key or leaves one out,
   # and for a value that is not a Hash with a composite key.
+  #
+  # A key's value is cast to its column's type as [Rotor::Query#where_key]
+  # casts it, so an id from a URL may be given as it came: a [String]
+  # that does not cast (`"abc"`, or a blank one, for an integer key)
+  # names no record and gives nil, while a value of a class the column
+  # never takes (a [Float] for an integer key) raises [ArgumentError].
+  # Several strings name the same row: surrounding blanks, a sign and
+  # leading zeros are accepted, so `"7"`, `" 7"`, `"+7"` and `"007"` all
+  # find id 7. Code that authorizes or caches by id does it by the key of
+  # the model found (`user.id`), not by the string it was given.
   def get[M <: Model](model: Type[M], id: Object) -> M?
     q = model.query
     t = q.table
@@ -113,13 +123,28 @@ class Repo
       if (missing = keys.find { |k| !named.include?(k) })
         raise ArgumentError.new("`get` of #{model.name}: no value for `#{missing}` of its primary key (#{keys.join(", ")})")
       end
-      keys.each { |k| q = q.where_key(k, given[k]?) }
+      keys.each do |k|
+        return nil if Repo.uncast?(t, k, given[k]?)
+        q = q.where_key(k, given[k]?)
+      end
       one(q)
     else
       if keys.size > 1
         raise ArgumentError.new("`get` of #{model.name}, whose primary key is composite: give a Hash of #{keys.join(", ")}")
       end
+      return nil if Repo.uncast?(t, keys[0], id)
       one(q.where_key(keys[0], id))
+    end
+  end
+
+  # :nodoc:
+  # Whether `value` is a [String] that key column `name` of `t` cannot
+  # cast ([Rotor::Query.key_value]): `get` finds no row for it.
+  def self.uncast?(t: TableInfo, name: Symbol, value: Object?) -> Bool
+    if (s = value.as?(String)) && (c = t.columns.find { |x| x.name == name })
+      Query.key_value(c, s).nil?
+    else
+      false
     end
   end
 

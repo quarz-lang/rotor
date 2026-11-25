@@ -138,6 +138,12 @@ class Query[T]
   def limit_value -> Int? = @limit
 
   # The rows whose column `name` is `value` (the repository's `get`).
+  # A value of the column's class is compared as it is; another is cast
+  # to the column's type first, as a changeset casts a parameter
+  # ([Rotor::Changeset.cast_value]): `"7"` and `" +007 "` both find the
+  # row whose integer key is 7. A value that does not cast (`"abc"` or
+  # a [Float] for an integer column, a blank [String]) raises
+  # [ArgumentError], naming the column and the value's class.
   def where_key(name: Symbol, value: Object?) -> Query[T]
     rows!("where_key")
     single!("where_key")
@@ -149,9 +155,26 @@ class Query[T]
     s = if value.nil?
           Sql.new([col, Piece::Text.new(" IS NULL")], Translator::IS, nil, nil, false)
         else
-          Sql.new([col, Piece::Text.new(" = "), Piece::Param.new(Binds.parameter(value))], Translator::CMP, nil, nil, false)
+          # (Compared with nil: a key may be `false`.)
+          key = Query.key_value(c, value)
+          raise ArgumentError.new("`#{table.name}.#{name}` (#{c.type.name}) does not take this #{value.class.name}") if key.nil?
+          Sql.new([col, Piece::Text.new(" = "), Piece::Param.new(Binds.parameter(key))], Translator::CMP, nil, nil, false)
         end
     copy(wheres: @wheres + [s])
+  end
+
+  # :nodoc:
+  # `value` as column `c` compares it ([where_key]): as it is when it is
+  # of the column's class ([Rotor::Changeset.same_class?], an array or a
+  # document too), else cast as a changeset casts a parameter
+  # ([Rotor::Changeset.cast_value]); nil when it does not cast, or casts
+  # to nothing (a blank [String]).
+  def self.key_value(c: Column, value: Object) -> Value?
+    if (v = value.as?(Value)) && Changeset.same_class?(c, v)
+      return v
+    end
+    ok, cast = Changeset.cast_value(c, value)
+    ok ? cast : nil
   end
 
   # The rows whose column `name` is one of `values`: `"name" =
