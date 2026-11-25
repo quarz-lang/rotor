@@ -69,7 +69,7 @@ class JoinTest < Test::Case
     q3 = for w in Writer.query, v in Visitor.query when v.name == w.name do v.id end
     check(q3, "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
     check(q3.count, "SELECT count(*) FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\"", [])
-    check(q3.limit(2), "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" LIMIT 2", [])
+    check(q3.limit(2), "SELECT \"w0\".\"name\", \"v1\".\"id\" FROM \"writers\" AS \"w0\" INNER JOIN \"visitors\" AS \"v1\" ON \"v1\".\"name\" = \"w0\".\"name\" LIMIT $1", [2])
   end
 
   def test_a_for_compares_a_nullable_column
