@@ -114,8 +114,8 @@ class CacheTest < Test::Case
     # Built in one task, run (here, put to SQL) in another.
     n = 3
     q = Task.spawn { Rack.where { id > n }.limit(2) }.await
-    assert_equal("#{S} WHERE \"id\" > $1 LIMIT 2", Task.spawn { q.to_sql[0] }.await)
-    check(q, "#{S} WHERE \"id\" > $1 LIMIT 2", [3])
+    assert_equal("#{S} WHERE \"id\" > $1 LIMIT $2", Task.spawn { q.to_sql[0] }.await)
+    check(q, "#{S} WHERE \"id\" > $1 LIMIT $2", [3, 2])
     ch = Channel[Rotor::Query[Rack]].new(1)
     ch.send(OPEN_RACKS)
     assert_equal(OPEN_RACKS.to_sql, ch.receive.to_sql)

@@ -80,7 +80,7 @@ end
 #
 # min = 18
 # q = QUser.where { age >= min }.order { name }.limit(10)
-# q.to_sql  # => ["SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE \"age\" >= $1 ORDER BY \"name\" LIMIT 10", [18]]
+# q.to_sql  # => ["SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE \"age\" >= $1 ORDER BY \"name\" LIMIT $2", [18, 10]]
 # ```
 #
 # `T` is what a row gives: the model, or what [select] projects.
@@ -440,7 +440,7 @@ class Query[T]
   # end
   #
   # LJob.where { !done }.order { id }.limit(1).for_update(skip_locked: true).to_sql[0]
-  # # => "SELECT \"id\", \"done\" FROM \"jobs\" WHERE NOT \"done\" ORDER BY \"id\" LIMIT 1 FOR UPDATE SKIP LOCKED"
+  # # => "SELECT \"id\", \"done\" FROM \"jobs\" WHERE NOT \"done\" ORDER BY \"id\" LIMIT $1 FOR UPDATE SKIP LOCKED"
   # ```
   def for_update(*, skip_locked: Bool = false, nowait: Bool = false) -> Query[T] = lock("for_update", "UPDATE", skip_locked, nowait)
 
@@ -1071,13 +1071,16 @@ class Query[T]
     end
   end
 
+  # ` LIMIT $n OFFSET $m`, both bound: a text that does not change with
+  # the numbers, so that paging through them does not fill the
+  # connection's statement cache with one text per page (rotor#137).
   private def window -> Array[Piece]
     out: Array[Piece] = []
     if n = @limit
-      out = out + [Piece::Text.new(" LIMIT #{n}")]
+      out = out + [Piece::Text.new(" LIMIT "), Piece::Param.new(n)]
     end
     if n = @offset
-      out = out + [Piece::Text.new(" OFFSET #{n}")]
+      out = out + [Piece::Text.new(" OFFSET "), Piece::Param.new(n)]
     end
     out
   end

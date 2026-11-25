@@ -327,7 +327,7 @@ SQL when the query is built, with the values it captured as parameters.
 min = 18
 q = User.where { age >= min && !email.nil? }.order { name }.desc.limit(10)
 q.to_sql
-# => ["SELECT \"id\", ... FROM \"users\" WHERE \"age\" >= $1 AND NOT \"email\" IS NULL ORDER BY \"name\" DESC LIMIT 10", [18]]
+# => ["SELECT \"id\", ... FROM \"users\" WHERE \"age\" >= $1 AND NOT \"email\" IS NULL ORDER BY \"name\" DESC LIMIT $2", [18, 10]]
 
 User.where { |u| ids.include?(u.id) }        # "id" = ANY($1), the array one parameter
 User.where { name.start_with?(prefix) }      # "name" LIKE $1, the prefix escaped
