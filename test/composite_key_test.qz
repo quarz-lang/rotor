@@ -132,7 +132,7 @@ class CompositeKeyTest < Test::Case
       c = PG.connect(server.url)
       begin
         # (Dropped first: PG_TEST_URL's server outlives a run.)
-        c.exec("DROP TABLE IF EXISTS c_notes, c_readings, c_switches, c_flags, c_lamps, c_vaults, c_vaults")
+        c.exec("DROP TABLE IF EXISTS c_notes, c_readings, c_switches, c_flags, c_lamps, c_vaults")
         models: Array[Type[Rotor::Model]] = [CReading, CSwitch, CFlag, CLamp, CVault]
         Rotor::Schema.create(Rotor::Repo.new(connection: c), models)
         c.exec("CREATE TABLE c_notes (id bigserial PRIMARY KEY, c_reading_id bigint NOT NULL)")
