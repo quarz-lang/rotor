@@ -226,15 +226,27 @@ class Repo
   # 512, 256, 128, 64, 32 and 8): at most one text per power for a
   # table's columns, whatever the batches' sizes (rotor#137). A batch
   # of 16 rows or fewer is one statement, as on its own: small texts
-  # cost little, and a split would cost round trips. A `do_update`
-  # keeps one statement for the whole batch: PostgreSQL refuses a statement whose rows conflict with each
-  # other there (21000, "cannot affect row a second time"), while rows
-  # in two statements would update in turn, so splitting would change
-  # that error into a success. Past PostgreSQL's 65535 parameters any
-  # insert is split, a `do_update` into as few statements as hold it:
-  # then two rows that conflict with each other are refused when they
-  # share a statement and update in turn when they do not, a known
-  # limit (rotor#145).
+  # cost little, and a split would cost round trips.
+  #
+  # A `do_update` is never split: PostgreSQL refuses a statement in
+  # which two rows conflict with each other (21000, "cannot affect row a
+  # second time"), while rows in two statements update in turn, and
+  # rotor cannot know from the model whether two different values are
+  # one key on the server (a citext or case-insensitive column, a `real`
+  # column, a column's precision). So a bulk `do_update` keeps one
+  # statement, and one cached text, per row count. Two rows whose target
+  # columns of `on_conflict(*columns)` hold the same values, as sent,
+  # none of them NULL, are refused before anything is sent, at every
+  # size ([ArgumentError] naming the columns), as PostgreSQL would refuse
+  # them in one statement whatever the columns' types (rotor#145); not
+  # with `where` (PostgreSQL accepts two rows of one key there when the
+  # condition leaves the existing row alone) nor with
+  # `on_conflict(constraint: ...)`, whose columns rotor does not know.
+  # Past PostgreSQL's 65535 parameters any insert is split, a
+  # `do_update` into as few statements as hold it: there, two rows that
+  # differ here but are one key on the server (`"A"` and `"a"` under
+  # citext) are refused when they share a statement and update in turn
+  # when they do not.
   #
   # Several statements run in one transaction: the one open (inside
   # it, nothing of their own; a failure aborts that transaction, as any
@@ -263,6 +275,8 @@ class Repo
     room = max_params - insert.conflict_params
     size = per_row == 0 ? stamped.size : room / per_row
     raise ArgumentError.new("`insert_all`: a row of #{per_row} parameters and a conflict clause of #{insert.conflict_params} pass #{max_params}") if size < 1
+    keys = insert.update_keys
+    Repo.refuse_same_keys(stamped.map { |m| m.as(Model) }, keys) unless keys.empty?
     chunks = if insert.updates? || stamped.size <= SPLIT_ABOVE
                stamped.each_slice(size).to_a
              else
@@ -284,6 +298,45 @@ class Repo
     else
       transaction { |tx| chunks.flat_map { |ms| run_chunk.call(tx, ms) } }
     end
+  end
+
+  # :nodoc:
+  # Raises [ArgumentError] when two of `models` have, in every column of
+  # `keys`, the same value as sent (pg's parameter text), none of them
+  # NULL nor a float's NaN: the rows of one `do_update` that PostgreSQL
+  # refuses to update twice in one statement, whatever the column's
+  # type (rotor#145). Names the columns, not the values.
+  def self.refuse_same_keys(models: Array[Model], keys: Array[Symbol]) -> Void
+    seen: Hash[Array[Bytes], Bool] = {}
+    models.each do |m|
+      sent = Repo.sent_key(m, keys)
+      next if sent.nil?
+      if seen.key?(sent)
+        names = keys.map { |k| "`#{k}`" }
+        listed = names.size == 1 ? names[0] : "#{names.take(names.size - 1).join(", ")} and #{names.last? || ""}"
+        raise ArgumentError.new("`insert_all` with `do_update`: two rows of the batch have the same #{listed} " +
+                                "(PostgreSQL refuses to update a row twice in one statement)")
+      end
+      seen = seen.put(sent, true)
+    end
+  end
+
+  # :nodoc:
+  # The values of `m`'s columns `keys` as pg sends them, or nil when one
+  # is NULL (no key) or a float's NaN (as Quarz's `==` says, not the
+  # same as another).
+  def self.sent_key(m: Model, keys: Array[Symbol]) -> Array[Bytes]?
+    values = m.to_h
+    out: Array[Bytes] = []
+    keys.each do |k|
+      v = values[k]?
+      return nil if v.nil?
+      if (f = v.as?(Float)) && f.nan?
+        return nil
+      end
+      out = out.push(PG::Connection.encode(v) || Bytes.new)
+    end
+    out
   end
 
   # :nodoc:
