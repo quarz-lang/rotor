@@ -98,6 +98,20 @@ class Sensor < Rotor::Model
   end
 end
 
+# A key of each class, each with a unique index of its own (rotor#145).
+class Keyed < Rotor::Model
+  table "keyed" do
+    column :id, Int, primary: true
+    column :k_int, Int, null: true
+    column :k_text, String, null: true
+    column :k_date, Date, null: true
+    column :k_bytes, Bytes, null: true
+    column :k_time, Time, null: true
+    column :k_dec, Decimal, null: true
+    column :v, Int, default: 0
+  end
+end
+
 # No timestamps (rotor#69's update time).
 class Tallied < Rotor::Model
   table "tallied" do
@@ -174,7 +188,7 @@ class RepoTest < Test::Case
   # (Dropped first: PG_TEST_URL's server outlives a run, and CI runs the
   # tests twice, interpreted and compiled.)
   SCHEMA = <<~SQL
-    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors, tallied;
+    DROP TABLE IF EXISTS members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors, tallied, keyed;
     CREATE TABLE members (
       id bigserial PRIMARY KEY,
       name text NOT NULL,
@@ -199,7 +213,10 @@ class RepoTest < Test::Case
     CREATE TABLE documents (id bigserial PRIMARY KEY, body jsonb NOT NULL, raw json, day date NOT NULL);
     CREATE TABLE arrays (id bigserial PRIMARY KEY, tags text[], counts bigint[], ratios double precision[], flags boolean[], stamps timestamptz[], grid bigint[][]);
     CREATE TABLE sensors (id bigserial PRIMARY KEY, serial text NOT NULL UNIQUE, name text NOT NULL, hits bigint NOT NULL DEFAULT 0, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);
-    CREATE TABLE tallied (id bigserial PRIMARY KEY, label text NOT NULL UNIQUE, n bigint NOT NULL)
+    CREATE TABLE tallied (id bigserial PRIMARY KEY, label text NOT NULL UNIQUE, n bigint NOT NULL);
+    CREATE TABLE keyed (id bigserial PRIMARY KEY, k_int bigint UNIQUE, k_text text UNIQUE, k_date date UNIQUE, k_bytes bytea UNIQUE,
+                        k_time timestamptz UNIQUE, k_dec numeric UNIQUE, v bigint NOT NULL DEFAULT 0,
+                        CONSTRAINT keyed_int_text UNIQUE (k_int, k_text))
   SQL
 
   def self.startup
@@ -233,7 +250,7 @@ class RepoTest < Test::Case
   def with_repo(&: (Rotor::Repo) -> Void) -> Void
     c = PG.connect(url)
     begin
-      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors, tallied RESTART IDENTITY")
+      c.exec("TRUNCATE members, notes, authors, volumes, remarks, readings, genres, volume_genres, legacy, documents, arrays, sensors, tallied, keyed RESTART IDENTITY")
       yield Rotor::Repo.new(connection: c)
     ensure
       c.close
@@ -868,10 +885,155 @@ class RepoTest < Test::Case
       assert_equal(["first"], repo.all(Sensor.where { serial == "x" }).map { |s| s.name })
       assert_equal(16, repo.count(Sensor.query))
       repo.adapter.query("TRUNCATE sensors", [])
-      e = assert_raise(PG::ServerError) { repo.insert_all(Rotor::Statement.insert_all(batch).on_conflict(:serial).do_update { |old, new| {name: new.name} }) }.as(PG::ServerError)
-      assert_equal("21000", e.code)
+      # (`do_update`: refused before anything is sent since rotor#145, where
+      # main's server answered 21000.)
+      upsert = Rotor::Statement.insert_all(batch).on_conflict(:serial).do_update { |old, new| {name: new.name} }
+      assert_raise_message(/two rows of the batch have the same `serial`/) { repo.insert_all(upsert) }
+      sql, params = upsert.with_models(batch.map { |m| Rotor::Repo.stamped(m) }).with_update_time.returning.to_sql
+      assert_equal("21000", assert_raise(PG::ServerError) { repo.adapter.query(sql, params) }.as(PG::ServerError).code)
       assert_equal(0, repo.count(Sensor.query))
     end
+  end
+
+  # rotor#145: the rows of a `do_update` keyed by `col`, one per value.
+  def self.keyed_rows(col: Symbol, n: Int, value: (Int) -> Object?) -> Array[Keyed]
+    (1..n).map do |i|
+      h: Hash[Symbol, Object?] = {v: i}
+      Keyed.new.with_values(h.put(col, value.call(i)))
+    end
+  end
+
+  def self.upsert_by(rows: Array[Keyed], *cols: Symbol) -> Rotor::Insert[Keyed]
+    Rotor::Statement.insert_all(rows).on_conflict(*cols).do_update { |old, new| {v: new.v} }
+  end
+
+  # rotor#145: two rows with the same target values, as sent, are refused
+  # before anything is sent, at every size; PostgreSQL refuses each of
+  # these batches in one statement (21000), as main sends it.
+  def test_do_update_rows_with_the_same_key_are_refused
+    with_repo do |repo|
+      t = Time.utc(2026, 1, 2, 3, 4, 5)
+      cases: Array[[Rotor::Insert[Keyed], String]] = [
+        [RepoTest.upsert_by(RepoTest.keyed_rows(:k_int, 3, ->(i: Int) { (i == 2 ? 2 : 1).as(Object) }), :k_int), "`k_int`"],
+        [RepoTest.upsert_by(RepoTest.keyed_rows(:k_text, 3, ->(i: Int) { (i == 2 ? "b" : "a").as(Object) }), :k_text), "`k_text`"],
+        [RepoTest.upsert_by(RepoTest.keyed_rows(:k_time, 3, ->(i: Int) { (i == 2 ? t + 1.second : t).as(Object) }), :k_time), "`k_time`"],
+        [RepoTest.upsert_by(RepoTest.keyed_rows(:k_dec, 3, ->(i: Int) { Decimal.parse(i == 2 ? "2" : "1.50").as(Object) }), :k_dec), "`k_dec`"],
+        [RepoTest.upsert_by((1..40).map { |i| Keyed.new(k_int: 100 + i % 20, k_text: "x#{i % 20}") }, :k_int, :k_text), "`k_int` and `k_text`"]
+      ]
+      cases.each do |pair|
+        ins, names = pair
+        rec = Recorder.new(repo.adapter)
+        e = assert_raise(ArgumentError) { Rotor::Repo.new(rec).insert_all(ins) }
+        assert_equal("`insert_all` with `do_update`: two rows of the batch have the same #{names} " +
+                     "(PostgreSQL refuses to update a row twice in one statement)", e.message)
+        assert_equal(Array[String].new, rec.log)
+        # As main sends it, one statement: the server refuses it.
+        sql, params = ins.returning.to_sql
+        s = assert_raise(PG::ServerError) { repo.adapter.query(sql, params) }.as(PG::ServerError)
+        assert_equal("21000", s.code, names)
+      end
+      assert_equal(0, repo.count(Keyed.query))
+    end
+  end
+
+  # rotor#145: what is not refused, and goes as main sends it.
+  def test_do_update_batches_kept_as_they_were
+    with_repo do |repo|
+      sent = ->(ins: Rotor::Insert[Keyed]) do
+        rec = Recorder.new(repo.adapter)
+        Rotor::Repo.new(rec).insert_all(ins)
+        rec.log
+      end
+      main = ->(ins: Rotor::Insert[Keyed]) { [ins.with_update_time.returning.to_sql[0]] }
+      # Keyed by a String or an Int, 100 rows: one statement, as on main.
+      by_text = RepoTest.upsert_by(RepoTest.keyed_rows(:k_text, 100, ->(i: Int) { "s#{i}".as(Object) }), :k_text)
+      assert_equal(main.call(by_text), sent.call(by_text))
+      by_int = RepoTest.upsert_by(RepoTest.keyed_rows(:k_int, 100, ->(i: Int) { i.as(Object) }), :k_int)
+      assert_equal(main.call(by_int), sent.call(by_int))
+      # Two NULLs in a Date key: not refused, not split.
+      with_nulls = RepoTest.upsert_by(RepoTest.keyed_rows(:k_date, 19, ->(i: Int) { i > 17 ? nil : Date.new(2026, 1, i).as(Object) }), :k_date)
+      assert_equal(main.call(with_nulls), sent.call(with_nulls))
+      # A `where`: same keys not refused (an existing row the condition
+      # leaves alone takes both), and one statement.
+      repo.insert(Keyed.new(k_int: 500))
+      dup = Rotor::Statement.insert_all(RepoTest.keyed_rows(:k_int, 2, ->(i: Int) { 500.as(Object) })).on_conflict(:k_int).do_update { |old, new| {v: new.v} }.where { |old, new| old.v > 99 }
+      assert_equal(main.call(dup), sent.call(dup))
+      assert_equal([0], repo.all(Keyed.where { |k| k.k_int == 500 }).map { |k| k.v })
+      wide = Rotor::Statement.insert_all(RepoTest.keyed_rows(:k_date, 17, ->(i: Int) { Date.new(2027, 1, i).as(Object) })).on_conflict(:k_date).do_update { |old, new| {v: new.v} }.where { |old, new| old.v > 99 }
+      assert_equal(main.call(wide), sent.call(wide))
+      # `constraint:`: as main sends it, the server deciding.
+      con = Rotor::Statement.insert_all((1..17).map { |i| Keyed.new(k_int: 1000 + i, k_text: "c#{i}") }).on_conflict(constraint: "keyed_int_text").do_update { |old, new| {v: new.v} }
+      assert_equal(main.call(con), sent.call(con))
+      # Two rows of one key there: not refused here; the server decides.
+      twice = Rotor::Statement.insert_all([Keyed.new(k_int: 7, k_text: "d"), Keyed.new(k_int: 7, k_text: "d")]).on_conflict(constraint: "keyed_int_text").do_update { |old, new| {v: new.v} }
+      rec = Recorder.new(repo.adapter)
+      assert_raise(PG::ServerError) { Rotor::Repo.new(rec).insert_all(twice) }
+      assert_equal(main.call(twice), rec.log)
+    end
+  end
+
+  # rotor#145: a `do_update` is never split, whatever its keys' class:
+  # above 16 rows, the statements are main's.
+  def test_do_update_batches_are_not_split
+    with_repo do |repo|
+      sent = ->(ins: Rotor::Insert[Keyed]) do
+        rec = Recorder.new(repo.adapter)
+        Rotor::Repo.new(rec).insert_all(ins)
+        rec.log
+      end
+      main = ->(ins: Rotor::Insert[Keyed]) { [ins.with_update_time.returning.to_sql[0]] }
+      by_date = RepoTest.upsert_by(RepoTest.keyed_rows(:k_date, 17, ->(i: Int) { Date.new(2026, 2, i).as(Object) }), :k_date)
+      assert_equal(main.call(by_date), sent.call(by_date))
+      by_bytes = RepoTest.upsert_by(RepoTest.keyed_rows(:k_bytes, 100, ->(i: Int) { Bytes.from([i]).as(Object) }), :k_bytes)
+      assert_equal(main.call(by_bytes), sent.call(by_bytes))
+      # Again: every row updated, once.
+      assert_equal(main.call(by_bytes), sent.call(by_bytes))
+      assert_equal(117, repo.count(Keyed.query))
+      # Past the parameter limit (a cap of 9: 4 rows of 2), as before: as
+      # few statements as hold it.
+      rec = Recorder.new(repo.adapter)
+      Rotor::Repo.new(rec).insert_chunked(RepoTest.upsert_by(RepoTest.keyed_rows(:k_int, 9, ->(i: Int) { (2000 + i).as(Object) }), :k_int), 9)
+      assert_equal(["BEGIN", "4", "4", "1", "COMMIT"], shapes(rec.log))
+    end
+  end
+
+  # rotor#145: "A" and "a" under a case-insensitive collation are one key
+  # on the server only: not refused here, and sent as one statement, so
+  # the server refuses the batch as on main (21000), the two rows 16
+  # apart.
+  def test_one_key_on_the_server_only
+    with_repo do |repo|
+      begin
+        repo.adapter.query("CREATE COLLATION IF NOT EXISTS rt_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)", [])
+      rescue PG::ServerError => e
+        omit("the test server cannot create a nondeterministic collation (#{e.code})")
+      end
+      repo.adapter.query("DROP TABLE IF EXISTS keyed_ci", [])
+      repo.adapter.query("CREATE TABLE keyed_ci (id bigserial PRIMARY KEY, k_text text COLLATE rt_ci UNIQUE, k_int bigint, k_date date, " +
+                         "k_bytes bytea, k_time timestamptz, k_dec numeric, v bigint NOT NULL DEFAULT 0)", [])
+      begin
+        rows = RepoTest.keyed_rows(:k_text, 17, ->(i: Int) { (i == 1 ? "A" : i == 17 ? "a" : "k#{i}").as(Object) })
+        ins = Rotor::Statement.insert_all(rows).on_conflict(:k_text).do_update { |old, new| {v: new.v} }
+        sql = ins.with_update_time.returning.to_sql[0].sub("\"keyed\"", "\"keyed_ci\"")
+        rec = Recorder.new(repo.adapter)
+        r = Rotor::Repo.new(rec)
+        assert_equal(Array[String].new, rec.log)
+        e = assert_raise(PG::ServerError) { r.adapter.query(sql, ins.with_update_time.returning.to_sql[1]) }.as(PG::ServerError)
+        assert_equal("21000", e.code)
+        # (The same batch through insert_all on `keyed`: one statement.)
+        rec2 = Recorder.new(repo.adapter)
+        Rotor::Repo.new(rec2).insert_all(ins)
+        assert_equal(["17"], shapes(rec2.log))
+      ensure
+        repo.adapter.query("DROP TABLE IF EXISTS keyed_ci", [])
+      end
+    end
+  end
+
+  def test_sent_key
+    assert_nil(Rotor::Repo.sent_key(Keyed.new(k_int: nil), [:k_int]))
+    assert_equal([b"1", b"a"], Rotor::Repo.sent_key(Keyed.new(k_int: 1, k_text: "a"), [:k_int, :k_text]))
+    assert_equal([b"1.50"], Rotor::Repo.sent_key(Keyed.new(k_dec: Decimal.parse("1.50")), [:k_dec]))
   end
 
   def test_chunk_sizes

@@ -381,9 +381,13 @@ class Insert[M <: Model] < Changes[M]
   @conflict: Bool
   # The columns `do_update`'s block sets (nil: no `do_update`).
   @update: Array[Symbol]?
+  # The conflict's target columns, for a `do_update` of
+  # `on_conflict(*columns)` (empty otherwise: none, or a constraint).
+  @keys: Array[Symbol]
 
   # (Made by [Rotor::Statement.insert] and the methods below.)
-  def initialize(@models: Array[M], @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?)
+  def initialize(@models: Array[M], @action: Array[Piece], @where: Array[Piece], @conflict: Bool, @update: Array[Symbol]?,
+                 @keys: Array[Symbol] = [])
     super(@models[0].table_info, Statement.insert_pieces(@models.map { |m| m.as(Model) }) + @action + @where, nil, Statement.model_rows(@models[0]))
   end
 
@@ -401,9 +405,15 @@ class Insert[M <: Model] < Changes[M]
   def updates? -> Bool = !@update.nil?
 
   # :nodoc:
+  # The target columns of its `do_update` when it names columns and has
+  # no `where` (empty otherwise): those whose rows PostgreSQL refuses to
+  # update twice in one statement ([Rotor::Repo#insert_all]).
+  def update_keys -> Array[Symbol] = @where.empty? ? @keys : []
+
+  # :nodoc:
   # The same insert of `model`'s row (the repository's, its timestamps
   # set).
-  def with_models(models: Array[M]) -> Insert[M] = Insert[M].new(models, @action, @where, @conflict, @update)
+  def with_models(models: Array[M]) -> Insert[M] = Insert[M].new(models, @action, @where, @conflict, @update, @keys)
 
   # :nodoc:
   # The parameters its conflict clause takes (`do_update`'s and
@@ -420,7 +430,7 @@ class Insert[M <: Model] < Changes[M]
     cols = @update
     return self if u.nil? || cols.nil? || cols.include?(u)
     name = Dialect.quote(u.to_s)
-    Insert[M].new(@models, @action + [Piece::Text.new(", #{name} = EXCLUDED.#{name}").as(Piece)], @where, @conflict, cols + [u])
+    Insert[M].new(@models, @action + [Piece::Text.new(", #{name} = EXCLUDED.#{name}").as(Piece)], @where, @conflict, cols + [u], @keys)
   end
 
   # On a conflict of these columns (`ON CONFLICT ("a", "b")`: the
@@ -435,7 +445,7 @@ class Insert[M <: Model] < Changes[M]
       raise ArgumentError.new("`on_conflict`: `#{t.name}` has no column `#{c}`") unless t.columns.any? { |x| x.name == c }
     end
     target = columns.empty? ? " ON CONFLICT" : " ON CONFLICT (#{columns.map { |c| Dialect.quote(c.to_s) }.join(", ")})"
-    Conflict[M].new(@models, target, columns.empty?)
+    Conflict[M].new(@models, target, columns.empty?, columns)
   end
 
   # On a conflict of the constraint named `constraint` (`ON CONFLICT ON
@@ -461,7 +471,7 @@ class Insert[M <: Model] < Changes[M]
       [tr.sql(e), tr.guards]
     end
     s = Binds.fill_sql(kept, cond.captures)
-    Insert[M].new(@models, @action, [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, @update)
+    Insert[M].new(@models, @action, [Piece::Text.new(" WHERE ").as(Piece)] + Statement.conflict_columns(t, s.pieces), true, @update, @keys)
   end
 
   private def conflicting! -> Void
@@ -477,9 +487,11 @@ class Conflict[M <: Model]
   @target: String
   # (No target named: `do_nothing` only.)
   @any: Bool
+  # The target's columns (none for a constraint).
+  @columns: Array[Symbol]
 
   # (Made by [Rotor::Insert#on_conflict].)
-  def initialize(@models: Array[M], @target: String, @any: Bool)
+  def initialize(@models: Array[M], @target: String, @any: Bool, @columns: Array[Symbol] = [])
   end
 
   # Nothing: the conflicting row is left as it is, and the insert gives
@@ -503,6 +515,6 @@ class Conflict[M <: Model]
       tr, e = Translator.of(sources, set.expr, set.captures, set.file)
       [Statement.conflict_columns(t, Statement.set_list(tr, e, set.file, t, name, "do_update")), tr.guards]
     end
-    Insert[M].new(@models, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), [], true, Statement.set_columns(set.expr, set.file))
+    Insert[M].new(@models, [Piece::Text.new("#{@target} DO UPDATE SET ").as(Piece)] + Binds.fill(sets, set.captures), [], true, Statement.set_columns(set.expr, set.file), @columns)
   end
 end
